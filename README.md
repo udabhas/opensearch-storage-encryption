@@ -1,0 +1,1 @@
+# opensearch-storage-encryption
