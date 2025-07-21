@@ -67,6 +67,7 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
     }
 
     private IndexInput routeSpecialFile(String name, String extension, IOContext context) throws IOException {
+        
         // MERGE context: Always use NIOFS for sequential, one-time access
         if (context.context() == Context.MERGE) {
             LOGGER.info("Routing {} to NIOFS for merge operation", name);

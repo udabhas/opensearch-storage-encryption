@@ -9,10 +9,12 @@ import java.security.InvalidKeyException;
 import java.security.Key;
 import java.security.NoSuchAlgorithmException;
 import java.security.Provider;
+import java.security.spec.AlgorithmParameterSpec;
 import java.util.Arrays;
 
 import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
+import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.IvParameterSpec;
 
 /**
@@ -24,6 +26,21 @@ import javax.crypto.spec.IvParameterSpec;
  * @opensearch.internal
  */
 public class AesCipherFactory {
+
+    public enum CipherType {
+        GCM("AES/GCM/NoPadding"),
+        CTR("AES/CTR/NoPadding");
+
+        private final String transformation;
+
+        CipherType(String transformation) {
+            this.transformation = transformation;
+        }
+
+        public String getTransformation() {
+            return transformation;
+        }
+    }
 
     /** AES block size in bytes. Required for counter calculations. */
     public static final int AES_BLOCK_SIZE_BYTES = 16;
@@ -38,23 +55,35 @@ public class AesCipherFactory {
 
     /**
      * Returns a new Cipher instance configured for AES/CTR/NoPadding using the given provider.
+     * Defaults to CTR for backward compatibility.
      *
      * @param provider The JCE provider to use (e.g., SunJCE, BouncyCastle)
      * @return A configured {@link Cipher} instance
      * @throws RuntimeException If the algorithm or padding is not supported
      */
     public static Cipher getCipher(Provider provider) {
+        return getCipher(CipherType.CTR, provider);
+    }
+
+    /**
+     * Returns a new Cipher instance configured for the specified cipher type.
+     *
+     * @param cipherType The cipher type (GCM or CTR)
+     * @param provider The JCE provider to use (e.g., SunJCE, BouncyCastle)
+     * @return A configured {@link Cipher} instance
+     * @throws RuntimeException If the algorithm or padding is not supported
+     */
+    public static Cipher getCipher(CipherType cipherType, Provider provider) {
         try {
-            return Cipher.getInstance("AES/CTR/NoPadding", provider);
+            return Cipher.getInstance(cipherType.getTransformation(), provider);
         } catch (NoSuchPaddingException | NoSuchAlgorithmException e) {
-            throw new RuntimeException("Failed to get cipher instance", e);
+            throw new RuntimeException("Failed to get cipher instance for " + cipherType, e);
         }
     }
 
     /**
      * Initializes a cipher for encryption or decryption, using an IV adjusted for the given position.
-     * The last 4 bytes of the IV are treated as a counter, and are adjusted to reflect the block offset.
-     * This allows for seeking into an encrypted stream without re-processing prior blocks.
+     * Defaults to CTR cipher type for backward compatibility.
      *
      * @param cipher The cipher instance to initialize
      * @param key The symmetric key (e.g., AES key)
@@ -64,21 +93,41 @@ public class AesCipherFactory {
      * @throws RuntimeException If cipher initialization fails
      */
     public static void initCipher(Cipher cipher, Key key, byte[] iv, int opmode, long newPosition) {
+        initCipher(CipherType.CTR, cipher, key, iv, opmode, newPosition);
+    }
+
+    /**
+     * Initializes a cipher for encryption or decryption based on cipher type.
+     *
+     * @param cipherType The cipher type (GCM or CTR)
+     * @param cipher The cipher instance to initialize
+     * @param key The symmetric key (e.g., AES key)
+     * @param iv The base IV, typically 16 bytes long
+     * @param opmode Cipher.ENCRYPT_MODE or Cipher.DECRYPT_MODE
+     * @param newPosition The position in the stream to begin processing from
+     * @throws RuntimeException If cipher initialization fails
+     */
+    public static void initCipher(CipherType cipherType, Cipher cipher, Key key, byte[] iv, int opmode, long newPosition) {
         try {
             byte[] ivCopy = Arrays.copyOf(iv, iv.length);
-            int blockOffset = (int) (newPosition / AesCipherFactory.AES_BLOCK_SIZE_BYTES);
+            AlgorithmParameterSpec spec;
 
-            ivCopy[AesCipherFactory.IV_ARRAY_LENGTH - 1] = (byte) blockOffset;
-            ivCopy[AesCipherFactory.IV_ARRAY_LENGTH - 2] = (byte) (blockOffset >>> 8);
-            ivCopy[AesCipherFactory.IV_ARRAY_LENGTH - 3] = (byte) (blockOffset >>> 16);
-            ivCopy[AesCipherFactory.IV_ARRAY_LENGTH - 4] = (byte) (blockOffset >>> 24);
+            if (cipherType == CipherType.GCM) {
+                spec = new GCMParameterSpec(128, ivCopy);
+            } else {
+                int blockOffset = (int) (newPosition / AES_BLOCK_SIZE_BYTES) + 2;  // Add 2 to match GCM counter block 2
+                ivCopy[IV_ARRAY_LENGTH - 1] = (byte) blockOffset;
+                ivCopy[IV_ARRAY_LENGTH - 2] = (byte) (blockOffset >>> 8);
+                ivCopy[IV_ARRAY_LENGTH - 3] = (byte) (blockOffset >>> 16);
+                ivCopy[IV_ARRAY_LENGTH - 4] = (byte) (blockOffset >>> 24);
+                spec = new IvParameterSpec(ivCopy);
+            }
 
-            IvParameterSpec spec = new IvParameterSpec(ivCopy);
             cipher.init(opmode, key, spec);
 
-            // Skip over any partial block offset using dummy update
-            if (newPosition % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-                cipher.update(ZERO_SKIP, 0, (int) (newPosition % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+            // Skip over any partial block offset using dummy update (CTR only)
+            if (cipherType == CipherType.CTR && newPosition % AES_BLOCK_SIZE_BYTES > 0) {
+                cipher.update(ZERO_SKIP, 0, (int) (newPosition % AES_BLOCK_SIZE_BYTES));
             }
         } catch (InvalidAlgorithmParameterException | InvalidKeyException e) {
             throw new RuntimeException("Failed to initialize cipher", e);

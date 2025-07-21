@@ -11,6 +11,7 @@ import java.nio.file.Path;
 
 import org.apache.lucene.store.OutputStreamIndexOutput;
 import org.opensearch.common.SuppressForbidden;
+import org.opensearch.index.store.cipher.JavaNativeCipher;
 import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 
 /**
@@ -99,7 +100,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
         private void processAndWrite(byte[] data, int offset, int length) throws IOException {
             try {
-                byte[] encrypted = OpenSslNativeCipher.encrypt(key, iv, slice(data, offset, length), streamOffset);
+                byte[] encrypted = OpenSslNativeCipher.encryptGCTR(key, iv, slice(data, offset, length), streamOffset);
+//                byte[] encrypted = JavaNativeCipher.encryptGCMJava(key,iv,slice(data, offset, length), streamOffset);
                 out.write(encrypted);
                 streamOffset += length;
             } catch (Throwable t) {

@@ -6,8 +6,11 @@ package org.opensearch.index.store;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.opensearch.index.store.cipher.OpenSslNativeCipher.computeOffsetIV;
+import static org.opensearch.index.store.cipher.OpenSslNativeCipher.computeOffsetIVForGCM;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.Provider;
 import java.security.Security;
@@ -24,8 +27,12 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.RandomAccessInput;
 import org.apache.lucene.tests.mockfile.ExtrasFS;
+import org.apache.lucene.tests.util.TestUtil;
 import org.opensearch.common.Randomness;
+import org.opensearch.index.store.cipher.JavaNativeCipher;
+import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 import org.opensearch.index.store.iv.KeyIvResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 
@@ -158,5 +165,48 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
             writer.join();
             reader.join();
         } */
+    }
+
+    public void testEncryptGCTRDecryptCTR() throws Throwable {
+        // Use fixed values for debugging
+        byte[] key = new byte[32];
+        byte[] iv = new byte[16];
+        Arrays.fill(key, (byte)0x42);  // Fill with known value
+        Arrays.fill(iv, (byte)0x24);   // Fill with known value
+
+        String plaintext = "Hello World! 1234567890";
+        byte[] input = plaintext.getBytes(StandardCharsets.UTF_8);
+         for(long off = 0L; off<50;off++) {
+             // Encrypt
+             byte[] encrypted = OpenSslNativeCipher.encryptGCTR(key, iv, input, off);
+
+             // Decrypt
+             byte[] decrypted = OpenSslNativeCipher.decryptCTR(key, iv, encrypted, off);
+             assertArrayEquals("Failed at offset " + off, input, decrypted);
+         }
+    }
+
+    public void testEncryptGCTRDecryptCTRAtDifferentOffsets() throws Throwable {
+        byte[] key = new byte[32];
+        byte[] iv = new byte[16];
+        Arrays.fill(key, (byte) 0x42);
+        Arrays.fill(iv, (byte) 0x24);
+
+        String plaintext = "Hello World! 1234567890";
+        byte[] input = plaintext.getBytes(StandardCharsets.UTF_8);
+
+        // Test at different offsets
+        long[] testOffsets = {
+                0L,
+                16L,
+                1000L,
+                8192L};
+
+        for (long offset : testOffsets) {
+            byte[] encrypted = OpenSslNativeCipher.encryptGCTR(key, iv, input, offset);
+            byte[] decrypted = OpenSslNativeCipher.decryptCTR(key, iv, encrypted, offset);
+
+            assertArrayEquals("Failed at offset " + offset, input, decrypted);
+        }
     }
 }
