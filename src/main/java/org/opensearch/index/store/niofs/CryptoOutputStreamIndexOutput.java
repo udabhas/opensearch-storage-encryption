@@ -7,6 +7,8 @@ package org.opensearch.index.store.niofs;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
 
 import org.apache.lucene.store.OutputStreamIndexOutput;
@@ -41,20 +43,29 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, key, iv), CHUNK_SIZE);
     }
 
+    @SuppressForbidden(reason = "temporary bypass")
     private static class EncryptedOutputStream extends FilterOutputStream {
 
         private final byte[] key;
         private final byte[] iv;
         private final byte[] buffer;
+        private final Arena arena;
+        private final MemorySegment cipher;
         private int bufferPosition = 0;
         private long streamOffset = 0;
         private boolean isClosed = false;
 
-        EncryptedOutputStream(OutputStream os, byte[] key, byte[] iv) {
+        EncryptedOutputStream(OutputStream os, byte[] key, byte[] iv) throws IOException {
             super(os);
             this.key = key;
             this.iv = iv;
             this.buffer = new byte[BUFFER_SIZE];
+            this.arena = Arena.ofShared();
+            try {
+                this.cipher = OpenSslNativeCipher.initGCMCipher(key, iv, 0, arena);
+            } catch (Throwable t) {
+                throw new IOException("Failed to initialize GCM cipher", t);
+            }
         }
 
         @Override
@@ -100,8 +111,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
         private void processAndWrite(byte[] data, int offset, int length) throws IOException {
             try {
-                byte[] encrypted = OpenSslNativeCipher.encryptGCTR(key, iv, slice(data, offset, length), streamOffset);
-//                byte[] encrypted = JavaNativeCipher.encryptGCMJava(key,iv,slice(data, offset, length), streamOffset);
+                byte[] encrypted = OpenSslNativeCipher.encryptGCMUpdate(cipher, slice(data, offset, length), arena);
                 out.write(encrypted);
                 streamOffset += length;
             } catch (Throwable t) {
@@ -125,12 +135,28 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             try {
                 checkClosed();
                 flushBuffer();
-                // Lucene writes footer here.
-                // this will also flush the buffer.
+                
+                try {
+                    byte[] finalBytes = OpenSslNativeCipher.finalizeGCMCipher(cipher, arena);
+                    if (finalBytes.length > 0) {
+                        out.write(finalBytes);
+                    }
+                } catch (Throwable t) {
+                    throw new IOException("Failed to finalize cipher", t);
+                }
+                
                 super.close();
             } catch (IOException e) {
                 exception = e;
             } finally {
+                try {
+                    OpenSslNativeCipher.EVP_CIPHER_CTX_free.invoke(cipher);
+                    arena.close();
+                } catch (Throwable t) {
+                    if (exception == null) {
+                        exception = new IOException("Failed to cleanup cipher resources", t);
+                    }
+                }
                 isClosed = true;
             }
 
