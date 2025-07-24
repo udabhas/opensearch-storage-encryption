@@ -131,12 +131,13 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             readLength -= bytesRead;
         }
     }
+
     @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
     private int read(ByteBuffer dst, long position) throws IOException {
         int toRead = dst.remaining();
         long blockAlignedPos = (position / 16) * 16;
         int prefixDiscard = (int) (position % 16);
-        
+
         // Read enough blocks to cover the requested data
         int blocksNeeded = (prefixDiscard + toRead + 15) / 16;
         int paddedRead = blocksNeeded * 16;
@@ -156,24 +157,20 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         tmpBuffer.get(encryptedData);
 
         try {
-            byte[] decrypted = OpenSslNativeCipher.decryptCTR(
-                    keyResolver.getDataKey().getEncoded(),
-                    keyResolver.getIvBytes(),
-                    encryptedData,
-                    blockAlignedPos
-            );
+            byte[] decrypted = OpenSslNativeCipher
+                .decryptCTR(keyResolver.getDataKey().getEncoded(), keyResolver.getIvBytes(), encryptedData, blockAlignedPos);
 
-//            byte[] decrypted = JavaNativeCipher.decryptCTRJava(
-//                    keyResolver.getDataKey().getEncoded(),
-//                    keyResolver.getIvBytes(),
-//                    encryptedData,
-//                    blockAlignedPos
-//            );
+            // byte[] decrypted = JavaNativeCipher.decryptCTRJava(
+            // keyResolver.getDataKey().getEncoded(),
+            // keyResolver.getIvBytes(),
+            // encryptedData,
+            // blockAlignedPos
+            // );
 
             // Copy the requested bytes, handling partial blocks correctly
             int availableBytes = decrypted.length - prefixDiscard;
             int actualBytes = Math.min(availableBytes, toRead);
-            
+
             if (actualBytes > 0) {
                 dst.put(decrypted, prefixDiscard, actualBytes);
             }

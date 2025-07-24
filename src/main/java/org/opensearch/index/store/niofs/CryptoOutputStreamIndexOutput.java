@@ -13,7 +13,6 @@ import java.nio.file.Path;
 
 import org.apache.lucene.store.OutputStreamIndexOutput;
 import org.opensearch.common.SuppressForbidden;
-import org.opensearch.index.store.cipher.JavaNativeCipher;
 import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 
 /**
@@ -135,7 +134,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             try {
                 checkClosed();
                 flushBuffer();
-                
+
                 try {
                     byte[] finalBytes = OpenSslNativeCipher.finalizeGCMCipher(cipher, arena);
                     if (finalBytes.length > 0) {
@@ -144,7 +143,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 } catch (Throwable t) {
                     throw new IOException("Failed to finalize cipher", t);
                 }
-                
+
                 super.close();
             } catch (IOException e) {
                 exception = e;

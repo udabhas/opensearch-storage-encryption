@@ -55,7 +55,15 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
         try {
             Cipher cipher = AesCipherFactory.getCipher(AesCipherFactory.CipherType.CTR, provider);
-            AesCipherFactory.initCipher(AesCipherFactory.CipherType.CTR, cipher, keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), Cipher.DECRYPT_MODE, 0);
+            AesCipherFactory
+                .initCipher(
+                    AesCipherFactory.CipherType.CTR,
+                    cipher,
+                    keyIvResolver.getDataKey(),
+                    keyIvResolver.getIvBytes(),
+                    Cipher.DECRYPT_MODE,
+                    0
+                );
 
             final IndexInput indexInput = new CryptoBufferedIndexInput(
                 "CryptoBufferedIndexInput(path=\"" + path + "\")",
