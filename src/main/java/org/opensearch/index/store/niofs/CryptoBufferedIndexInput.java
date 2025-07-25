@@ -9,14 +9,16 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 
+import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.ShortBufferException;
 
 import org.apache.lucene.store.BufferedIndexInput;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
-import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 /**
@@ -66,8 +68,16 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.isClone = true;
         this.keyResolver = keyResolver;
 
-        this.cipher = AesCipherFactory.getCipher(originalCipher.getProvider());
-        AesCipherFactory.initCipher(cipher, keyResolver.getDataKey(), keyResolver.getIvBytes(), Cipher.DECRYPT_MODE, off);
+        this.cipher = AesCipherFactory.getCipher(AesCipherFactory.CipherType.CTR, originalCipher.getProvider());
+        AesCipherFactory
+            .initCipher(
+                AesCipherFactory.CipherType.CTR,
+                cipher,
+                keyResolver.getDataKey(),
+                keyResolver.getIvBytes(),
+                Cipher.DECRYPT_MODE,
+                off
+            );
     }
 
     @Override
@@ -81,9 +91,16 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     public CryptoBufferedIndexInput clone() {
         CryptoBufferedIndexInput clone = (CryptoBufferedIndexInput) super.clone();
         clone.tmpBuffer = EMPTY_BYTEBUFFER;
-        clone.cipher = AesCipherFactory.getCipher(cipher.getProvider());
+        clone.cipher = AesCipherFactory.getCipher(AesCipherFactory.CipherType.CTR, cipher.getProvider());
         AesCipherFactory
-            .initCipher(clone.cipher, keyResolver.getDataKey(), keyResolver.getIvBytes(), Cipher.DECRYPT_MODE, getFilePointer() + off);
+            .initCipher(
+                AesCipherFactory.CipherType.CTR,
+                clone.cipher,
+                keyResolver.getDataKey(),
+                keyResolver.getIvBytes(),
+                Cipher.DECRYPT_MODE,
+                getFilePointer() + off
+            );
         return clone;
     }
 
@@ -110,6 +127,30 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         return end - off;
     }
 
+    @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
+    private int read(ByteBuffer dst, long position) throws IOException {
+
+        // initialize buffer lazy because Lucene may open input slices and clones ahead but never use them
+        // see org.apache.lucene.store.BufferedIndexInput
+        if (tmpBuffer == EMPTY_BYTEBUFFER) {
+            tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
+        }
+
+        tmpBuffer.clear().limit(dst.remaining());
+        int bytesRead = channel.read(tmpBuffer, position);
+        if (bytesRead == -1) {
+            return -1;
+        }
+
+        tmpBuffer.flip();
+
+        try {
+            return (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
+        } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException ex) {
+            throw new IOException("Failed to decrypt block at position " + position, ex);
+        }
+    }
+
     @Override
     protected void readInternal(ByteBuffer b) throws IOException {
         long pos = getFilePointer() + off;
@@ -132,59 +173,19 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         }
     }
 
-    @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
-    private int read(ByteBuffer dst, long position) throws IOException {
-        int toRead = dst.remaining();
-        long blockAlignedPos = (position / 16) * 16;
-        int prefixDiscard = (int) (position % 16);
-
-        // Read enough blocks to cover the requested data
-        int blocksNeeded = (prefixDiscard + toRead + 15) / 16;
-        int paddedRead = blocksNeeded * 16;
-
-        if (tmpBuffer == EMPTY_BYTEBUFFER || tmpBuffer.capacity() < paddedRead) {
-            tmpBuffer = ByteBuffer.allocate(paddedRead);
-        }
-
-        tmpBuffer.clear().limit(paddedRead);
-        int bytesRead = channel.read(tmpBuffer, blockAlignedPos);
-        if (bytesRead <= 0) {
-            return -1;
-        }
-
-        tmpBuffer.flip();
-        byte[] encryptedData = new byte[bytesRead];
-        tmpBuffer.get(encryptedData);
-
-        try {
-            byte[] decrypted = OpenSslNativeCipher
-                .decryptCTR(keyResolver.getDataKey().getEncoded(), keyResolver.getIvBytes(), encryptedData, blockAlignedPos);
-
-            // byte[] decrypted = JavaNativeCipher.decryptCTRJava(
-            // keyResolver.getDataKey().getEncoded(),
-            // keyResolver.getIvBytes(),
-            // encryptedData,
-            // blockAlignedPos
-            // );
-
-            // Copy the requested bytes, handling partial blocks correctly
-            int availableBytes = decrypted.length - prefixDiscard;
-            int actualBytes = Math.min(availableBytes, toRead);
-
-            if (actualBytes > 0) {
-                dst.put(decrypted, prefixDiscard, actualBytes);
-            }
-
-            return actualBytes > 0 ? actualBytes : -1;
-        } catch (Throwable t) {
-            throw new IOException("Failed to decrypt block at position " + position, t);
-        }
-    }
-
     @Override
     protected void seekInternal(long pos) throws IOException {
         if (pos > length()) {
             throw new EOFException("seek past EOF: pos=" + pos + ", length=" + length());
         }
+        AesCipherFactory
+            .initCipher(
+                AesCipherFactory.CipherType.CTR,
+                cipher,
+                keyResolver.getDataKey(),
+                keyResolver.getIvBytes(),
+                Cipher.DECRYPT_MODE,
+                pos + off
+            );
     }
 }
