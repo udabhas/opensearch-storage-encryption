@@ -77,7 +77,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), provider);
+        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver, provider);
     }
 
     @Override
@@ -91,12 +91,11 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), provider);
+        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver, provider);
     }
 
     @Override
     public long fileLength(String name) throws IOException {
-        // TASK 1.2: Exclude footer from file length for encrypted files
         if (name.contains("segments_") || name.endsWith(".si")) {
             return super.fileLength(name);  // Non-encrypted files
         } else {

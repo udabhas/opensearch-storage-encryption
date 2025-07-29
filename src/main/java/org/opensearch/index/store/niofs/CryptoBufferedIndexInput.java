@@ -26,6 +26,7 @@ import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionFooter;
+import org.opensearch.index.store.cipher.HkdfKeyDerivation;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 /**
@@ -53,13 +54,16 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.off = 0L;
         this.end = fc.size();
         this.keyResolver = keyResolver;
-        this.keySpec = new SecretKeySpec(keyResolver.getDataKey().getEncoded(), ALGORITHM);
         this.isClone = false;
         
-        // TODO: read and use the footer
+        // TASK 2.3: Read footer and derive file-specific key
+        EncryptionFooter footer = readFooterFromFile();
+        byte[] directoryKey = keyResolver.getDataKey().getEncoded();
+        byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
+        this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -67,7 +71,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.end = off + length;
         this.isClone = true;
         this.keyResolver = keyResolver;
-        this.keySpec = new SecretKeySpec(keyResolver.getDataKey().getEncoded(), ALGORITHM);
+        this.keySpec = keySpec;  // Reuse keySpec from main file
     }
 
     @Override
@@ -97,7 +101,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             off + offset,
             length,
             getBufferSize(),
-            keyResolver
+            keyResolver,
+            keySpec  // Pass the already-derived keySpec
         );
     }
 
@@ -173,5 +178,24 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         if (pos > length()) {
             throw new EOFException("seek past EOF: pos=" + pos + ", length=" + length());
         }
+    }
+    
+    /**
+     * TASK 2.3: Read encryption footer from end of file
+     */
+    private EncryptionFooter readFooterFromFile() throws IOException {
+        long fileSize = channel.size();
+        if (fileSize < EncryptionFooter.FOOTER_SIZE) {
+            throw new IOException("File too small to contain encryption footer");
+        }
+        
+        ByteBuffer footerBuffer = ByteBuffer.allocate(EncryptionFooter.FOOTER_SIZE);
+        int bytesRead = channel.read(footerBuffer, fileSize - EncryptionFooter.FOOTER_SIZE);
+        
+        if (bytesRead != EncryptionFooter.FOOTER_SIZE) {
+            throw new IOException("Failed to read complete footer");
+        }
+        
+        return EncryptionFooter.deserialize(footerBuffer.array());
     }
 }

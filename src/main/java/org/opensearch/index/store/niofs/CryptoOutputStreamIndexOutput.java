@@ -14,6 +14,8 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.CryptoNativeCipher;
 import org.opensearch.index.store.cipher.EncryptionFooter;
+import org.opensearch.index.store.cipher.HkdfKeyDerivation;
+import org.opensearch.index.store.iv.KeyIvResolver;
 
 import javax.crypto.Cipher;
 import java.security.Key;
@@ -31,38 +33,43 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
     private static final int BUFFER_SIZE = 65_536;
 
     /**
-     * Creates a new CryptoIndexOutput
+     * Creates a new CryptoIndexOutput with per-file key derivation
      *
      * @param name The name of the output
      * @param path The path to write to
      * @param os The output stream
-     * @param key The AES key
-     * @param iv The initialization vector (must be 16 bytes)
+     * @param keyResolver The key/IV resolver for directory keys
      * @param provider The JCE provider to use
      * @throws IOException If there is an I/O error
-     * @throws IllegalArgumentException If key or iv lengths are invalid
      */
-    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, Key key, byte[] iv, java.security.Provider provider) throws IOException {
-        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, key, iv, provider), CHUNK_SIZE);
+    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyIvResolver keyResolver, java.security.Provider provider) throws IOException {
+        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider), CHUNK_SIZE);
     }
 
     private static class EncryptedOutputStream extends FilterOutputStream {
 
-        private final Key key;
+        private final Key fileKey;
         private final byte[] iv;
         private final byte[] buffer;
         private final Cipher cipher;
+        private final EncryptionFooter footer;
         private int bufferPosition = 0;
         private long streamOffset = 0;
         private boolean isClosed = false;
 
-        EncryptedOutputStream(OutputStream os, Key key, byte[] iv, java.security.Provider provider) {
+        EncryptedOutputStream(OutputStream os, KeyIvResolver keyResolver, java.security.Provider provider) {
             super(os);
-            this.key = key;
-            this.iv = iv;
+            
+            // Generate MessageId and derive file-specific key
+            this.footer = EncryptionFooter.generateNew();
+            byte[] directoryKey = keyResolver.getDataKey().getEncoded();
+            byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
+            this.fileKey = new javax.crypto.spec.SecretKeySpec(derivedKey, "AES");
+            
+            this.iv = keyResolver.getIvBytes();
             this.buffer = new byte[BUFFER_SIZE];
             this.cipher = AesGcmCipherFactory.getCipher(provider);
-            AesGcmCipherFactory.initGCMCipher(this.cipher, key, iv, Cipher.ENCRYPT_MODE, streamOffset);
+            AesGcmCipherFactory.initGCMCipher(this.cipher, this.fileKey, iv, Cipher.ENCRYPT_MODE, streamOffset);
         }
 
         @Override
@@ -142,8 +149,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                     out.write(finalData, 0, finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH);
                 }
                 
-                // Write encryption footer
-                EncryptionFooter footer = EncryptionFooter.generateNew();
+                // Write footer with the MessageId used for key derivation
                 out.write(footer.serialize());
                 
                 super.close();
