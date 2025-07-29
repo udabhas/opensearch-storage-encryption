@@ -25,6 +25,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
+import org.opensearch.index.store.cipher.EncryptionFooter;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 /**
@@ -54,6 +55,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.keyResolver = keyResolver;
         this.keySpec = new SecretKeySpec(keyResolver.getDataKey().getEncoded(), ALGORITHM);
         this.isClone = false;
+        
+        // TODO: read and use the footer
     }
 
     public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver)
@@ -100,7 +103,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     @Override
     public long length() {
-        return end - off;
+        // Exclude footer from logical file length
+        return end - off - EncryptionFooter.FOOTER_SIZE;
     }
 
     @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")

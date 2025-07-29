@@ -13,6 +13,7 @@ import org.apache.lucene.store.OutputStreamIndexOutput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.CryptoNativeCipher;
+import org.opensearch.index.store.cipher.EncryptionFooter;
 
 import javax.crypto.Cipher;
 import java.security.Key;
@@ -140,6 +141,11 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 if (finalData.length > AesGcmCipherFactory.GCM_TAG_LENGTH) {
                     out.write(finalData, 0, finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH);
                 }
+                
+                // Write encryption footer
+                EncryptionFooter footer = EncryptionFooter.generateNew();
+                out.write(footer.serialize());
+                
                 super.close();
             } catch (IOException e) {
                 exception = e;
