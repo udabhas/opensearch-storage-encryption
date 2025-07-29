@@ -13,8 +13,8 @@ import org.apache.lucene.store.OutputStreamIndexOutput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.CryptoNativeCipher;
-import org.opensearch.index.store.cipher.EncryptionFooter;
-import org.opensearch.index.store.cipher.HkdfKeyDerivation;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.HkdfKeyDerivation;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 import javax.crypto.Cipher;

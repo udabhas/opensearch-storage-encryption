@@ -19,7 +19,7 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.common.util.io.IOUtils;
-import org.opensearch.index.store.cipher.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 /**

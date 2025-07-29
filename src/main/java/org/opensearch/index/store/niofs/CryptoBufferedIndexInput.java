@@ -25,8 +25,8 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
-import org.opensearch.index.store.cipher.EncryptionFooter;
-import org.opensearch.index.store.cipher.HkdfKeyDerivation;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.HkdfKeyDerivation;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 /**
@@ -56,7 +56,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.keyResolver = keyResolver;
         this.isClone = false;
         
-        // TASK 2.3: Read footer and derive file-specific key
+        // Read footer and derive file-specific key
         EncryptionFooter footer = readFooterFromFile();
         byte[] directoryKey = keyResolver.getDataKey().getEncoded();
         byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
@@ -181,7 +181,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     }
     
     /**
-     * TASK 2.3: Read encryption footer from end of file
+     * Read encryption footer from end of file
      */
     private EncryptionFooter readFooterFromFile() throws IOException {
         long fileSize = channel.size();
