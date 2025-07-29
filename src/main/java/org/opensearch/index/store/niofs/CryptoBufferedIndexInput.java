@@ -103,8 +103,12 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     @Override
     public long length() {
-        // Exclude footer from logical file length
-        return end - off - EncryptionFooter.FOOTER_SIZE;
+        // Exclude footer from logical file length (only for main file, not slices)
+        if (isClone) {
+            return end - off;  // Slices use exact length passed in
+        } else {
+            return end - off - EncryptionFooter.FOOTER_SIZE;  // Main file excludes footer
+        }
     }
 
     @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")

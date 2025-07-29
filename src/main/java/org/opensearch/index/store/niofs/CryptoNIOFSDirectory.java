@@ -19,6 +19,7 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.common.util.io.IOUtils;
+import org.opensearch.index.store.cipher.EncryptionFooter;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 /**
@@ -91,6 +92,16 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), provider);
+    }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        // TASK 1.2: Exclude footer from file length for encrypted files
+        if (name.contains("segments_") || name.endsWith(".si")) {
+            return super.fileLength(name);  // Non-encrypted files
+        } else {
+            return super.fileLength(name) - EncryptionFooter.FOOTER_SIZE;  // Encrypted files
+        }
     }
 
     @Override
