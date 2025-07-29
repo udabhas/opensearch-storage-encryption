@@ -25,6 +25,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
+import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.HkdfKeyDerivation;
 import org.opensearch.index.store.iv.KeyIvResolver;
@@ -45,6 +46,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private final long end;
     private final KeyIvResolver keyResolver;
     private final SecretKeySpec keySpec;
+    private final byte[] directoryKey;
+    private final byte[] messageId;
 
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
 
@@ -58,8 +61,9 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         
         // Read footer and derive file-specific key
         EncryptionFooter footer = readFooterFromFile();
-        byte[] directoryKey = keyResolver.getDataKey().getEncoded();
-        byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
+        this.directoryKey = keyResolver.getDataKey().getEncoded();
+        this.messageId = footer.getMessageId();
+        byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
     }
 
@@ -72,6 +76,15 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.isClone = true;
         this.keyResolver = keyResolver;
         this.keySpec = keySpec;  // Reuse keySpec from main file
+        
+        // For slices, we need directory key and messageId for frame decryption
+        try {
+            EncryptionFooter footer = readFooterFromFile();
+            this.directoryKey = keyResolver.getDataKey().getEncoded();
+            this.messageId = footer.getMessageId();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read footer for slice", e);
+        }
     }
 
     @Override
@@ -134,14 +147,19 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         tmpBuffer.flip();
 
         try {
+            // Use frame-based decryption with CTR cipher from pool
             Cipher cipher = AesCipherFactory.CIPHER_POOL.get();
-
-            byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(keyResolver.getIvBytes(), position);
-
-            cipher.init(Cipher.DECRYPT_MODE, this.keySpec, new IvParameterSpec(ivCopy));
-
-            if (position % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-                cipher.update(ZERO_SKIP, 0, (int) (position % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+            
+            // Calculate frame and offset within frame
+            int frameNumber = AesCipherFactory.getFrameNumber(position);
+            long offsetWithinFrame = AesCipherFactory.getOffsetWithinFrame(position);
+            
+            // Derive frame-specific IV
+            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame);
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
+            
+            if (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
+                cipher.update(ZERO_SKIP, 0, (int) (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
             }
 
             return (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
@@ -198,4 +216,6 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         
         return EncryptionFooter.deserialize(footerBuffer.array());
     }
+    
+
 }

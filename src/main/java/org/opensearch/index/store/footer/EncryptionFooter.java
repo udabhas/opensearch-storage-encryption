@@ -14,12 +14,20 @@ import java.util.Arrays;
 
 /**
  * Format: [MessageId(16)][Magic(4)] = 20 bytes total
+ * 
+ * Frame Support: Files are encrypted in frames to support large files (>64GB)
+ * and enable random access without decrypting entire file.
  */
 public class EncryptionFooter {
     
     public static final byte[] MAGIC = "OSEF".getBytes();
     public static final int MESSAGE_ID_SIZE = 16;
     public static final int FOOTER_SIZE = MESSAGE_ID_SIZE + MAGIC.length;
+    
+    // Frame constants for large file support
+    public static final long DEFAULT_FRAME_SIZE = 32L * 1024 * 1024 * 1024; // 32GB per frame
+    public static final int MAX_FRAMES_PER_FILE = 2048; // Support up to 64TB files (32GB * 2048)
+    public static final String FRAME_CONTEXT_PREFIX = "frame-"; // Context for frame key derivation
     
     private final byte[] messageId;
     

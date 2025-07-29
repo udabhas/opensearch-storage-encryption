@@ -11,6 +11,7 @@ import java.nio.file.Path;
 
 import org.apache.lucene.store.OutputStreamIndexOutput;
 import org.opensearch.common.SuppressForbidden;
+import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.CryptoNativeCipher;
 import org.opensearch.index.store.footer.EncryptionFooter;
@@ -49,10 +50,15 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
     private static class EncryptedOutputStream extends FilterOutputStream {
 
         private final Key fileKey;
-        private final byte[] iv;
+        private final byte[] directoryKey;
         private final byte[] buffer;
-        private final Cipher cipher;
         private final EncryptionFooter footer;
+        private final java.security.Provider provider;
+        
+        // Frame tracking
+        private Cipher currentCipher;
+        private int currentFrameNumber = 0;
+        private long currentFrameOffset = 0;
         private int bufferPosition = 0;
         private long streamOffset = 0;
         private boolean isClosed = false;
@@ -62,14 +68,15 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             
             // Generate MessageId and derive file-specific key
             this.footer = EncryptionFooter.generateNew();
-            byte[] directoryKey = keyResolver.getDataKey().getEncoded();
+            this.directoryKey = keyResolver.getDataKey().getEncoded();
             byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
             this.fileKey = new javax.crypto.spec.SecretKeySpec(derivedKey, "AES");
             
-            this.iv = keyResolver.getIvBytes();
+            this.provider = provider;
             this.buffer = new byte[BUFFER_SIZE];
-            this.cipher = AesGcmCipherFactory.getCipher(provider);
-            AesGcmCipherFactory.initGCMCipher(this.cipher, this.fileKey, iv, Cipher.ENCRYPT_MODE, streamOffset);
+            
+            // Initialize first frame cipher
+            initializeFrameCipher(0, 0);
         }
 
         @Override
@@ -114,12 +121,33 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         }
 
         private void processAndWrite(byte[] data, int offset, int length) throws IOException {
-            try {
-                byte[] encrypted = CryptoNativeCipher.encryptGCMJava(streamOffset, cipher, slice(data, offset, length), length);
-                out.write(encrypted);
-                streamOffset += length;
-            } catch (Throwable t) {
-                throw new IOException("Encryption failed at offset " + streamOffset, t);
+            int remaining = length;
+            int dataOffset = offset;
+            
+            while (remaining > 0) {
+                // Check if we need to start a new frame
+                int frameNumber = AesCipherFactory.getFrameNumber(streamOffset);
+                if (frameNumber != currentFrameNumber) {
+                    finalizeCurrentFrame();
+                    initializeFrameCipher(frameNumber, AesCipherFactory.getOffsetWithinFrame(streamOffset));
+                }
+                
+                // Calculate how much we can write in current frame
+                long frameEnd = (frameNumber + 1) * EncryptionFooter.DEFAULT_FRAME_SIZE;
+                int chunkSize = (int) Math.min(remaining, frameEnd - streamOffset);
+                
+                try {
+                    byte[] encrypted = CryptoNativeCipher.encryptGCMJava(currentFrameOffset, currentCipher, 
+                                                                        slice(data, dataOffset, chunkSize), chunkSize);
+                    out.write(encrypted);
+                    
+                    streamOffset += chunkSize;
+                    currentFrameOffset += chunkSize;
+                    remaining -= chunkSize;
+                    dataOffset += chunkSize;
+                } catch (Throwable t) {
+                    throw new IOException("Encryption failed at offset " + streamOffset, t);
+                }
             }
         }
 
@@ -141,13 +169,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 flushBuffer();
                 // Lucene writes footer here.
                 // this will also flush the buffer.
-                // Finalize GCM and handle any remaining encrypted bytes
-                byte[] finalData = CryptoNativeCipher.finalizeGCMJava(cipher);
-                // finalData contains [remaining_encrypted_bytes][16_byte_tag]
-                // Write any remaining encrypted bytes (excluding the tag)
-                if (finalData.length > AesGcmCipherFactory.GCM_TAG_LENGTH) {
-                    out.write(finalData, 0, finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH);
-                }
+                // Finalize current frame
+                finalizeCurrentFrame();
                 
                 // Write footer with the MessageId used for key derivation
                 out.write(footer.serialize());
@@ -165,7 +188,42 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
         private void checkClosed() throws IOException {
             if (isClosed) {
-                throw new IOException("Outout stream is already closed, this is unusual");
+                throw new IOException("Output stream is already closed, this is unusual");
+            }
+        }
+        
+        /**
+         * Initialize cipher for a new frame
+         */
+        private void initializeFrameCipher(int frameNumber, long offsetWithinFrame) {
+            this.currentFrameNumber = frameNumber;
+            this.currentFrameOffset = offsetWithinFrame;
+            
+            // Derive frame-specific IV
+            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(), 
+                                                           frameNumber, offsetWithinFrame);
+            
+            this.currentCipher = AesGcmCipherFactory.getCipher(provider);
+            AesGcmCipherFactory.initGCMCipher(this.currentCipher, this.fileKey, frameIV, 
+                                            Cipher.ENCRYPT_MODE, offsetWithinFrame);
+        }
+        
+        /**
+         * Finalize current frame and write any remaining data
+         */
+        private void finalizeCurrentFrame() throws IOException {
+            if (currentCipher != null) {
+                try {
+                    byte[] finalData = CryptoNativeCipher.finalizeGCMJava(currentCipher);
+                    // finalData contains [remaining_encrypted_bytes][16_byte_tag]
+                    // Write any remaining encrypted bytes (excluding the tag)
+                    if (finalData.length > AesGcmCipherFactory.GCM_TAG_LENGTH) {
+                        out.write(finalData, 0, finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH);
+                    }
+                    // TODO: Store GCM tag for authentication (Phase 4)
+                } catch (Throwable t) {
+                    throw new IOException("Failed to finalize frame " + currentFrameNumber, t);
+                }
             }
         }
     }
