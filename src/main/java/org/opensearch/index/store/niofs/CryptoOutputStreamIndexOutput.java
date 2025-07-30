@@ -20,6 +20,7 @@ import org.opensearch.index.store.iv.KeyIvResolver;
 
 import javax.crypto.Cipher;
 import java.security.Key;
+import java.util.Arrays;
 
 /**
  * An IndexOutput implementation that encrypts data before writing using native
@@ -220,7 +221,10 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                     if (finalData.length > AesGcmCipherFactory.GCM_TAG_LENGTH) {
                         out.write(finalData, 0, finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH);
                     }
-                    // TODO: Store GCM tag for authentication (Phase 4)
+
+                    footer.addGcmTagToFooter(Arrays.copyOfRange(finalData,
+                            finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH, finalData.length));
+
                 } catch (Throwable t) {
                     throw new IOException("Failed to finalize frame " + currentFrameNumber, t);
                 }

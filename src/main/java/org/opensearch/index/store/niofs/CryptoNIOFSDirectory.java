@@ -6,6 +6,7 @@ package org.opensearch.index.store.niofs;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -99,9 +100,33 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         if (name.contains("segments_") || name.endsWith(".si")) {
             return super.fileLength(name);  // Non-encrypted files
         } else {
-            return super.fileLength(name) - EncryptionFooter.FOOTER_SIZE;  // Encrypted files
+            Path path = getDirectory().resolve(name);
+
+            try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+                // Get file size
+                long fileSize = channel.size();
+
+                // Verify file has minimum footer size
+                if (fileSize < EncryptionFooter.MIN_FOOTER_SIZE) {
+                    throw new IOException("File too small to contain encryption footer");
+                }
+
+                // Read last 24 bytes to calculate actual footer length
+                ByteBuffer footerBasicBuffer = ByteBuffer.allocate(EncryptionFooter.MIN_FOOTER_SIZE);
+                int bytesRead = channel.read(footerBasicBuffer, fileSize - EncryptionFooter.MIN_FOOTER_SIZE);
+
+                if (bytesRead != EncryptionFooter.MIN_FOOTER_SIZE) {
+                    throw new IOException("Failed to read footer metadata");
+                }
+
+                // Calculate actual footer length
+                int footerLength = EncryptionFooter.calculateFooterLength(footerBasicBuffer.array());
+
+                return super.fileLength(name) - footerLength;
+            }
         }
     }
+
 
     @Override
     public synchronized void close() throws IOException {
