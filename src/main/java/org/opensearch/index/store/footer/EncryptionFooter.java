@@ -25,10 +25,8 @@ public class EncryptionFooter {
     public static final int FOOTER_SIZE = MESSAGE_ID_SIZE + MAGIC.length;
     
     // Frame constants for large file support
-    public static final long DEFAULT_FRAME_SIZE = 1024L; // 1KB per frame
-
-    //    public static final long DEFAULT_FRAME_SIZE = 32L * 1024 * 1024 * 1024; // 32GB per frame
-    public static final int MAX_FRAMES_PER_FILE = 2048; // Support up to 64TB files (32GB * 2048)
+    public static final long DEFAULT_FRAME_SIZE = 64L * 1024 * 1024 * 1024; // 64GB per frame
+    public static final int MAX_FRAMES_PER_FILE = Integer.MAX_VALUE; // Support very large files
     public static final String FRAME_CONTEXT_PREFIX = "frame-"; // Context for frame key derivation
     
     private final byte[] messageId;
