@@ -138,7 +138,15 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
         }
 
-        tmpBuffer.clear().limit(dst.remaining());
+        // Calculate frame boundaries to avoid reading across frames
+        int frameNumber = AesCipherFactory.getFrameNumber(position);
+        long offsetWithinFrame = AesCipherFactory.getOffsetWithinFrame(position);
+        long frameEnd = (frameNumber + 1) * EncryptionFooter.DEFAULT_FRAME_SIZE;
+        
+        // Limit read to not cross frame boundary
+        int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);
+
+        tmpBuffer.clear().limit(maxReadInFrame);
         int bytesRead = channel.read(tmpBuffer, position);
         if (bytesRead == -1) {
             return -1;
@@ -150,12 +158,9 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             // Use frame-based decryption with CTR cipher from pool
             Cipher cipher = AesCipherFactory.CIPHER_POOL.get();
             
-            // Calculate frame and offset within frame
-            int frameNumber = AesCipherFactory.getFrameNumber(position);
-            long offsetWithinFrame = AesCipherFactory.getOffsetWithinFrame(position);
-            
             // Derive frame-specific IV
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame);
+            
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
             
             if (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
