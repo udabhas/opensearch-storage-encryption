@@ -22,8 +22,6 @@ import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.iv.KeyIvResolver;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 /**
  * A NioFS directory implementation that encrypts files to be stored based on a
@@ -32,7 +30,6 @@ import org.apache.logging.log4j.Logger;
  * @opensearch.internal
  */
 public class CryptoNIOFSDirectory extends NIOFSDirectory {
-    private static final Logger logger = LogManager.getLogger(CryptoNIOFSDirectory.class);
     private final Provider provider;
     public final KeyIvResolver keyIvResolver;
     private final AtomicLong nextTempFileCounter = new AtomicLong();
@@ -104,17 +101,13 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             return super.fileLength(name);  // Non-encrypted files
         } else {
             Path path = getDirectory().resolve(name);
-            logger.info("fileLength() called for encrypted file: {} at path: {}", name, path);
 
             try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
                 // Get file size
                 long fileSize = channel.size();
-                logger.info("File {} has size: {} bytes", name, fileSize);
 
                 // Verify file has minimum footer size
                 if (fileSize < EncryptionFooter.MIN_FOOTER_SIZE) {
-                    logger.error("File {} is too small ({} bytes) to contain encryption footer (min {} bytes)", 
-                               name, fileSize, EncryptionFooter.MIN_FOOTER_SIZE);
                     throw new IOException("File too small to contain encryption footer: " + name + 
                                         " (" + fileSize + " bytes, need " + EncryptionFooter.MIN_FOOTER_SIZE + ")");
                 }
@@ -124,16 +117,11 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
                 int bytesRead = channel.read(footerBasicBuffer, fileSize - EncryptionFooter.MIN_FOOTER_SIZE);
 
                 if (bytesRead != EncryptionFooter.MIN_FOOTER_SIZE) {
-                    logger.error("Failed to read footer metadata from file {}: expected {} bytes, got {} bytes", 
-                               name, EncryptionFooter.MIN_FOOTER_SIZE, bytesRead);
                     throw new IOException("Failed to read footer metadata from " + name);
                 }
 
                 // Calculate actual footer length
                 int footerLength = EncryptionFooter.calculateFooterLength(footerBasicBuffer.array());
-                logger.info("File {} has footer length: {} bytes, logical length: {} bytes", 
-                          name, footerLength, fileSize - footerLength);
-                
                 return super.fileLength(name) - footerLength;
             }
         }
