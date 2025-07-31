@@ -45,7 +45,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        if (name.contains("segments_") || name.endsWith(".si") || name.equals("ivFile") || name.equals("keyfile")) {
+        if (name.contains("segments_") || name.endsWith(".si") || name.equals("ivFile") || name.equals("keyfile") || name.endsWith(".lock")) {
             return super.openInput(name, context);
         }
 
@@ -73,7 +73,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
-        if (name.contains("segments_") || name.endsWith(".si") || name.equals("ivFile") || name.equals("keyfile")) {
+        if (name.contains("segments_") || name.endsWith(".si") || name.equals("ivFile") || name.equals("keyfile") || name.endsWith(".lock")) {
             return super.createOutput(name, context);
         }
 
@@ -86,7 +86,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
-        if (prefix.contains("segments_") || prefix.endsWith(".si") || prefix.equals("ivFile") || prefix.equals("keyfile")) {
+        if (prefix.contains("segments_") || prefix.endsWith(".si") || prefix.equals("ivFile") || prefix.equals("keyfile") || prefix.endsWith(".lock")) {
             return super.createTempOutput(prefix, suffix, context);
         }
 
@@ -100,7 +100,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
-        if (name.contains("segments_") || name.endsWith(".si") || name.equals("ivFile") || name.equals("keyfile")) {
+        if (name.contains("segments_") || name.endsWith(".si") || name.equals("ivFile") || name.equals("keyfile") || name.endsWith(".lock")) {
             return super.fileLength(name);  // Non-encrypted files
         } else {
             Path path = getDirectory().resolve(name);
