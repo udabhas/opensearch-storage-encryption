@@ -123,6 +123,8 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         
         // Encrypted files
         long fileSize = super.fileLength(name);
+        System.err.println("[DEBUG] Processing file: " + name + ", size: " + fileSize + " bytes");
+        
         if (fileSize == 0) {
             return 0;
         }
@@ -142,8 +144,30 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
                 throw new IOException("Failed to read footer metadata from " + name);
             }
 
-            int footerLength = EncryptionFooter.calculateFooterLength(footerBasicBuffer.array());
-            return fileSize - footerLength;
+            byte[] footerBytes = footerBasicBuffer.array();
+            
+            // Log last 28 bytes in hex for debugging
+            StringBuilder hexDump = new StringBuilder();
+            for (int i = 0; i < footerBytes.length; i++) {
+                hexDump.append(String.format("%02X ", footerBytes[i]));
+            }
+            System.err.println("[DEBUG] File: " + name + ", last " + footerBytes.length + " bytes: " + hexDump.toString());
+            
+            // Log last 4 bytes specifically (should be magic "OSEF")
+            byte[] last4 = new byte[4];
+            System.arraycopy(footerBytes, footerBytes.length - 4, last4, 0, 4);
+            String last4Str = new String(last4);
+            System.err.println("[DEBUG] File: " + name + ", last 4 bytes as string: '" + last4Str + "', as hex: " + 
+                    String.format("%02X %02X %02X %02X", last4[0], last4[1], last4[2], last4[3]));
+
+            try {
+                int footerLength = EncryptionFooter.calculateFooterLength(footerBytes);
+                System.err.println("[DEBUG] File: " + name + ", footer length: " + footerLength + ", logical size: " + (fileSize - footerLength));
+                return fileSize - footerLength;
+            } catch (IOException e) {
+                System.err.println("[DEBUG] File: " + name + ", footer parsing failed: " + e.getMessage());
+                throw e;
+            }
         }
     }
 
