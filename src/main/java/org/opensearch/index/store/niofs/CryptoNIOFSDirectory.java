@@ -114,9 +114,9 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public long fileLength(String name) throws IOException {
         if (name.contains("segments_")
                 || name.endsWith(".si")
-//            || name.equals("ivFile")
-//            || name.equals("keyfile")
-//            || name.endsWith(".lock")
+            || name.equals("ivFile")
+            || name.equals("keyfile")
+            || name.endsWith(".lock")
         ) {
             return super.fileLength(name);  // Non-encrypted files
         } else {
