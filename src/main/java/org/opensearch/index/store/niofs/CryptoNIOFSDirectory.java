@@ -112,45 +112,38 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
+        // Non-encrypted files
         if (name.contains("segments_")
                 || name.endsWith(".si")
-            || name.equals("ivFile")
-            || name.equals("keyfile")
-            || name.endsWith(".lock")
-        ) {
-            return super.fileLength(name);  // Non-encrypted files
-        } else {
-            Path path = getDirectory().resolve(name);
-
-            try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
-                // Get file size
-                long fileSize = channel.size();
-
-                // Verify file has minimum footer size
-                if (fileSize < EncryptionFooter.MIN_FOOTER_SIZE) {
-                    throw new IOException(
-                            "File too small to contain encryption footer: "
-                                    + name
-                                    + " ("
-                                    + fileSize
-                                    + " bytes, need "
-                                    + EncryptionFooter.MIN_FOOTER_SIZE
-                                    + ")"
-                    );
-                }
-
-                // Read last bytes to calculate actual footer length
-                ByteBuffer footerBasicBuffer = ByteBuffer.allocate(EncryptionFooter.MIN_FOOTER_SIZE);
-                int bytesRead = channel.read(footerBasicBuffer, fileSize - EncryptionFooter.MIN_FOOTER_SIZE);
-
-                if (bytesRead != EncryptionFooter.MIN_FOOTER_SIZE) {
-                    throw new IOException("Failed to read footer metadata from " + name);
-                }
-
-                // Calculate actual footer length
-                int footerLength = EncryptionFooter.calculateFooterLength(footerBasicBuffer.array());
-                return super.fileLength(name) - footerLength;
+                || name.equals("ivFile")
+                || name.equals("keyfile")
+                || name.endsWith(".lock")) {
+            return super.fileLength(name);
+        }
+        
+        // Encrypted files
+        long fileSize = super.fileLength(name);
+        if (fileSize == 0) {
+            return 0;
+        }
+        
+        // Proceed with footer processing
+        Path path = getDirectory().resolve(name);
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            if (fileSize < EncryptionFooter.MIN_FOOTER_SIZE) {
+                throw new IOException("File too small to contain encryption footer: " + name + 
+                        " (" + fileSize + " bytes, need " + EncryptionFooter.MIN_FOOTER_SIZE + ")");
             }
+
+            ByteBuffer footerBasicBuffer = ByteBuffer.allocate(EncryptionFooter.MIN_FOOTER_SIZE);
+            int bytesRead = channel.read(footerBasicBuffer, fileSize - EncryptionFooter.MIN_FOOTER_SIZE);
+
+            if (bytesRead != EncryptionFooter.MIN_FOOTER_SIZE) {
+                throw new IOException("Failed to read footer metadata from " + name);
+            }
+
+            int footerLength = EncryptionFooter.calculateFooterLength(footerBasicBuffer.array());
+            return fileSize - footerLength;
         }
     }
 
