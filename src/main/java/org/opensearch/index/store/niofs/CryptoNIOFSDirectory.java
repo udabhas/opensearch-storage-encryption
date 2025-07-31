@@ -123,7 +123,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         
         // Encrypted files
         long fileSize = super.fileLength(name);
-        System.err.println("[DEBUG] Processing file: " + name + ", size: " + fileSize + " bytes");
+//        System.err.println("[DEBUG] Processing file: " + name + ", size: " + fileSize + " bytes");
         
         if (fileSize == 0) {
             return 0;
