@@ -33,6 +33,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     private final Provider provider;
     public final KeyIvResolver keyIvResolver;
     private final AtomicLong nextTempFileCounter = new AtomicLong();
+    private final int algorithmId = 1; // Default to AES_256_GCM_CTR
 
     public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyIvResolver keyIvResolver) throws IOException {
         super(location, lockFactory);
@@ -78,7 +79,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver, provider);
+        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver, provider, algorithmId);
     }
 
     @Override
@@ -92,7 +93,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver, provider);
+        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver, provider, algorithmId);
     }
 
     @Override

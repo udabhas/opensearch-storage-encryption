@@ -26,6 +26,7 @@ import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
+import org.opensearch.index.store.cipher.EncryptionAlgorithm;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.HkdfKeyDerivation;
 import org.opensearch.index.store.iv.KeyIvResolver;
@@ -50,6 +51,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private final byte[] messageId;
     private final int footerLength;
     private final long frameSize;
+    private final EncryptionAlgorithm algorithm;
 
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
 
@@ -66,6 +68,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.directoryKey = keyResolver.getDataKey().getEncoded();
         this.messageId = footer.getMessageId();
         this.frameSize = footer.getFrameSize();
+        this.algorithm = EncryptionAlgorithm.fromId(footer.getAlgorithmId());
         byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
         
@@ -76,7 +79,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -87,6 +90,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.keySpec = keySpec;  // Reuse keySpec from main file
         this.footerLength = footerLength;
         this.frameSize = frameSize;
+        this.algorithm = EncryptionAlgorithm.fromId(algorithmId);
         
         // For slices, we need directory key and messageId for frame decryption
         try {
@@ -128,7 +132,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             keyResolver,
             keySpec,  // Pass the already-derived keySpec
             footerLength,
-            frameSize
+            frameSize,
+            algorithm.getAlgorithmId()
         );
     }
 
@@ -168,8 +173,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         tmpBuffer.flip();
 
         try {
-            // Use frame-based decryption with CTR cipher from pool
-            Cipher cipher = AesCipherFactory.CIPHER_POOL.get();
+            // Use frame-based decryption with algorithm-based cipher
+            Cipher cipher = algorithm.getDecryptionCipher();
             
             // Derive frame-specific IV
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame);

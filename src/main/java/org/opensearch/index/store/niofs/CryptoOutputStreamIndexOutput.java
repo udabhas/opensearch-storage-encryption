@@ -14,6 +14,7 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.CryptoNativeCipher;
+import org.opensearch.index.store.cipher.EncryptionAlgorithm;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.HkdfKeyDerivation;
 import org.opensearch.index.store.iv.KeyIvResolver;
@@ -44,8 +45,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
      * @param provider The JCE provider to use
      * @throws IOException If there is an I/O error
      */
-    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyIvResolver keyResolver, java.security.Provider provider) throws IOException {
-        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider), CHUNK_SIZE);
+    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyIvResolver keyResolver, java.security.Provider provider, int algorithmId) throws IOException {
+        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider, algorithmId), CHUNK_SIZE);
     }
 
     private static class EncryptedOutputStream extends FilterOutputStream {
@@ -56,6 +57,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private final EncryptionFooter footer;
         private final java.security.Provider provider;
         private final long frameSize;
+        private final EncryptionAlgorithm algorithm;
         
         // Frame tracking
         private Cipher currentCipher;
@@ -66,18 +68,19 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private int totalFrames = 0;
         private boolean isClosed = false;
 
-        EncryptedOutputStream(OutputStream os, KeyIvResolver keyResolver, java.security.Provider provider) {
+        EncryptedOutputStream(OutputStream os, KeyIvResolver keyResolver, java.security.Provider provider, int algorithmId) {
             super(os);
 
             this.frameSize = EncryptionFooter.DEFAULT_FRAME_SIZE;
             
             // Generate MessageId and derive file-specific key
-            this.footer = EncryptionFooter.generateNew(frameSize);
+            this.footer = EncryptionFooter.generateNew(frameSize, (short)algorithmId);
             this.directoryKey = keyResolver.getDataKey().getEncoded();
             byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
             this.fileKey = new javax.crypto.spec.SecretKeySpec(derivedKey, "AES");
             
             this.provider = provider;
+            this.algorithm = EncryptionAlgorithm.fromId((short) algorithmId);
             this.buffer = new byte[BUFFER_SIZE];
             
             // Initialize first frame cipher
@@ -212,7 +215,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(), 
                                                            frameNumber, offsetWithinFrame);
             
-            this.currentCipher = AesGcmCipherFactory.getCipher(provider);
+            this.currentCipher = algorithm.getEncryptionCipher(provider);
             AesGcmCipherFactory.initGCMCipher(this.currentCipher, this.fileKey, frameIV, 
                                             Cipher.ENCRYPT_MODE, offsetWithinFrame);
         }
