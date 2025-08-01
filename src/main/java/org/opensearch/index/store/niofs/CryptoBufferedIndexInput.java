@@ -49,6 +49,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private final byte[] directoryKey;
     private final byte[] messageId;
     private final int footerLength;
+    private final long frameSize;
 
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
 
@@ -64,6 +65,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         EncryptionFooter footer = readFooterFromFile();
         this.directoryKey = keyResolver.getDataKey().getEncoded();
         this.messageId = footer.getMessageId();
+        this.frameSize = footer.getFrameSize();
         byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
         
@@ -74,7 +76,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec, int footerLength)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -84,6 +86,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.keyResolver = keyResolver;
         this.keySpec = keySpec;  // Reuse keySpec from main file
         this.footerLength = footerLength;
+        this.frameSize = frameSize;
         
         // For slices, we need directory key and messageId for frame decryption
         try {
@@ -124,7 +127,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             getBufferSize(),
             keyResolver,
             keySpec,  // Pass the already-derived keySpec
-            footerLength
+            footerLength,
+            frameSize
         );
     }
 
@@ -148,9 +152,9 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         }
 
         // Calculate frame boundaries to avoid reading across frames
-        int frameNumber = AesCipherFactory.getFrameNumber(position);
-        long offsetWithinFrame = AesCipherFactory.getOffsetWithinFrame(position);
-        long frameEnd = (frameNumber + 1) * EncryptionFooter.DEFAULT_FRAME_SIZE;
+        int frameNumber = (int)(position / frameSize);
+        long offsetWithinFrame = position % frameSize;
+        long frameEnd = (frameNumber + 1) * frameSize;
         
         // Limit read to not cross frame boundary
         int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);

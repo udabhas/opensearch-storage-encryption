@@ -17,16 +17,18 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Variable footer format: [GcmTags...][TagCount(4)][MessageId(16)][FooterLength(4)][Magic(4)]
+ * Variable footer format: [GcmTags...][TagCount(4)][FrameSize(8)][FrameCount(4)][MessageId(16)][FooterLength(4)][Magic(4)]
  */
 public class EncryptionFooter {
     
     public static final byte[] MAGIC = "OSEF".getBytes();
     public static final int MESSAGE_ID_SIZE = 16;
     public static final int TAG_COUNT_SIZE = 4;
+    public static final int FRAME_SIZE_SIZE = 8;
+    public static final int FRAME_COUNT_SIZE = 4;
     public static final int FOOTER_LENGTH_SIZE = 4;
     public static final int FIXED_FOOTER_SIZE = MESSAGE_ID_SIZE + FOOTER_LENGTH_SIZE + MAGIC.length; // 24 bytes
-    public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + TAG_COUNT_SIZE; // 28 bytes
+    public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + TAG_COUNT_SIZE + FRAME_SIZE_SIZE + FRAME_COUNT_SIZE; // 40 bytes
     
     // Frame constants for large file support
     public static final long DEFAULT_FRAME_SIZE = 64L * 1024 * 1024 * 1024; // 64GB per frame
@@ -35,24 +37,27 @@ public class EncryptionFooter {
     
     private final byte[] messageId;
     private final List<byte[]> gcmTags;
+    private final long frameSize;
+    private int frameCount;
     
-    public EncryptionFooter(byte[] messageId) {
+    public EncryptionFooter(byte[] messageId, long frameSize) {
         if (messageId.length != MESSAGE_ID_SIZE) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }
         this.messageId = Arrays.copyOf(messageId, MESSAGE_ID_SIZE);
         this.gcmTags = new ArrayList<>();
+        this.frameSize = frameSize;
+        this.frameCount = 0;
     }
     
-    public static EncryptionFooter generateNew() {
+    public static EncryptionFooter generateNew(long frameSize) {
         byte[] messageId = new byte[MESSAGE_ID_SIZE];
         new SecureRandom().nextBytes(messageId);
-        return new EncryptionFooter(messageId);
+        return new EncryptionFooter(messageId, frameSize);
     }
 
 
-    // this is like
-    // [Data.....][tags 1...n][total number of tags (n)][messageID][FooterSize][Magic Bytes]
+    // [Data.....][GcmTags...][TagCount(4)][FrameSize(8)][FrameCount(4)][MessageId(16)][FooterLength(4)][Magic(4)]
     public byte[] serialize() {
         int footerSize = MIN_FOOTER_SIZE + (gcmTags.size() * AesGcmCipherFactory.GCM_TAG_LENGTH);
         ByteBuffer buffer = ByteBuffer.allocate(footerSize);
@@ -64,6 +69,12 @@ public class EncryptionFooter {
         
         // Write tag count
         buffer.putInt(gcmTags.size());
+        
+        // Write frame size
+        buffer.putLong(frameSize);
+        
+        // Write frame count
+        buffer.putInt(frameCount);
         
         // Write MessageId
         buffer.put(messageId);
@@ -82,7 +93,7 @@ public class EncryptionFooter {
             throw new IOException("Invalid footer size: " + fileBytes.length);
         }
         
-        // Read from end: [TagCount(4)][MessageId(16)][FooterLength(4)][Magic(4)]
+        // Read from end: [TagCount(4)][FrameSize(8)][FrameCount(4)][MessageId(16)][FooterLength(4)][Magic(4)]
         int pos = fileBytes.length;
         
         // Read magic
@@ -100,6 +111,14 @@ public class EncryptionFooter {
         pos -= MESSAGE_ID_SIZE;
         byte[] messageId = Arrays.copyOfRange(fileBytes, pos, pos + MESSAGE_ID_SIZE);
         
+        // Read frame count
+        pos -= FRAME_COUNT_SIZE;
+        int frameCount = ByteBuffer.wrap(fileBytes, pos, FRAME_COUNT_SIZE).getInt();
+        
+        // Read frame size
+        pos -= FRAME_SIZE_SIZE;
+        long frameSize = ByteBuffer.wrap(fileBytes, pos, FRAME_SIZE_SIZE).getLong();
+        
         // Read tag count
         pos -= TAG_COUNT_SIZE;
         int tagCount = ByteBuffer.wrap(fileBytes, pos, TAG_COUNT_SIZE).getInt();
@@ -111,7 +130,8 @@ public class EncryptionFooter {
         }
         
         // Create footer and read GCM tags
-        EncryptionFooter footer = new EncryptionFooter(messageId);
+        EncryptionFooter footer = new EncryptionFooter(messageId, frameSize);
+        footer.frameCount = frameCount;
         int tagStartPos = fileBytes.length - footerLength;
         
         for (int i = 0; i < tagCount; i++) {
@@ -142,5 +162,17 @@ public class EncryptionFooter {
             throw new IOException("Invalid GCM tag length: " + tag.length);
         }
         gcmTags.add(Arrays.copyOf(tag, tag.length));
+    }
+    
+    public long getFrameSize() {
+        return frameSize;
+    }
+    
+    public int getFrameCount() {
+        return frameCount;
+    }
+    
+    public void setFrameCount(int frameCount) {
+        this.frameCount = frameCount;
     }
 }

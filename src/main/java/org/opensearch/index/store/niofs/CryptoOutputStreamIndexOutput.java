@@ -55,6 +55,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private final byte[] buffer;
         private final EncryptionFooter footer;
         private final java.security.Provider provider;
+        private final long frameSize;
         
         // Frame tracking
         private Cipher currentCipher;
@@ -62,13 +63,16 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private long currentFrameOffset = 0;
         private int bufferPosition = 0;
         private long streamOffset = 0;
+        private int totalFrames = 0;
         private boolean isClosed = false;
 
         EncryptedOutputStream(OutputStream os, KeyIvResolver keyResolver, java.security.Provider provider) {
             super(os);
+
+            this.frameSize = EncryptionFooter.DEFAULT_FRAME_SIZE;
             
             // Generate MessageId and derive file-specific key
-            this.footer = EncryptionFooter.generateNew();
+            this.footer = EncryptionFooter.generateNew(frameSize);
             this.directoryKey = keyResolver.getDataKey().getEncoded();
             byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
             this.fileKey = new javax.crypto.spec.SecretKeySpec(derivedKey, "AES");
@@ -127,14 +131,15 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             
             while (remaining > 0) {
                 // Check if we need to start a new frame
-                int frameNumber = AesCipherFactory.getFrameNumber(streamOffset);
+                int frameNumber = (int)(streamOffset / frameSize);
                 if (frameNumber != currentFrameNumber) {
                     finalizeCurrentFrame();
-                    initializeFrameCipher(frameNumber, AesCipherFactory.getOffsetWithinFrame(streamOffset));
+                    totalFrames = Math.max(totalFrames, frameNumber + 1);
+                    initializeFrameCipher(frameNumber, streamOffset % frameSize);
                 }
                 
                 // Calculate how much we can write in current frame
-                long frameEnd = (frameNumber + 1) * EncryptionFooter.DEFAULT_FRAME_SIZE;
+                long frameEnd = (frameNumber + 1) * frameSize;
                 int chunkSize = (int) Math.min(remaining, frameEnd - streamOffset);
                 
                 try {
@@ -172,6 +177,9 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 // this will also flush the buffer.
                 // Finalize current frame
                 finalizeCurrentFrame();
+                
+                // Set final frame count in footer
+                footer.setFrameCount(totalFrames);
                 
                 // Write footer with the MessageId used for key derivation
                 out.write(footer.serialize());
