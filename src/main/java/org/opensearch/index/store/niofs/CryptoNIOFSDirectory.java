@@ -97,14 +97,16 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
-        if (name.contains("segments_") || name.endsWith(".si")) {
+        if (isNonEncryptedFile(name)) {
             return super.fileLength(name);  // Non-encrypted files
         }
         
         // Encrypted files: calculate variable footer length
         long fileSize = super.fileLength(name);
+        // Handle files that might be in process of being written
         if (fileSize < EncryptionFooter.MIN_FOOTER_SIZE) {
-            throw new IOException("File too small to contain encryption footer: " + name);
+            // File might be incomplete or very small
+            return Math.max(0, fileSize - EncryptionFooter.MIN_FOOTER_SIZE);  // Assume minimum footer
         }
         
         Path path = getDirectory().resolve(name);
@@ -122,5 +124,13 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public synchronized void close() throws IOException {
         isOpen = false;
         deletePendingFiles();
+    }
+
+    private boolean isNonEncryptedFile(String name) {
+        return name.contains("segments_") ||
+                name.endsWith(".si") ||
+                name.equals("ivFile") ||
+                name.equals("keyfile") ||
+                name.endsWith(".lock");
     }
 }
