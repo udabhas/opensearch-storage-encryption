@@ -63,12 +63,16 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.keyResolver = keyResolver;
         this.isClone = false;
         
-        // Read footer and derive file-specific key
-        EncryptionFooter footer = readFooterFromFile();
+        // Get directory key first
         this.directoryKey = keyResolver.getDataKey().getEncoded();
+        
+        // Read footer with temporary key for authentication
+        EncryptionFooter footer = readFooterFromFile();
         this.messageId = footer.getMessageId();
         this.frameSize = footer.getFrameSize();
         this.algorithm = EncryptionAlgorithm.fromId(footer.getAlgorithmId());
+        
+        // Derive file-specific key using messageId from footer
         byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
         
@@ -79,7 +83,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -91,15 +95,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.footerLength = footerLength;
         this.frameSize = frameSize;
         this.algorithm = EncryptionAlgorithm.fromId(algorithmId);
-        
-        // For slices, we need directory key and messageId for frame decryption
-        try {
-            EncryptionFooter footer = readFooterFromFile();
-            this.directoryKey = keyResolver.getDataKey().getEncoded();
-            this.messageId = footer.getMessageId();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to read footer for slice", e);
-        }
+        this.directoryKey = directoryKey;  // Passed from parent
+        this.messageId = messageId;  // Passed from parent
     }
 
     @Override
@@ -133,7 +130,9 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             keySpec,  // Pass the already-derived keySpec
             footerLength,
             frameSize,
-            algorithm.getAlgorithmId()
+            algorithm.getAlgorithmId(),
+            directoryKey,  // Pass directory key
+            messageId      // Pass message ID
         );
     }
 
@@ -244,7 +243,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             throw new IOException("Failed to read complete footer");
         }
         
-        return EncryptionFooter.deserialize(footerBuffer.array());
+        // Use directory key for footer authentication (before file key derivation)
+        return EncryptionFooter.deserialize(footerBuffer.array(), directoryKey);
     }
     
 

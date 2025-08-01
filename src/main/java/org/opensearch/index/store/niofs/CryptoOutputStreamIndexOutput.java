@@ -184,8 +184,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 // Set final frame count in footer
                 footer.setFrameCount(totalFrames);
                 
-                // Write footer with the MessageId used for key derivation
-                out.write(footer.serialize());
+                // Write footer with directory key for authentication
+                out.write(footer.serialize(this.directoryKey));
                 
                 super.close();
             } catch (IOException e) {

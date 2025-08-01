@@ -161,18 +161,18 @@ public class AesCipherFactory {
         
         return frameIV;
     }
-    
+
     /**
-     * Calculate which frame contains a given file offset
+     * Calculate which frame contains a given file offset using bit shift
      */
     public static int getFrameNumber(long fileOffset) {
-        return (int) (fileOffset / EncryptionFooter.DEFAULT_FRAME_SIZE);
+        return (int) (fileOffset >>> 36); // Right shift by 36 (equivalent to dividing by 64GB)
     }
-    
+
     /**
-     * Calculate offset within a frame
+     * Calculate offset within a frame using bitwise AND
      */
     public static long getOffsetWithinFrame(long fileOffset) {
-        return fileOffset % EncryptionFooter.DEFAULT_FRAME_SIZE;
+        return fileOffset & 0xFFFFFFFFFFL; // AND with (64GB - 1) to get remainder
     }
 }
