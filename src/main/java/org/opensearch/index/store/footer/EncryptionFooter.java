@@ -17,7 +17,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Variable footer format: [GcmTags...][TagCount(4)][FrameSize(8)][FrameCount(4)][AlgorithmId(4)][MessageId(16)][FooterLength(4)][Magic(4)]
+ * Footer format: [GcmTags...][TagCount(4)][FrameSize(8)][FrameCount(4)][MessageId(16)][KeyMetadata(0)][KeyMetadataLength(2)][AlgorithmId(2)][FooterLength(4)][Magic(4)]
  */
 public class EncryptionFooter {
     
@@ -26,10 +26,11 @@ public class EncryptionFooter {
     public static final int TAG_COUNT_SIZE = 4;
     public static final int FRAME_SIZE_SIZE = 8;
     public static final int FRAME_COUNT_SIZE = 4;
+    public static final int KEY_METADATA_LENGTH_SIZE = 2; // Currently unused - key data from ivFile/keyfile
     public static final int ALGORITHM_ID_SIZE = 2;
     public static final int FOOTER_LENGTH_SIZE = 4;
-    public static final int FIXED_FOOTER_SIZE = MESSAGE_ID_SIZE + FOOTER_LENGTH_SIZE + MAGIC.length; // 24 bytes
-    public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + TAG_COUNT_SIZE + FRAME_SIZE_SIZE + FRAME_COUNT_SIZE + ALGORITHM_ID_SIZE; // 42 bytes
+    public static final int FIXED_FOOTER_SIZE = MESSAGE_ID_SIZE + KEY_METADATA_LENGTH_SIZE + ALGORITHM_ID_SIZE + FOOTER_LENGTH_SIZE + MAGIC.length; // 28 bytes
+    public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + TAG_COUNT_SIZE + FRAME_SIZE_SIZE + FRAME_COUNT_SIZE; // 44 bytes
     
     // Frame constants for large file support
     public static final long DEFAULT_FRAME_SIZE = 64L * 1024 * 1024 * 1024; // 64GB per frame
@@ -40,6 +41,7 @@ public class EncryptionFooter {
     private final List<byte[]> gcmTags;
     private final long frameSize;
     private final short algorithmId;
+    private final byte[] keyMetadata; // Currently empty - key data retrieved from ivFile/keyfile
     private int frameCount;
     
     public EncryptionFooter(byte[] messageId, long frameSize, short algorithmId) {
@@ -50,6 +52,7 @@ public class EncryptionFooter {
         this.gcmTags = new ArrayList<>();
         this.frameSize = frameSize;
         this.algorithmId = algorithmId;
+        this.keyMetadata = new byte[0]; // Empty - currently using ivFile/keyfile for key data
         this.frameCount = 0;
     }
     
@@ -60,9 +63,8 @@ public class EncryptionFooter {
     }
 
 
-    // [Data.....][GcmTags...][TagCount(4)][FrameSize(8)][FrameCount(4)][AlgorithmId(4)][MessageId(16)][FooterLength(4)][Magic(4)]
     public byte[] serialize() {
-        int footerSize = MIN_FOOTER_SIZE + (gcmTags.size() * AesGcmCipherFactory.GCM_TAG_LENGTH);
+        int footerSize = MIN_FOOTER_SIZE + (gcmTags.size() * AesGcmCipherFactory.GCM_TAG_LENGTH) + keyMetadata.length;
         ByteBuffer buffer = ByteBuffer.allocate(footerSize);
         
         // Write GCM tags
@@ -79,11 +81,17 @@ public class EncryptionFooter {
         // Write frame count
         buffer.putInt(frameCount);
         
-        // Write algorithm ID
-        buffer.putShort(algorithmId);
-        
         // Write MessageId
         buffer.put(messageId);
+        
+        // Write KeyMetadata (empty - using ivFile/keyfile)
+        buffer.put(keyMetadata);
+        
+        // Write KeyMetadataLength
+        buffer.putShort((short) keyMetadata.length);
+        
+        // Write algorithm ID
+        buffer.putShort(algorithmId);
         
         // Write footer length
         buffer.putInt(footerSize);
@@ -99,7 +107,6 @@ public class EncryptionFooter {
             throw new IOException("Invalid footer size: " + fileBytes.length);
         }
         
-        // Read from end: [TagCount(4)][FrameSize(8)][FrameCount(4)][AlgorithmId(4)][MessageId(16)][FooterLength(4)][Magic(4)]
         int pos = fileBytes.length;
         
         // Read magic
@@ -113,13 +120,21 @@ public class EncryptionFooter {
         pos -= FOOTER_LENGTH_SIZE;
         int footerLength = ByteBuffer.wrap(fileBytes, pos, FOOTER_LENGTH_SIZE).getInt();
         
-        // Read MessageId
-        pos -= MESSAGE_ID_SIZE;
-        byte[] messageId = Arrays.copyOfRange(fileBytes, pos, pos + MESSAGE_ID_SIZE);
-        
         // Read algorithm ID
         pos -= ALGORITHM_ID_SIZE;
         short algorithmId = ByteBuffer.wrap(fileBytes, pos, ALGORITHM_ID_SIZE).getShort();
+        
+        // Read KeyMetadataLength
+        pos -= KEY_METADATA_LENGTH_SIZE;
+        short keyMetadataLength = ByteBuffer.wrap(fileBytes, pos, KEY_METADATA_LENGTH_SIZE).getShort();
+        
+        // Read KeyMetadata (currently empty)
+        pos -= keyMetadataLength;
+        byte[] keyMetadata = Arrays.copyOfRange(fileBytes, pos, pos + keyMetadataLength);
+        
+        // Read MessageId
+        pos -= MESSAGE_ID_SIZE;
+        byte[] messageId = Arrays.copyOfRange(fileBytes, pos, pos + MESSAGE_ID_SIZE);
         
         // Read frame count
         pos -= FRAME_COUNT_SIZE;
@@ -134,7 +149,7 @@ public class EncryptionFooter {
         int tagCount = ByteBuffer.wrap(fileBytes, pos, TAG_COUNT_SIZE).getInt();
         
         // Validate footer length
-        int expectedLength = MIN_FOOTER_SIZE + (tagCount * AesGcmCipherFactory.GCM_TAG_LENGTH);
+        int expectedLength = MIN_FOOTER_SIZE + (tagCount * AesGcmCipherFactory.GCM_TAG_LENGTH) + keyMetadataLength;
         if (footerLength != expectedLength) {
             throw new IOException("Footer length mismatch: expected " + expectedLength + ", got " + footerLength);
         }
@@ -188,5 +203,9 @@ public class EncryptionFooter {
     
     public short getAlgorithmId() {
         return algorithmId;
+    }
+    
+    public byte[] getKeyMetadata() {
+        return Arrays.copyOf(keyMetadata, keyMetadata.length);
     }
 }
