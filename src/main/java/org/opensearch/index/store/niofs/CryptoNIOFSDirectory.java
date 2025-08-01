@@ -6,6 +6,7 @@ package org.opensearch.index.store.niofs;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -98,8 +99,22 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public long fileLength(String name) throws IOException {
         if (name.contains("segments_") || name.endsWith(".si")) {
             return super.fileLength(name);  // Non-encrypted files
-        } else {
-            return super.fileLength(name) - EncryptionFooter.FOOTER_SIZE;  // Encrypted files
+        }
+        
+        // Encrypted files: calculate variable footer length
+        long fileSize = super.fileLength(name);
+        if (fileSize < EncryptionFooter.MIN_FOOTER_SIZE) {
+            throw new IOException("File too small to contain encryption footer: " + name);
+        }
+        
+        Path path = getDirectory().resolve(name);
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            // Read minimum footer to get actual length
+            ByteBuffer buffer = ByteBuffer.allocate(EncryptionFooter.MIN_FOOTER_SIZE);
+            channel.read(buffer, fileSize - EncryptionFooter.MIN_FOOTER_SIZE);
+            
+            int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+            return fileSize - footerLength;
         }
     }
 

@@ -7,22 +7,26 @@
  */
 package org.opensearch.index.store.footer;
 
+import org.opensearch.index.store.cipher.AesGcmCipherFactory;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
- * Format: [MessageId(16)][Magic(4)] = 20 bytes total
- * 
- * Frame Support: Files are encrypted in frames to support large files (>64GB)
- * and enable random access without decrypting entire file.
+ * Variable footer format: [GcmTags...][TagCount(4)][MessageId(16)][FooterLength(4)][Magic(4)]
  */
 public class EncryptionFooter {
     
     public static final byte[] MAGIC = "OSEF".getBytes();
     public static final int MESSAGE_ID_SIZE = 16;
-    public static final int FOOTER_SIZE = MESSAGE_ID_SIZE + MAGIC.length;
+    public static final int TAG_COUNT_SIZE = 4;
+    public static final int FOOTER_LENGTH_SIZE = 4;
+    public static final int FIXED_FOOTER_SIZE = MESSAGE_ID_SIZE + FOOTER_LENGTH_SIZE + MAGIC.length; // 24 bytes
+    public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + TAG_COUNT_SIZE; // 28 bytes
     
     // Frame constants for large file support
     public static final long DEFAULT_FRAME_SIZE = 64L * 1024 * 1024 * 1024; // 64GB per frame
@@ -30,12 +34,14 @@ public class EncryptionFooter {
     public static final String FRAME_CONTEXT_PREFIX = "frame-"; // Context for frame key derivation
     
     private final byte[] messageId;
+    private final List<byte[]> gcmTags;
     
     public EncryptionFooter(byte[] messageId) {
         if (messageId.length != MESSAGE_ID_SIZE) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }
         this.messageId = Arrays.copyOf(messageId, MESSAGE_ID_SIZE);
+        this.gcmTags = new ArrayList<>();
     }
     
     public static EncryptionFooter generateNew() {
@@ -43,36 +49,98 @@ public class EncryptionFooter {
         new SecureRandom().nextBytes(messageId);
         return new EncryptionFooter(messageId);
     }
-    
+
+
+    // this is like
+    // [Data.....][tags 1...n][total number of tags (n)][messageID][FooterSize][Magic Bytes]
     public byte[] serialize() {
-        ByteBuffer buffer = ByteBuffer.allocate(FOOTER_SIZE);
+        int footerSize = MIN_FOOTER_SIZE + (gcmTags.size() * AesGcmCipherFactory.GCM_TAG_LENGTH);
+        ByteBuffer buffer = ByteBuffer.allocate(footerSize);
+        
+        // Write GCM tags
+        for (byte[] tag : gcmTags) {
+            buffer.put(tag);
+        }
+        
+        // Write tag count
+        buffer.putInt(gcmTags.size());
+        
+        // Write MessageId
         buffer.put(messageId);
+        
+        // Write footer length
+        buffer.putInt(footerSize);
+        
+        // Write magic
         buffer.put(MAGIC);
+        
         return buffer.array();
     }
     
-    public static EncryptionFooter deserialize(byte[] footerBytes) throws IOException {
-        if (footerBytes.length != FOOTER_SIZE) {
-            throw new IOException("Invalid footer size: " + footerBytes.length);
+    public static EncryptionFooter deserialize(byte[] fileBytes) throws IOException {
+        if (fileBytes.length < MIN_FOOTER_SIZE) {
+            throw new IOException("Invalid footer size: " + fileBytes.length);
         }
         
-        ByteBuffer buffer = ByteBuffer.wrap(footerBytes);
+        // Read from end: [TagCount(4)][MessageId(16)][FooterLength(4)][Magic(4)]
+        int pos = fileBytes.length;
         
-        // Read MessageId
-        byte[] messageId = new byte[MESSAGE_ID_SIZE];
-        buffer.get(messageId);
-        
-        // Verify magic
-        byte[] magic = new byte[MAGIC.length];
-        buffer.get(magic);
+        // Read magic
+        pos -= MAGIC.length;
+        byte[] magic = Arrays.copyOfRange(fileBytes, pos, pos + MAGIC.length);
         if (!Arrays.equals(magic, MAGIC)) {
             throw new IOException("Invalid footer magic");
         }
         
-        return new EncryptionFooter(messageId);
+        // Read footer length
+        pos -= FOOTER_LENGTH_SIZE;
+        int footerLength = ByteBuffer.wrap(fileBytes, pos, FOOTER_LENGTH_SIZE).getInt();
+        
+        // Read MessageId
+        pos -= MESSAGE_ID_SIZE;
+        byte[] messageId = Arrays.copyOfRange(fileBytes, pos, pos + MESSAGE_ID_SIZE);
+        
+        // Read tag count
+        pos -= TAG_COUNT_SIZE;
+        int tagCount = ByteBuffer.wrap(fileBytes, pos, TAG_COUNT_SIZE).getInt();
+        
+        // Validate footer length
+        int expectedLength = MIN_FOOTER_SIZE + (tagCount * AesGcmCipherFactory.GCM_TAG_LENGTH);
+        if (footerLength != expectedLength) {
+            throw new IOException("Footer length mismatch: expected " + expectedLength + ", got " + footerLength);
+        }
+        
+        // Create footer and read GCM tags
+        EncryptionFooter footer = new EncryptionFooter(messageId);
+        int tagStartPos = fileBytes.length - footerLength;
+        
+        for (int i = 0; i < tagCount; i++) {
+            int tagPos = tagStartPos + (i * AesGcmCipherFactory.GCM_TAG_LENGTH);
+            byte[] tag = Arrays.copyOfRange(fileBytes, tagPos, tagPos + AesGcmCipherFactory.GCM_TAG_LENGTH);
+            footer.addGcmTag(tag);
+        }
+        
+        return footer;
+    }
+    
+    public static int calculateFooterLength(byte[] footerBytes) throws IOException {
+        if (footerBytes.length < MIN_FOOTER_SIZE) {
+            throw new IOException("Footer too small: " + footerBytes.length);
+        }
+        
+        // Read footer length from end: [FooterLength(4)][Magic(4)]
+        int pos = footerBytes.length - MAGIC.length - FOOTER_LENGTH_SIZE;
+        return ByteBuffer.wrap(footerBytes, pos, FOOTER_LENGTH_SIZE).getInt();
     }
     
     public byte[] getMessageId() {
         return Arrays.copyOf(messageId, MESSAGE_ID_SIZE);
+    }
+    
+    public void addGcmTag(byte[] tag) throws IOException {
+        if (tag.length != AesGcmCipherFactory.GCM_TAG_LENGTH) {
+            throw new IOException("Invalid GCM tag length: " + tag.length);
+        }
+        gcmTags.add(Arrays.copyOf(tag, tag.length));
     }
 }

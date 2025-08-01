@@ -20,6 +20,7 @@ import org.opensearch.index.store.iv.KeyIvResolver;
 
 import javax.crypto.Cipher;
 import java.security.Key;
+import java.util.Arrays;
 
 /**
  * An IndexOutput implementation that encrypts data before writing using native
@@ -209,18 +210,25 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         }
         
         /**
-         * Finalize current frame and write any remaining data
+         * Finalize current frame and collect GCM tag
          */
         private void finalizeCurrentFrame() throws IOException {
             if (currentCipher != null) {
                 try {
                     byte[] finalData = CryptoNativeCipher.finalizeGCMJava(currentCipher);
                     // finalData contains [remaining_encrypted_bytes][16_byte_tag]
-                    // Write any remaining encrypted bytes (excluding the tag)
-                    if (finalData.length > AesGcmCipherFactory.GCM_TAG_LENGTH) {
-                        out.write(finalData, 0, finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH);
+                    
+                    if (finalData.length >= AesGcmCipherFactory.GCM_TAG_LENGTH) {
+                        // Write encrypted data (excluding tag)
+                        int encryptedLength = finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH;
+                        if (encryptedLength > 0) {
+                            out.write(finalData, 0, encryptedLength);
+                        }
+                        
+                        // Extract and store GCM tag
+                        byte[] gcmTag = Arrays.copyOfRange(finalData, encryptedLength, finalData.length);
+                        footer.addGcmTag(gcmTag);
                     }
-                    // TODO: Store GCM tag for authentication (Phase 4)
                 } catch (Throwable t) {
                     throw new IOException("Failed to finalize frame " + currentFrameNumber, t);
                 }

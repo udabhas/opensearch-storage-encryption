@@ -48,6 +48,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private final SecretKeySpec keySpec;
     private final byte[] directoryKey;
     private final byte[] messageId;
+    private final int footerLength;
 
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
 
@@ -65,9 +66,15 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.messageId = footer.getMessageId();
         byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
+        
+        // Calculate footer length
+        long fileSize = channel.size();
+        ByteBuffer buffer = ByteBuffer.allocate(EncryptionFooter.MIN_FOOTER_SIZE);
+        channel.read(buffer, fileSize - EncryptionFooter.MIN_FOOTER_SIZE);
+        this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver, SecretKeySpec keySpec, int footerLength)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -76,6 +83,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.isClone = true;
         this.keyResolver = keyResolver;
         this.keySpec = keySpec;  // Reuse keySpec from main file
+        this.footerLength = footerLength;
         
         // For slices, we need directory key and messageId for frame decryption
         try {
@@ -115,7 +123,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             length,
             getBufferSize(),
             keyResolver,
-            keySpec  // Pass the already-derived keySpec
+            keySpec,  // Pass the already-derived keySpec
+            footerLength
         );
     }
 
@@ -125,7 +134,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         if (isClone) {
             return end - off;  // Slices use exact length passed in
         } else {
-            return end - off - EncryptionFooter.FOOTER_SIZE;  // Main file excludes footer
+            return end - off - footerLength;  // Main file excludes variable footer
         }
     }
 
@@ -208,14 +217,21 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
      */
     private EncryptionFooter readFooterFromFile() throws IOException {
         long fileSize = channel.size();
-        if (fileSize < EncryptionFooter.FOOTER_SIZE) {
+        if (fileSize < EncryptionFooter.MIN_FOOTER_SIZE) {
             throw new IOException("File too small to contain encryption footer");
         }
         
-        ByteBuffer footerBuffer = ByteBuffer.allocate(EncryptionFooter.FOOTER_SIZE);
-        int bytesRead = channel.read(footerBuffer, fileSize - EncryptionFooter.FOOTER_SIZE);
+        // First read minimum footer to get actual length
+        ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionFooter.MIN_FOOTER_SIZE);
+        channel.read(minBuffer, fileSize - EncryptionFooter.MIN_FOOTER_SIZE);
         
-        if (bytesRead != EncryptionFooter.FOOTER_SIZE) {
+        int footerLength = EncryptionFooter.calculateFooterLength(minBuffer.array());
+        
+        // Read complete footer
+        ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+        int bytesRead = channel.read(footerBuffer, fileSize - footerLength);
+        
+        if (bytesRead != footerLength) {
             throw new IOException("Failed to read complete footer");
         }
         
