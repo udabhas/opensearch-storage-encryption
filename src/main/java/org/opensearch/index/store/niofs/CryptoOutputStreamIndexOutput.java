@@ -12,7 +12,6 @@ import java.nio.file.Path;
 import org.apache.lucene.store.OutputStreamIndexOutput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
-import org.opensearch.index.store.cipher.CryptoNativeCipher;
 
 import javax.crypto.Cipher;
 import java.security.Key;
@@ -61,7 +60,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             this.iv = iv;
             this.buffer = new byte[BUFFER_SIZE];
             this.cipher = AesGcmCipherFactory.getCipher(provider);
-            AesGcmCipherFactory.initGCMCipher(this.cipher, key, iv, Cipher.ENCRYPT_MODE, streamOffset);
+            AesGcmCipherFactory.initCipher(this.cipher, key, iv, Cipher.ENCRYPT_MODE, streamOffset);
         }
 
         @Override
@@ -107,7 +106,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
         private void processAndWrite(byte[] data, int offset, int length) throws IOException {
             try {
-                byte[] encrypted = CryptoNativeCipher.encryptGCMJava(streamOffset, cipher, slice(data, offset, length), length);
+                byte[] encrypted = org.opensearch.index.store.cipher.AesGcmCipherFactory.encryptWithoutTag(streamOffset, cipher, slice(data, offset, length), length);
                 out.write(encrypted);
                 streamOffset += length;
             } catch (Throwable t) {
@@ -134,7 +133,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 // Lucene writes footer here.
                 // this will also flush the buffer.
                 // Finalize GCM and handle any remaining encrypted bytes
-                byte[] finalData = CryptoNativeCipher.finalizeGCMJava(cipher);
+                byte[] finalData = org.opensearch.index.store.cipher.AesGcmCipherFactory.finalizeAndGetTag(cipher);
                 // finalData contains [remaining_encrypted_bytes][16_byte_tag]
                 // Write any remaining encrypted bytes (excluding the tag)
                 if (finalData.length > AesGcmCipherFactory.GCM_TAG_LENGTH) {
