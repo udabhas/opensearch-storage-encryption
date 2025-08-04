@@ -6,6 +6,7 @@ package org.opensearch.index.store.niofs;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,6 +20,8 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.common.util.io.IOUtils;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 /**
@@ -31,6 +34,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     private final Provider provider;
     public final KeyIvResolver keyIvResolver;
     private final AtomicLong nextTempFileCounter = new AtomicLong();
+    private final int algorithmId = 1; // Default to AES_256_GCM_CTR
 
     public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyIvResolver keyIvResolver) throws IOException {
         super(location, lockFactory);
@@ -76,7 +80,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), provider);
+        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver, provider, algorithmId);
     }
 
     @Override
@@ -90,12 +94,45 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), provider);
+        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver, provider, algorithmId);
+    }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        if (isNonEncryptedFile(name)) {
+            return super.fileLength(name);  // Non-encrypted files
+        }
+        
+        // Encrypted files: calculate variable footer length
+        long fileSize = super.fileLength(name);
+        // Handle files that might be in process of being written
+        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            // File might be incomplete or very small
+            return Math.max(0, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);  // Assume minimum footer
+        }
+        
+        Path path = getDirectory().resolve(name);
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            // Read minimum footer to get actual length
+            ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            
+            int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+            return fileSize - footerLength;
+        }
     }
 
     @Override
     public synchronized void close() throws IOException {
         isOpen = false;
         deletePendingFiles();
+    }
+
+    private boolean isNonEncryptedFile(String name) {
+        return name.contains("segments_") ||
+                name.endsWith(".si") ||
+                name.equals("ivFile") ||
+                name.equals("keyfile") ||
+                name.endsWith(".lock");
     }
 }
