@@ -52,19 +52,18 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        return super.openInput(name, context);
-//        String extension = FileSwitchDirectory.getExtension(name);
-//
-//        // TODO use the use-delegate method.
-//        if (!specialExtensions.contains(extension)) {
-//            return super.openInput(name, context);
-//        }
-//
-//        ensureOpen();
-//        ensureCanRead(name);
-//
-//        // Special routing for key file types
-//        return routeSpecialFile(name, extension, context);
+        String extension = FileSwitchDirectory.getExtension(name);
+
+        // TODO use the use-delegate method.
+        if (!specialExtensions.contains(extension)) {
+            return super.openInput(name, context);
+        }
+
+        ensureOpen();
+        ensureCanRead(name);
+
+        // Special routing for key file types
+        return routeSpecialFile(name, extension, context);
     }
 
     private IndexInput routeSpecialFile(String name, String extension, IOContext context) throws IOException {
