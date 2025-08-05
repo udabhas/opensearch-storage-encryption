@@ -52,25 +52,29 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        return super.openInput(name, context);
-//        String extension = FileSwitchDirectory.getExtension(name);
-//
-//        // TODO use the use-delegate method.
-//        if (!specialExtensions.contains(extension)) {
-//            return super.openInput(name, context);
-//        }
-//
-//        ensureOpen();
-//        ensureCanRead(name);
-//
-//        // Special routing for key file types
-//        return routeSpecialFile(name, extension, context);
+        String extension = FileSwitchDirectory.getExtension(name);
+
+        // Non-encrypted files go to parent NIOFSDirectory (not CryptoNIOFSDirectory)
+        if (name.contains("segments_") || name.endsWith(".si")) {
+            return super.openInput(name, context);
+        }
+
+        // Non-special extensions use CryptoNIOFSDirectory (this class's parent)
+        if (!specialExtensions.contains(extension)) {
+            return super.openInput(name, context);
+        }
+
+        ensureOpen();
+        ensureCanRead(name);
+
+        // Special routing for key file types
+        return routeSpecialFile(name, extension, context);
     }
 
     private IndexInput routeSpecialFile(String name, String extension, IOContext context) throws IOException {
-        // MERGE context: Always use NIOFS for sequential, one-time access
+        // MERGE context: Use CryptoNIOFSDirectory for sequential access
         if (context.context() == Context.MERGE) {
-            LOGGER.info("Routing {} to NIOFS for merge operation", name);
+            LOGGER.info("Routing {} to CryptoNIOFS for merge operation", name);
             return super.openInput(name, context);
         }
 
@@ -82,9 +86,9 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
             long fileSize = Files.size(file);
 
             // For files that will be accessed randomly after flush, prepare them for MMap
-            // Exception: large files should avoid memory pressure during flush
+            // Exception: large files should use CryptoNIOFS to avoid memory pressure
             if (("kdd".equals(extension) || "cfs".equals(extension)) && fileSize > MEDIUM_FILE_THRESHOLD) {
-                LOGGER.debug("Routing large {} to NIOFS during flush to avoid memory pressure", name);
+                LOGGER.debug("Routing large {} to CryptoNIOFS during flush to avoid memory pressure", name);
                 return super.openInput(name, context);
             }
             // Term files and tree files benefit from MMap even during flush
@@ -116,6 +120,8 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
                 }
                 return lazyDecryptedCryptoMMapDirectoryDelegate.openInput(name, context);
             }
+            
+
 
             case "cfs" -> {
                 Path file = getDirectory().resolve(name);

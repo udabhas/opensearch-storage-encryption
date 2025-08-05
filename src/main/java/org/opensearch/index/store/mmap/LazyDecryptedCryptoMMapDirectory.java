@@ -7,6 +7,7 @@ package org.opensearch.index.store.mmap;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
 import java.nio.file.Path;
@@ -25,6 +26,9 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.MMapDirectory;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.concurrency.RefCountedSharedArena;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
+import org.opensearch.index.store.footer.HkdfKeyDerivation;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 @SuppressWarnings("preview")
@@ -34,9 +38,24 @@ public final class LazyDecryptedCryptoMMapDirectory extends MMapDirectory {
     private static final Logger LOGGER = LogManager.getLogger(LazyDecryptedCryptoMMapDirectory.class);
 
     private final KeyIvResolver keyIvResolver;
+    private final ConcurrentHashMap<String, FileMetadata> fileMetadataCache = new ConcurrentHashMap<>();
 
     private Function<String, Optional<String>> groupingFunction = GROUP_BY_SEGMENT;
     private final ConcurrentHashMap<String, RefCountedSharedArena> arenas = new ConcurrentHashMap<>();
+    
+    private static class FileMetadata {
+        final byte[] fileKey;
+        final byte[] messageId;
+        final long frameSize;
+        final int footerLength;
+        
+        FileMetadata(byte[] fileKey, byte[] messageId, long frameSize, int footerLength) {
+            this.fileKey = fileKey;
+            this.messageId = messageId;
+            this.frameSize = frameSize;
+            this.footerLength = footerLength;
+        }
+    }
 
     private static final int SHARED_ARENA_PERMITS = checkMaxPermits(getSharedArenaMaxPermitsSysprop());
 
@@ -169,20 +188,44 @@ public final class LazyDecryptedCryptoMMapDirectory extends MMapDirectory {
 
         try (var fc = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
             final long fileSize = fc.size();
-            MemorySegment[] segments = mmap(fc, fileSize, arena, chunkSizePower, name, context);
+            
+            // Try to detect if file has footer, fallback to old format if not
+            boolean hasFooter = hasEncryptionFooter(fc);
+            
+            if (hasFooter) {
+                FileMetadata metadata = getOrReadFileMetadata(name, fc);
+                final long logicalSize = fileSize - metadata.footerLength;
+                MemorySegment[] segments = mmap(fc, logicalSize, arena, chunkSizePower, name, context);
 
-            final IndexInput in = LazyDecryptedMemorySegmentIndexInput
-                .newInstance(
-                    "CryptoMemorySegmentIndexInput(path=\"" + file + "\")",
-                    arena,
-                    segments,
-                    fileSize,
-                    chunkSizePower,
-                    keyIvResolver.getDataKey().getEncoded(),
-                    keyIvResolver.getIvBytes()
-                );
-            success = true;
-            return in;
+                final IndexInput in = LazyDecryptedMemorySegmentIndexInput
+                    .newInstance(
+                        "CryptoMemorySegmentIndexInput(path=\"" + file + "\")",
+                        arena,
+                        segments,
+                        logicalSize,
+                        chunkSizePower,
+                        metadata.fileKey,
+                        metadata.messageId
+                    );
+                success = true;
+                return in;
+            } else {
+                // Fallback to old format
+                MemorySegment[] segments = mmap(fc, fileSize, arena, chunkSizePower, name, context);
+
+                final IndexInput in = LazyDecryptedMemorySegmentIndexInput
+                    .newInstance(
+                        "CryptoMemorySegmentIndexInput(path=\"" + file + "\")",
+                        arena,
+                        segments,
+                        fileSize,
+                        chunkSizePower,
+                        keyIvResolver.getDataKey().getEncoded(),
+                        keyIvResolver.getIvBytes()
+                    );
+                success = true;
+                return in;
+            }
         } catch (Throwable ex) {
             throw new IOException("Failed to mmap " + file, ex);
         } finally {
@@ -225,5 +268,66 @@ public final class LazyDecryptedCryptoMMapDirectory extends MMapDirectory {
         }
 
         return segments;
+    }
+    
+    private FileMetadata getOrReadFileMetadata(String name, FileChannel fc) throws IOException {
+        return fileMetadataCache.computeIfAbsent(name, k -> {
+            try {
+                EncryptionFooter footer = readFooterFromFile(fc);
+                byte[] directoryKey = keyIvResolver.getDataKey().getEncoded();
+                byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
+                
+                // Calculate footer length
+                long fileSize = fc.size();
+                ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+                fc.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+                int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+                
+                return new FileMetadata(derivedKey, footer.getMessageId(), footer.getFrameSize(), footerLength);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+    
+    private EncryptionFooter readFooterFromFile(FileChannel fc) throws IOException {
+        long fileSize = fc.size();
+        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            throw new IOException("File too small to contain encryption footer");
+        }
+        
+        // First read minimum footer to get actual length
+        ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        fc.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        
+        int footerLength = EncryptionFooter.calculateFooterLength(minBuffer.array());
+        
+        // Read complete footer
+        ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+        int bytesRead = fc.read(footerBuffer, fileSize - footerLength);
+        
+        if (bytesRead != footerLength) {
+            throw new IOException("Failed to read complete footer");
+        }
+        
+        // Use directory key for footer authentication
+        return EncryptionFooter.deserialize(footerBuffer.array(), keyIvResolver.getDataKey().getEncoded());
+    }
+    
+    private boolean hasEncryptionFooter(FileChannel fc) {
+        try {
+            long fileSize = fc.size();
+            if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+                return false;
+            }
+            
+            // Check for magic bytes at the end
+            ByteBuffer magicBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MAGIC.length);
+            fc.read(magicBuffer, fileSize - EncryptionMetadataTrailer.MAGIC.length);
+            
+            return java.util.Arrays.equals(magicBuffer.array(), EncryptionMetadataTrailer.MAGIC);
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

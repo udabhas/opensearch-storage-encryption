@@ -34,7 +34,18 @@ public class MemorySegmentDecryptor {
         // Get thread-local cipher
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
-        byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
+        // Check if this is frame-based encryption (messageId passed as iv)
+        byte[] ivCopy;
+        if (iv.length == 16 && isLikelyMessageId(iv)) {
+            // Frame-based encryption: iv is actually messageId
+            long frameSize = 64L * 1024 * 1024 * 1024; // 64GB default frame size
+            int frameNumber = (int)(fileOffset / frameSize);
+            long offsetWithinFrame = fileOffset % frameSize;
+            ivCopy = AesCipherFactory.computeFrameIV(key, iv, frameNumber, offsetWithinFrame);
+        } else {
+            // Legacy encryption
+            ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
+        }
 
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
 
@@ -75,7 +86,18 @@ public class MemorySegmentDecryptor {
     public static void decryptInPlace(long addr, long length, byte[] key, byte[] iv, long fileOffset) throws Exception {
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
-        byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
+        // Check if this is frame-based encryption (messageId passed as iv)
+        byte[] ivCopy;
+        if (iv.length == 16 && isLikelyMessageId(iv)) {
+            // Frame-based encryption: iv is actually messageId
+            long frameSize = 64L * 1024 * 1024 * 1024; // 64GB default frame size
+            int frameNumber = (int)(fileOffset / frameSize);
+            long offsetWithinFrame = fileOffset % frameSize;
+            ivCopy = AesCipherFactory.computeFrameIV(key, iv, frameNumber, offsetWithinFrame);
+        } else {
+            // Legacy encryption
+            ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
+        }
 
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
 
@@ -116,7 +138,18 @@ public class MemorySegmentDecryptor {
     public static void decryptSegment(MemorySegment segment, long fileOffset, byte[] key, byte[] iv, int segmentSize) throws Exception {
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
-        byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
+        // Check if this is frame-based encryption (messageId passed as iv)
+        byte[] ivCopy;
+        if (iv.length == 16 && isLikelyMessageId(iv)) {
+            // Frame-based encryption: iv is actually messageId
+            long frameSize = 64L * 1024 * 1024 * 1024; // 64GB default frame size
+            int frameNumber = (int)(fileOffset / frameSize);
+            long offsetWithinFrame = fileOffset % frameSize;
+            ivCopy = AesCipherFactory.computeFrameIV(key, iv, frameNumber, offsetWithinFrame);
+        } else {
+            // Legacy encryption
+            ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
+        }
 
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
 
@@ -145,5 +178,29 @@ public class MemorySegmentDecryptor {
             position += size;
         }
 
+    }
+    
+    /**
+     * Heuristic to detect if the IV parameter is actually a messageId for frame-based encryption.
+     * MessageIds are typically more random than regular IVs.
+     */
+    private static boolean isLikelyMessageId(byte[] iv) {
+        // Simple heuristic: check if bytes have sufficient entropy
+        // MessageIds from SecureRandom should have high entropy
+        int nonZeroBytes = 0;
+        int uniqueBytes = 0;
+        boolean[] seen = new boolean[256];
+        
+        for (byte b : iv) {
+            if (b != 0) nonZeroBytes++;
+            int unsigned = b & 0xFF;
+            if (!seen[unsigned]) {
+                seen[unsigned] = true;
+                uniqueBytes++;
+            }
+        }
+        
+        // MessageId should have most bytes non-zero and good variety
+        return nonZeroBytes >= 12 && uniqueBytes >= 10;
     }
 }

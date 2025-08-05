@@ -246,6 +246,4 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         // Use directory key for footer authentication (before file key derivation)
         return EncryptionFooter.deserialize(footerBuffer.array(), directoryKey);
     }
-    
-
 }
