@@ -99,7 +99,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
-        if (isNonEncryptedFile(name)) {
+        if ((name.contains("segments_") || name.endsWith(".si")) ) {
             return super.fileLength(name);  // Non-encrypted files
         }
         
@@ -126,13 +126,5 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public synchronized void close() throws IOException {
         isOpen = false;
         deletePendingFiles();
-    }
-
-    private boolean isNonEncryptedFile(String name) {
-        return name.contains("segments_") ||
-                name.endsWith(".si") ||
-                name.equals("ivFile") ||
-                name.equals("keyfile") ||
-                name.endsWith(".lock");
     }
 }

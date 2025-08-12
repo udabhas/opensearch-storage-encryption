@@ -43,7 +43,7 @@ public class EncryptionFooter {
     private final List<byte[]> gcmTags;
     private final long frameSize;
     private final short algorithmId;
-    private final byte[] keyMetadata; // Currently empty - key data retrieved from ivFile/keyfile
+    private final byte[] keyMetadata; // Currently empty - key data retrieved from keyfile
     private byte[] footerAuthTag; // 16-byte GCM auth tag for footer authentication
     private int frameCount;
     
@@ -55,7 +55,7 @@ public class EncryptionFooter {
         this.gcmTags = new ArrayList<>();
         this.frameSize = frameSize;
         this.algorithmId = algorithmId;
-        this.keyMetadata = new byte[0]; // Empty - currently using ivFile/keyfile for key data
+        this.keyMetadata = new byte[0]; // Empty - currently using keyfile for key data
         this.frameCount = 0;
     }
     
@@ -101,7 +101,7 @@ public class EncryptionFooter {
         // Write MessageId
         buffer.put(messageId);
         
-        // Write KeyMetadata (empty - using ivFile/keyfile)
+        // Write KeyMetadata (empty - using keyfile)
         buffer.put(keyMetadata);
         
         // Write KeyMetadataLength

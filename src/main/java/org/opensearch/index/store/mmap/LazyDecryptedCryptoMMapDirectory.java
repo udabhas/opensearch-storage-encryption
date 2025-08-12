@@ -205,17 +205,6 @@ public final class LazyDecryptedCryptoMMapDirectory extends MMapDirectory {
             fileSize - footerLength
         );
     }
-    
-    /**
-     * Check if file should be encrypted (excludes segments, si files, etc.)
-     */
-    private boolean isNonEncryptedFile(String fileName) {
-        return fileName.contains("segments_") ||
-               fileName.endsWith(".si") ||
-               fileName.equals("ivFile") ||
-               fileName.equals("keyfile") ||
-               fileName.endsWith(".lock");
-    }
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
@@ -225,7 +214,7 @@ public final class LazyDecryptedCryptoMMapDirectory extends MMapDirectory {
         Path file = getDirectory().resolve(name);
 
         // Skip footer processing for non-encrypted files
-        if (isNonEncryptedFile(name)) {
+        if (name.contains("segments_") || name.endsWith(".si") ) {
             return super.openInput(name, context);
         }
 
