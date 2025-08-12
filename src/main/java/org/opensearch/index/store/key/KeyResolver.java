@@ -2,7 +2,7 @@
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
-package org.opensearch.index.store.iv;
+package org.opensearch.index.store.key;
 
 import java.security.Key;
 
@@ -15,7 +15,7 @@ import java.security.Key;
  *
  * @opensearch.internal
  */
-public interface KeyIvResolver {
+public interface KeyResolver {
 
     /**
      * Returns the symmetric encryption key used for cipher operations.
