@@ -11,6 +11,7 @@ import java.util.Map;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.plugins.IndexStorePlugin;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.index.store.metrics.CryptoMetrics;
 
 /**
  * A plugin that enables index level encryption and decryption.
@@ -22,6 +23,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin {
      */
     public CryptoDirectoryPlugin() {
         super();
+        CryptoMetrics.getInstance();
     }
 
     /**

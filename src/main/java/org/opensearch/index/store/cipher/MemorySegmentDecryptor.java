@@ -14,6 +14,8 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.opensearch.index.store.metrics.CryptoMetrics;
+
 /**
  * Hybrid cipher implementation that can use either:
  * 1. Native OpenSSL via Panama (for large operations)
@@ -31,85 +33,99 @@ public class MemorySegmentDecryptor {
     }
 
     public static void decryptInPlace(Arena arena, long addr, long length, byte[] key, byte[] iv, long fileOffset) throws Exception {
-        // Get thread-local cipher
-        Cipher cipher = CIPHER_POOL.get();
-        SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
-        byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
+        long start = System.currentTimeMillis();
+        boolean success = false;
+        try {
+            // Get thread-local cipher
+            Cipher cipher = CIPHER_POOL.get();
+            SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
+            byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
 
-        cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
 
-        if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-            cipher.update(ZERO_SKIP, 0, (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
-        }
-
-        MemorySegment segment = MemorySegment.ofAddress(addr).reinterpret(length, arena, null);
-        ByteBuffer buffer = segment.asByteBuffer();
-
-        final int CHUNK_SIZE = Math.min(DEFAULT_MAX_CHUNK_SIZE, (int) length); // typecast is safe.
-        byte[] chunk = new byte[CHUNK_SIZE];
-        byte[] decryptedChunk = new byte[CHUNK_SIZE];
-
-        int position = 0;
-        while (position < buffer.capacity()) {
-            int size = Math.min(CHUNK_SIZE, buffer.capacity() - position);
-
-            buffer.position(position);
-            buffer.get(chunk, 0, size);
-
-            int decryptedLength = cipher.update(chunk, 0, size, decryptedChunk, 0);
-            if (decryptedLength > 0) {
-                buffer.position(position);
-                buffer.put(decryptedChunk, 0, decryptedLength);
+            if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
+                cipher.update(ZERO_SKIP, 0, (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
             }
 
-            position += size;
-        }
+            MemorySegment segment = MemorySegment.ofAddress(addr).reinterpret(length, arena, null);
+            ByteBuffer buffer = segment.asByteBuffer();
 
-        int finalLength = cipher.doFinal(new byte[0], 0, 0, decryptedChunk, 0);
-        if (finalLength > 0) {
-            buffer.position(position - finalLength);
-            buffer.put(decryptedChunk, 0, finalLength);
+            final int CHUNK_SIZE = Math.min(DEFAULT_MAX_CHUNK_SIZE, (int) length); // typecast is safe.
+            byte[] chunk = new byte[CHUNK_SIZE];
+            byte[] decryptedChunk = new byte[CHUNK_SIZE];
+
+            int position = 0;
+            while (position < buffer.capacity()) {
+                int size = Math.min(CHUNK_SIZE, buffer.capacity() - position);
+
+                buffer.position(position);
+                buffer.get(chunk, 0, size);
+
+                int decryptedLength = cipher.update(chunk, 0, size, decryptedChunk, 0);
+                if (decryptedLength > 0) {
+                    buffer.position(position);
+                    buffer.put(decryptedChunk, 0, decryptedLength);
+                }
+
+                position += size;
+            }
+
+            int finalLength = cipher.doFinal(new byte[0], 0, 0, decryptedChunk, 0);
+            if (finalLength > 0) {
+                buffer.position(position - finalLength);
+                buffer.put(decryptedChunk, 0, finalLength);
+            }
+            success = true;
+        } finally {
+            CryptoMetrics.getInstance().recordOperation(System.currentTimeMillis() - start, "decrypt", success, length);
         }
     }
 
     public static void decryptInPlace(long addr, long length, byte[] key, byte[] iv, long fileOffset) throws Exception {
-        Cipher cipher = CIPHER_POOL.get();
-        SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
-        byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
+        long start = System.currentTimeMillis();
+        boolean success = false;
+        try {
+            Cipher cipher = CIPHER_POOL.get();
+            SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
+            byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
 
-        cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
 
-        if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-            cipher.update(ZERO_SKIP, 0, (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
-        }
-
-        MemorySegment segment = MemorySegment.ofAddress(addr).reinterpret(length);
-        ByteBuffer buffer = segment.asByteBuffer();
-
-        final int CHUNK_SIZE = Math.min(DEFAULT_MAX_CHUNK_SIZE, (int) length); // typecast is safe.
-        byte[] chunk = new byte[CHUNK_SIZE];
-        byte[] decryptedChunk = new byte[CHUNK_SIZE];
-
-        int position = 0;
-        while (position < buffer.capacity()) {
-            int size = Math.min(CHUNK_SIZE, buffer.capacity() - position);
-
-            buffer.position(position);
-            buffer.get(chunk, 0, size);
-
-            int decryptedLength = cipher.update(chunk, 0, size, decryptedChunk, 0);
-            if (decryptedLength > 0) {
-                buffer.position(position);
-                buffer.put(decryptedChunk, 0, decryptedLength);
+            if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
+                cipher.update(ZERO_SKIP, 0, (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
             }
 
-            position += size;
-        }
+            MemorySegment segment = MemorySegment.ofAddress(addr).reinterpret(length);
+            ByteBuffer buffer = segment.asByteBuffer();
 
-        int finalLength = cipher.doFinal(new byte[0], 0, 0, decryptedChunk, 0);
-        if (finalLength > 0) {
-            buffer.position(position - finalLength);
-            buffer.put(decryptedChunk, 0, finalLength);
+            final int CHUNK_SIZE = Math.min(DEFAULT_MAX_CHUNK_SIZE, (int) length); // typecast is safe.
+            byte[] chunk = new byte[CHUNK_SIZE];
+            byte[] decryptedChunk = new byte[CHUNK_SIZE];
+
+            int position = 0;
+            while (position < buffer.capacity()) {
+                int size = Math.min(CHUNK_SIZE, buffer.capacity() - position);
+
+                buffer.position(position);
+                buffer.get(chunk, 0, size);
+
+                int decryptedLength = cipher.update(chunk, 0, size, decryptedChunk, 0);
+                if (decryptedLength > 0) {
+                    buffer.position(position);
+                    buffer.put(decryptedChunk, 0, decryptedLength);
+                }
+
+                position += size;
+            }
+
+            int finalLength = cipher.doFinal(new byte[0], 0, 0, decryptedChunk, 0);
+            if (finalLength > 0) {
+                buffer.position(position - finalLength);
+                buffer.put(decryptedChunk, 0, finalLength);
+            }
+            success = true;
+        } finally {
+            CryptoMetrics.getInstance().recordOperation(System.currentTimeMillis() - start, "decrypt", success, length);
         }
     }
 
