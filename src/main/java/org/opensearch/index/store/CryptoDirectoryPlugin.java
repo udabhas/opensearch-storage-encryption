@@ -24,7 +24,9 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin {
         super();
         // POC: Hardcoded AWS EMF environment setup
         System.setProperty("AWS_EMF_ENVIRONMENT", "Local");
-        System.setProperty("AWS_REGION", "us-east-1");
+        System.setProperty("AWS_REGION", "ap-northeast-3");
+        System.setProperty("AWS_EMF_SERVICE_NAME", "opensearch-storage-encryption");
+        System.setProperty("AWS_EMF_SERVICE_TYPE", "OpenSearch Plugin");
     }
 
     /**
