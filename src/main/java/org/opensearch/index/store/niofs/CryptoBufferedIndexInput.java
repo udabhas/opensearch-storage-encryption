@@ -30,6 +30,7 @@ import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetrics;
 
 /**
  * An IndexInput implementation that decrypts data for reading
@@ -148,46 +149,54 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
     private int read(ByteBuffer dst, long position) throws IOException {
-
-        // initialize buffer lazy because Lucene may open input slices and clones ahead but never use them
-        // see org.apache.lucene.store.BufferedIndexInput
-        if (tmpBuffer == EMPTY_BYTEBUFFER) {
-            tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
-        }
-
-        // Calculate frame boundaries to avoid reading across frames
-        int frameNumber = (int)(position / frameSize);
-        long offsetWithinFrame = position % frameSize;
-        long frameEnd = (frameNumber + 1) * frameSize;
-        
-        // Limit read to not cross frame boundary
-        int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);
-
-        tmpBuffer.clear().limit(maxReadInFrame);
-        int bytesRead = channel.read(tmpBuffer, position);
-        if (bytesRead == -1) {
-            return -1;
-        }
-
-        tmpBuffer.flip();
-
+        long start = System.currentTimeMillis();
+        boolean success = false;
+        int bytesRead = -1;
         try {
-            // Use frame-based decryption with algorithm-based cipher
-            Cipher cipher = algorithm.getDecryptionCipher();
-            
-            // Derive frame-specific IV
-            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame);
-            
-            cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
-            
-            if (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-                cipher.update(ZERO_SKIP, 0, (int) (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+            // initialize buffer lazy because Lucene may open input slices and clones ahead but never use them
+            // see org.apache.lucene.store.BufferedIndexInput
+            if (tmpBuffer == EMPTY_BYTEBUFFER) {
+                tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
             }
 
-            return (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
-        } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException
-            | InvalidKeyException ex) {
-            throw new IOException("Failed to decrypt block at position " + position, ex);
+            // Calculate frame boundaries to avoid reading across frames
+            int frameNumber = (int)(position / frameSize);
+            long offsetWithinFrame = position % frameSize;
+            long frameEnd = (frameNumber + 1) * frameSize;
+            
+            // Limit read to not cross frame boundary
+            int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);
+
+            tmpBuffer.clear().limit(maxReadInFrame);
+            bytesRead = channel.read(tmpBuffer, position);
+            if (bytesRead == -1) {
+                return -1;
+            }
+
+            tmpBuffer.flip();
+
+            try {
+                // Use frame-based decryption with algorithm-based cipher
+                Cipher cipher = algorithm.getDecryptionCipher();
+                
+                // Derive frame-specific IV
+                byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame);
+                
+                cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
+                
+                if (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
+                    cipher.update(ZERO_SKIP, 0, (int) (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+                }
+
+                int result = (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
+                success = true;
+                return result;
+            } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException
+                | InvalidKeyException ex) {
+                throw new IOException("Failed to decrypt block at position " + position, ex);
+            }
+        } finally {
+            CryptoMetrics.getInstance().recordOperation(System.currentTimeMillis() - start, "read_decrypt", success, bytesRead > 0 ? bytesRead : 0);
         }
     }
 

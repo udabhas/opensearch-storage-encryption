@@ -18,6 +18,7 @@ import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetrics;
 
 import javax.crypto.Cipher;
 import java.security.Key;
@@ -129,34 +130,41 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         }
 
         private void processAndWrite(byte[] data, int offset, int length) throws IOException {
-            int remaining = length;
-            int dataOffset = offset;
+            long start = System.currentTimeMillis();
+            boolean success = false;
+            try {
+                int remaining = length;
+                int dataOffset = offset;
 
-            while (remaining > 0) {
-                // Check if we need to start a new frame
-                int frameNumber = (int)(streamOffset / frameSize);
-                if (frameNumber != currentFrameNumber) {
-                    finalizeCurrentFrame();
-                    totalFrames = Math.max(totalFrames, frameNumber + 1);
-                    initializeFrameCipher(frameNumber, streamOffset % frameSize);
+                while (remaining > 0) {
+                    // Check if we need to start a new frame
+                    int frameNumber = (int)(streamOffset / frameSize);
+                    if (frameNumber != currentFrameNumber) {
+                        finalizeCurrentFrame();
+                        totalFrames = Math.max(totalFrames, frameNumber + 1);
+                        initializeFrameCipher(frameNumber, streamOffset % frameSize);
+                    }
+
+                    // Calculate how much we can write in current frame
+                    long frameEnd = (frameNumber + 1) * frameSize;
+                    int chunkSize = (int) Math.min(remaining, frameEnd - streamOffset);
+
+                    try {
+                        byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
+                                                                            slice(data, dataOffset, chunkSize), chunkSize);
+                        out.write(encrypted);
+
+                        streamOffset += chunkSize;
+                        currentFrameOffset += chunkSize;
+                        remaining -= chunkSize;
+                        dataOffset += chunkSize;
+                    } catch (Throwable t) {
+                        throw new IOException("Encryption failed at offset " + streamOffset, t);
+                    }
                 }
-
-                // Calculate how much we can write in current frame
-                long frameEnd = (frameNumber + 1) * frameSize;
-                int chunkSize = (int) Math.min(remaining, frameEnd - streamOffset);
-
-                try {
-                    byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
-                                                                        slice(data, dataOffset, chunkSize), chunkSize);
-                    out.write(encrypted);
-
-                    streamOffset += chunkSize;
-                    currentFrameOffset += chunkSize;
-                    remaining -= chunkSize;
-                    dataOffset += chunkSize;
-                } catch (Throwable t) {
-                    throw new IOException("Encryption failed at offset " + streamOffset, t);
-                }
+                success = true;
+            } finally {
+                CryptoMetrics.getInstance().recordOperation(System.currentTimeMillis() - start, "write_encrypt", success, length);
             }
         }
 
