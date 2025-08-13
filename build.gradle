@@ -58,12 +58,17 @@ repositories {
 
 dependencies {
     compileOnly "org.opensearch:opensearch:${opensearch_version}"
-//    implementation "org.apache.logging.log4j:log4j-slf4j-impl:${versions.log4j}"
-
-    // Add SLF4J API and Log4j implementation
-    implementation 'org.slf4j:slf4j-api:1.7.32' // Or a compatible version
-    implementation 'org.apache.logging.log4j:log4j-slf4j-impl:2.17.0' // Log4j binding for SLF4J
-
+    
+    // SLF4J - use version 1.7.36 to match other dependencies
+    implementation 'org.slf4j:slf4j-api:1.7.36'
+    implementation 'org.apache.logging.log4j:log4j-slf4j-impl:2.21.0'
+    
+    // Jackson dependencies for EMF
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+    implementation 'com.fasterxml.jackson.core:jackson-core:2.18.2'
+    implementation 'com.fasterxml.jackson.core:jackson-annotations:2.18.2'
+    
+    // EMF
     implementation 'software.amazon.cloudwatchlogs:aws-embedded-metrics:4.0.0'
     testImplementation "org.opensearch.test:framework:${opensearch_version}"
     testImplementation "commons-io:commons-io:2.13.0"
