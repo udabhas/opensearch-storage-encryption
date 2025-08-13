@@ -30,6 +30,7 @@ import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetricsLogger;
 
 /**
  * An IndexInput implementation that decrypts data for reading
@@ -57,6 +58,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver) throws IOException {
         super(resourceDesc, context);
+        long keyStartTime = System.nanoTime();
+        
         this.channel = fc;
         this.off = 0L;
         this.end = fc.size();
@@ -76,11 +79,16 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
         
+        long keyEndTime = System.nanoTime();
+        CryptoMetricsLogger.getInstance().recordKeyOperationLatency((keyEndTime - keyStartTime) / 1_000_000.0, "FileKeyDerivation");
+        
         // Calculate footer length
         long fileSize = channel.size();
         ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+        
+        CryptoMetricsLogger.getInstance().recordFileSize(fileSize, "EncryptedFile");
     }
 
     public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId)
@@ -148,11 +156,13 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
     private int read(ByteBuffer dst, long position) throws IOException {
+        long startTime = System.nanoTime();
 
         // initialize buffer lazy because Lucene may open input slices and clones ahead but never use them
         // see org.apache.lucene.store.BufferedIndexInput
         if (tmpBuffer == EMPTY_BYTEBUFFER) {
             tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
+            CryptoMetricsLogger.getInstance().recordMemoryUsage(CHUNK_SIZE, "BufferAllocation");
         }
 
         // Calculate frame boundaries to avoid reading across frames
@@ -172,6 +182,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         tmpBuffer.flip();
 
         try {
+            long keyStartTime = System.nanoTime();
+            
             // Use frame-based decryption with algorithm-based cipher
             Cipher cipher = algorithm.getDecryptionCipher();
             
@@ -180,11 +192,25 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
             
+            long keyEndTime = System.nanoTime();
+            CryptoMetricsLogger.getInstance().recordKeyOperationLatency((keyEndTime - keyStartTime) / 1_000_000.0, "FrameIVDerivation");
+            
             if (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
                 cipher.update(ZERO_SKIP, 0, (int) (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
             }
 
-            return (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
+            int result = (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
+            
+            // Record metrics
+            long endTime = System.nanoTime();
+            double latencyMs = (endTime - startTime) / 1_000_000.0;
+            double throughputBps = bytesRead / (latencyMs / 1000.0);
+            
+            CryptoMetricsLogger.getInstance().recordDecryptionLatency(latencyMs, "BufferedRead");
+            CryptoMetricsLogger.getInstance().recordThroughput(throughputBps, "BufferedRead");
+            CryptoMetricsLogger.getInstance().recordIOOperations(1, "FileRead");
+            
+            return result;
         } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException
             | InvalidKeyException ex) {
             throw new IOException("Failed to decrypt block at position " + position, ex);
@@ -199,6 +225,9 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         }
 
         int readLength = b.remaining();
+        int totalBytesRead = 0;
+        long startTime = System.nanoTime();
+        
         while (readLength > 0) {
             final int toRead = Math.min(CHUNK_SIZE, readLength);
             b.limit(b.position() + toRead);
@@ -210,7 +239,17 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
             pos += bytesRead;
             readLength -= bytesRead;
+            totalBytesRead += bytesRead;
         }
+        
+        // Record overall read metrics
+        long endTime = System.nanoTime();
+        double latencyMs = (endTime - startTime) / 1_000_000.0;
+        double throughputBps = totalBytesRead / (latencyMs / 1000.0);
+        
+        CryptoMetricsLogger.getInstance().recordDecryptionLatency(latencyMs, "InternalRead");
+        CryptoMetricsLogger.getInstance().recordThroughput(throughputBps, "InternalRead");
+        CryptoMetricsLogger.getInstance().recordMemoryUsage(totalBytesRead, "ReadBuffer");
     }
 
     @Override
@@ -218,12 +257,15 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         if (pos > length()) {
             throw new EOFException("seek past EOF: pos=" + pos + ", length=" + length());
         }
+        CryptoMetricsLogger.getInstance().recordIOOperations(1, "Seek");
     }
     
     /**
      * Read encryption footer from end of file
      */
     private EncryptionFooter readFooterFromFile() throws IOException {
+        long startTime = System.nanoTime();
+        
         long fileSize = channel.size();
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             throw new IOException("File too small to contain encryption footer");
@@ -244,8 +286,12 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         }
         
         // Use directory key for footer authentication (before file key derivation)
-        return EncryptionFooter.deserialize(footerBuffer.array(), directoryKey);
+        EncryptionFooter footer = EncryptionFooter.deserialize(footerBuffer.array(), directoryKey);
+        
+        long endTime = System.nanoTime();
+        CryptoMetricsLogger.getInstance().recordDecryptionLatency((endTime - startTime) / 1_000_000.0, "FooterRead");
+        CryptoMetricsLogger.getInstance().recordIOOperations(2, "FooterRead");
+        
+        return footer;
     }
-    
-
 }

@@ -14,6 +14,8 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.opensearch.index.store.metrics.CryptoMetricsLogger;
+
 /**
  * Hybrid cipher implementation that can use either:
  * 1. Native OpenSSL via Panama (for large operations)
@@ -31,6 +33,8 @@ public class MemorySegmentDecryptor {
     }
 
     public static void decryptInPlace(Arena arena, long addr, long length, byte[] key, byte[] iv, long fileOffset) throws Exception {
+        long startTime = System.nanoTime();
+        
         // Get thread-local cipher
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
@@ -70,9 +74,20 @@ public class MemorySegmentDecryptor {
             buffer.position(position - finalLength);
             buffer.put(decryptedChunk, 0, finalLength);
         }
+        
+        // Record metrics
+        long endTime = System.nanoTime();
+        double latencyMs = (endTime - startTime) / 1_000_000.0;
+        double throughputBps = length / (latencyMs / 1000.0);
+        
+        CryptoMetricsLogger.getInstance().recordDecryptionLatency(latencyMs, "MemorySegmentDecrypt");
+        CryptoMetricsLogger.getInstance().recordThroughput(throughputBps, "MemorySegmentDecrypt");
+        CryptoMetricsLogger.getInstance().recordMemoryUsage(length + CHUNK_SIZE * 2, "MemorySegmentDecrypt");
     }
 
     public static void decryptInPlace(long addr, long length, byte[] key, byte[] iv, long fileOffset) throws Exception {
+        long startTime = System.nanoTime();
+        
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
         byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
@@ -111,9 +126,20 @@ public class MemorySegmentDecryptor {
             buffer.position(position - finalLength);
             buffer.put(decryptedChunk, 0, finalLength);
         }
+        
+        // Record metrics
+        long endTime = System.nanoTime();
+        double latencyMs = (endTime - startTime) / 1_000_000.0;
+        double throughputBps = length / (latencyMs / 1000.0);
+        
+        CryptoMetricsLogger.getInstance().recordDecryptionLatency(latencyMs, "DirectMemoryDecrypt");
+        CryptoMetricsLogger.getInstance().recordThroughput(throughputBps, "DirectMemoryDecrypt");
+        CryptoMetricsLogger.getInstance().recordMemoryUsage(length + CHUNK_SIZE * 2, "DirectMemoryDecrypt");
     }
 
     public static void decryptSegment(MemorySegment segment, long fileOffset, byte[] key, byte[] iv, int segmentSize) throws Exception {
+        long startTime = System.nanoTime();
+        
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(key, AesCipherFactory.ALGORITHM);
         byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, fileOffset);
@@ -144,17 +170,32 @@ public class MemorySegmentDecryptor {
 
             position += size;
         }
+        
+        // Record metrics
+        long endTime = System.nanoTime();
+        double latencyMs = (endTime - startTime) / 1_000_000.0;
+        double throughputBps = segmentSize / (latencyMs / 1000.0);
+        
+        CryptoMetricsLogger.getInstance().recordDecryptionLatency(latencyMs, "SegmentDecrypt");
+        CryptoMetricsLogger.getInstance().recordThroughput(throughputBps, "SegmentDecrypt");
+        CryptoMetricsLogger.getInstance().recordMemoryUsage(segmentSize + CHUNK_SIZE * 2, "SegmentDecrypt");
     }
     
     /**
      * Frame-based decryption for large files
      */
     public static void decryptInPlaceFrameBased(long addr, long length, byte[] fileKey, byte[] directoryKey, byte[] messageId, long frameSize, long fileOffset) throws Exception {
+        long startTime = System.nanoTime();
+        long keyStartTime = System.nanoTime();
+        
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(fileKey, AesCipherFactory.ALGORITHM);
         
         // Calculate frame-based IV
         byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, (int)(fileOffset / frameSize), fileOffset % frameSize);
+        
+        long keyEndTime = System.nanoTime();
+        CryptoMetricsLogger.getInstance().recordKeyOperationLatency((keyEndTime - keyStartTime) / 1_000_000.0, "FrameIVComputation");
         
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 
@@ -190,5 +231,14 @@ public class MemorySegmentDecryptor {
             buffer.position(position - finalLength);
             buffer.put(decryptedChunk, 0, finalLength);
         }
+        
+        // Record metrics
+        long endTime = System.nanoTime();
+        double latencyMs = (endTime - startTime) / 1_000_000.0;
+        double throughputBps = length / (latencyMs / 1000.0);
+        
+        CryptoMetricsLogger.getInstance().recordDecryptionLatency(latencyMs, "FrameBasedDecrypt");
+        CryptoMetricsLogger.getInstance().recordThroughput(throughputBps, "FrameBasedDecrypt");
+        CryptoMetricsLogger.getInstance().recordMemoryUsage(length + CHUNK_SIZE * 2, "FrameBasedDecrypt");
     }
 }

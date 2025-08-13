@@ -45,7 +45,7 @@ import org.opensearch.plugins.IndexStorePlugin;
 public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
 
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectoryFactory.class);
-    private final CryptoMetricsLogger metricsLogger = new CryptoMetricsLogger();
+    private final CryptoMetricsLogger metricsLogger = CryptoMetricsLogger.getInstance();
 
     /**
      * Creates a new CryptoDirectoryFactory
