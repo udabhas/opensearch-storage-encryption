@@ -68,6 +68,9 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-core:2.18.2'
     implementation 'com.fasterxml.jackson.core:jackson-annotations:2.18.2'
     
+    // Apache Commons Lang3 for EMF
+    implementation 'org.apache.commons:commons-lang3:3.12.0'
+    
     // EMF
     implementation 'software.amazon.cloudwatchlogs:aws-embedded-metrics:4.0.0'
     testImplementation "org.opensearch.test:framework:${opensearch_version}"
