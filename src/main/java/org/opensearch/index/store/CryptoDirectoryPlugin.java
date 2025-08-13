@@ -22,6 +22,9 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin {
      */
     public CryptoDirectoryPlugin() {
         super();
+        // POC: Hardcoded AWS EMF environment setup
+        System.setProperty("AWS_EMF_ENVIRONMENT", "Local");
+        System.setProperty("AWS_REGION", "us-east-1");
     }
 
     /**

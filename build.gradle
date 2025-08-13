@@ -59,6 +59,7 @@ repositories {
 dependencies {
     compileOnly "org.opensearch:opensearch:${opensearch_version}"
     runtimeOnly "org.apache.logging.log4j:log4j-slf4j-impl:${versions.log4j}"
+    implementation 'software.amazon.cloudwatchlogs:aws-embedded-metrics:4.0.0'
     testImplementation "org.opensearch.test:framework:${opensearch_version}"
     testImplementation "commons-io:commons-io:2.13.0"
 

@@ -35,6 +35,7 @@ import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.mmap.EagerDecryptedCryptoMMapDirectory;
 import org.opensearch.index.store.mmap.LazyDecryptedCryptoMMapDirectory;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
+import org.opensearch.index.store.metrics.CryptoMetricsLogger;
 import org.opensearch.plugins.IndexStorePlugin;
 
 @SuppressForbidden(reason = "temporary")
@@ -44,6 +45,7 @@ import org.opensearch.plugins.IndexStorePlugin;
 public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
 
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectoryFactory.class);
+    private final CryptoMetricsLogger metricsLogger = new CryptoMetricsLogger();
 
     /**
      * Creates a new CryptoDirectoryFactory
@@ -110,6 +112,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * @throws IOException
      */
     protected Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings) throws IOException {
+        long startTime = System.currentTimeMillis();
         final Provider provider = indexSettings.getValue(INDEX_CRYPTO_PROVIDER_SETTING);
         Directory baseDir = new NIOFSDirectory(location, lockFactory);
         KeyResolver keyResolver = new DefaultKeyResolver(baseDir, provider, getKeyProvider(indexSettings));
@@ -119,6 +122,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // [cfe, tvd, fnm, nvm, write.lock, dii, pay, segments_N, pos, si, fdt, tvx, liv, dvm, fdx, vem]
         Set<String> nioExtensions = new HashSet<>(indexSettings.getValue(IndexModule.INDEX_STORE_HYBRID_NIO_EXTENSIONS));
 
+        Directory result;
         switch (type) {
             case HYBRIDFS -> {
                 LOGGER.debug("Using HYBRIDFS directory");
@@ -134,7 +138,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                 );
                 lazyDecryptedCryptoMMapDirectory.setPreloadExtensions(preLoadExtensions);
 
-                return new HybridCryptoDirectory(
+                result = new HybridCryptoDirectory(
                     lockFactory,
                     lazyDecryptedCryptoMMapDirectory,
                     egarDecryptedCryptoMMapDirectory,
@@ -147,13 +151,16 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                 LOGGER.debug("Using MMAPFS directory");
                 LazyDecryptedCryptoMMapDirectory cryptoMMapDir = new LazyDecryptedCryptoMMapDirectory(location, provider, keyResolver);
                 cryptoMMapDir.setPreloadExtensions(preLoadExtensions);
-                return cryptoMMapDir;
+                result = cryptoMMapDir;
             }
             case SIMPLEFS, NIOFS -> {
                 LOGGER.debug("Using NIOFS directory");
-                return new CryptoNIOFSDirectory(lockFactory, location, provider, keyResolver);
+                result = new CryptoNIOFSDirectory(lockFactory, location, provider, keyResolver);
             }
             default -> throw new AssertionError("unexpected built-in store type [" + type + "]");
         }
+        
+        metricsLogger.recordEncryptionLatency(System.currentTimeMillis() - startTime, "DirectoryCreation");
+        return result;
     }
 }
