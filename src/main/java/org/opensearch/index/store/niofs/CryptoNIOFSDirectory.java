@@ -23,6 +23,7 @@ import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetrics;
 
 /**
  * A NioFS directory implementation that encrypts files to be stored based on a
@@ -48,25 +49,36 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             return super.openInput(name, context);
         }
 
-        ensureOpen();
-        ensureCanRead(name);
-        Path path = getDirectory().resolve(name);
-        FileChannel fc = FileChannel.open(path, StandardOpenOption.READ);
+        long startTime = System.currentTimeMillis();
         boolean success = false;
-
+        long fileSize = 0;
+        
         try {
-            final IndexInput indexInput = new CryptoBufferedIndexInput(
-                "CryptoBufferedIndexInput(path=\"" + path + "\")",
-                fc,
-                context,
-                this.keyResolver
-            );
-            success = true;
-            return indexInput;
-        } finally {
-            if (!success) {
-                IOUtils.closeWhileHandlingException(fc);
+            ensureOpen();
+            ensureCanRead(name);
+            Path path = getDirectory().resolve(name);
+            fileSize = fileLength(name); // Get decrypted file size
+            FileChannel fc = FileChannel.open(path, StandardOpenOption.READ);
+            boolean fcSuccess = false;
+
+            try {
+                final IndexInput indexInput = new CryptoBufferedIndexInput(
+                    "CryptoBufferedIndexInput(path=\"" + path + "\")",
+                    fc,
+                    context,
+                    this.keyResolver
+                );
+                fcSuccess = true;
+                success = true;
+                return indexInput;
+            } finally {
+                if (!fcSuccess) {
+                    IOUtils.closeWhileHandlingException(fc);
+                }
             }
+        } finally {
+            long duration = System.currentTimeMillis() - startTime;
+            CryptoMetrics.getInstance().recordOperation(duration, "decrypt", success, fileSize);
         }
     }
 
@@ -76,11 +88,22 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             return super.createOutput(name, context);
         }
 
-        ensureOpen();
-        Path path = directory.resolve(name);
-        OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
-
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId);
+        long startTime = System.currentTimeMillis();
+        boolean success = false;
+        
+        try {
+            ensureOpen();
+            Path path = directory.resolve(name);
+            OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+            
+            IndexOutput output = new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId);
+            success = true;
+            return output;
+        } finally {
+            long duration = System.currentTimeMillis() - startTime;
+            // For output creation, we don't know final size yet, so use 0
+            CryptoMetrics.getInstance().recordOperation(duration, "encrypt", success, 0);
+        }
     }
 
     @Override
@@ -89,12 +112,23 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             return super.createTempOutput(prefix, suffix, context);
         }
 
-        ensureOpen();
-        String name = getTempFileName(prefix, suffix, nextTempFileCounter.getAndIncrement());
-        Path path = directory.resolve(name);
-        OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+        long startTime = System.currentTimeMillis();
+        boolean success = false;
+        
+        try {
+            ensureOpen();
+            String name = getTempFileName(prefix, suffix, nextTempFileCounter.getAndIncrement());
+            Path path = directory.resolve(name);
+            OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId);
+            IndexOutput output = new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId);
+            success = true;
+            return output;
+        } finally {
+            long duration = System.currentTimeMillis() - startTime;
+            // For temp output creation, we don't know final size yet, so use 0
+            CryptoMetrics.getInstance().recordOperation(duration, "encrypt", success, 0);
+        }
     }
 
     @Override
