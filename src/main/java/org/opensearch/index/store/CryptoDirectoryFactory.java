@@ -45,6 +45,10 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.READ_AHEAD_QUE
 import static org.opensearch.index.store.directio.DirectIoConfigs.RESEVERED_POOL_SIZE_IN_BYTES;
 import static org.opensearch.index.store.directio.DirectIoConfigs.WARM_UP_PERCENTAGE;
 import org.opensearch.index.store.hybrid.HybridCryptoDirectory;
+import org.opensearch.index.store.key.DefaultKeyResolver;
+import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.mmap.EagerDecryptedCryptoMMapDirectory;
+import org.opensearch.index.store.mmap.LazyDecryptedCryptoMMapDirectory;
 import org.opensearch.index.store.iv.DefaultKeyIvResolver;
 import org.opensearch.index.store.iv.KeyIvResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
@@ -137,7 +141,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     protected Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings) throws IOException {
         final Provider provider = indexSettings.getValue(INDEX_CRYPTO_PROVIDER_SETTING);
         Directory baseDir = new NIOFSDirectory(location, lockFactory);
-        KeyIvResolver keyIvResolver = new DefaultKeyIvResolver(baseDir, provider, getKeyProvider(indexSettings));
+        KeyResolver keyResolver = new DefaultKeyResolver(baseDir, provider, getKeyProvider(indexSettings));
 
         IndexModule.Type type = IndexModule.defaultStoreType(IndexModule.NODE_STORE_ALLOW_MMAP.get(indexSettings.getNodeSettings()));
 
@@ -146,19 +150,37 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                 LOGGER.debug("Using HYBRIDFS directory");
 
                 CryptoDirectIODirectory cryptoDirectIODirectory = createCryptoDirectIODirectory(
+                LazyDecryptedCryptoMMapDirectory lazyDecryptedCryptoMMapDirectory = new LazyDecryptedCryptoMMapDirectory(
                     location,
+                    provider,
+                        keyResolver
+                );
+                EagerDecryptedCryptoMMapDirectory egarDecryptedCryptoMMapDirectory = new EagerDecryptedCryptoMMapDirectory(
+                    location,
+                    provider,
+                        keyResolver
+                );
+                lazyDecryptedCryptoMMapDirectory.setPreloadExtensions(preLoadExtensions);
+
+                return new HybridCryptoDirectory(
                     lockFactory,
                     provider,
                     keyIvResolver
+                        keyResolver,
+                    nioExtensions
                 );
                 return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyIvResolver);
             }
             case MMAPFS -> {
                 throw new AssertionError("MMAPFS not supported with index level encryption");
+                LOGGER.debug("Using MMAPFS directory");
+                LazyDecryptedCryptoMMapDirectory cryptoMMapDir = new LazyDecryptedCryptoMMapDirectory(location, provider, keyResolver);
+                cryptoMMapDir.setPreloadExtensions(preLoadExtensions);
+                return cryptoMMapDir;
             }
             case SIMPLEFS, NIOFS -> {
                 LOGGER.debug("Using NIOFS directory");
-                return new CryptoNIOFSDirectory(lockFactory, location, provider, keyIvResolver);
+                return new CryptoNIOFSDirectory(lockFactory, location, provider, keyResolver);
             }
             default -> throw new AssertionError("unexpected built-in store type [" + type + "]");
         }
@@ -206,7 +228,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         * -----------
         * - Caffeine eviction is single-threaded by default (runs in caller thread via `Runnable::run`),
         *   which avoids offloading release to background threads that may hold on to native memory.
-        * 
+        *
         */
 
         // Create a per-directory loader that knows about this specific keyIvResolver
