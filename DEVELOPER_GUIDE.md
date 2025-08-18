@@ -177,21 +177,11 @@ When EMF is enabled, the plugin publishes these metrics to CloudWatch:
 
 **Namespace:** `OpenSearch/StorageEncryption`
 
-**Metrics:**
-- `ReadOperations` - Total read operations count
-- `ReadBytes` - Total bytes read
-- `WriteOperations` - Total write operations count  
-- `WriteBytes` - Total bytes written
-- `OpenInputOperations` - File open operations count
-- `CreateOutputOperations` - File create operations count
-
-**Dimensions:**
-- `Operation` - read, write, openInput, createOutput
-- `DirectoryType` - niofs, mmap, hybrid
 
 ### Viewing Metrics
 
-Metrics appear in AWS CloudWatch under the `OpenSearch/StorageEncryption` namespace. Use CloudWatch dashboards to visualize encryption/decryption throughput and operation counts.
+Metrics appear in AWS CloudWatch under the `OpenSearch/StorageEncryption` namespace. 
+Use CloudWatch dashboards to visualize encryption/decryption throughput and operation counts.
 
 ## Running Tests
 

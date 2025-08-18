@@ -122,5 +122,4 @@ public class CryptoMetricsLogger {
             logger.warn("Failed to record metric: {}", metricName, e);
         }
     }
-
 }
