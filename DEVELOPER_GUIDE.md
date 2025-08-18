@@ -113,6 +113,7 @@ emf.region: ${KMS_REGION}
 emf.service_name: "opensearch-storage-encryption"
 emf.service_type: "OpenSearch Plugin"
 emf.sampling_rate: 1.0
+emf.namespace: "OpenSearch/StorageEncryption"
 EOF
 
 # Update JVM settings
@@ -175,12 +176,9 @@ emf.service_type: "OpenSearch Plugin"
 
 When EMF is enabled, the plugin publishes these metrics to CloudWatch:
 
-**Namespace:** `OpenSearch/StorageEncryption`
-
-
 ### Viewing Metrics
 
-Metrics appear in AWS CloudWatch under the `OpenSearch/StorageEncryption` namespace. 
+Metrics appear in AWS CloudWatch under the emf.namespace. 
 Use CloudWatch dashboards to visualize encryption/decryption throughput and operation counts.
 
 ## Running Tests

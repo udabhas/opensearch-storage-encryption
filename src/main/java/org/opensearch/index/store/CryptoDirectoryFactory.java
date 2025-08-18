@@ -80,6 +80,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     public static final Setting<String> EMF_SERVICE_NAME_SETTING = new Setting<>("emf.service_name", "opensearch-storage-encryption", Function.identity(), Property.NodeScope);
     public static final Setting<String> EMF_SERVICE_TYPE_SETTING = new Setting<>("emf.service_type", "OpenSearch Plugin", Function.identity(), Property.NodeScope);
     public static final Setting<Double> EMF_SAMPLING_RATE_SETTING = Setting.doubleSetting("emf.sampling_rate", 1.0, 0.0, 1.0, Property.NodeScope);
+    public static final Setting<String> EMF_NAMESPACE_SETTING = new Setting<>("emf.namespace", "OpenSearch/StorageEncryption", Function.identity(), Property.NodeScope);
 
     MasterKeyProvider getKeyProvider(IndexSettings indexSettings) {
         final String KEY_PROVIDER_TYPE = indexSettings.getValue(INDEX_KMS_TYPE_SETTING);

@@ -34,6 +34,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin {
             System.setProperty("AWS_EMF_SERVICE_TYPE", CryptoDirectoryFactory.EMF_SERVICE_TYPE_SETTING.get(settings));
         }
         CryptoMetricsLogger.setSamplingRate(CryptoDirectoryFactory.EMF_SAMPLING_RATE_SETTING.get(settings));
+        CryptoMetricsLogger.setNamespace(CryptoDirectoryFactory.EMF_NAMESPACE_SETTING.get(settings));
     }
 
     /**
