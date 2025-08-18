@@ -20,6 +20,8 @@ import java.util.Map;
 
 public class CryptoMetricsLogger {
     private static volatile String NAMESPACE = "OpenSearch/StorageEncryption";
+    private static volatile String SERVICE_NAME = "opensearch-storage-encryption";
+    private static volatile String SERVICE_TYPE = "OpenSearch Plugin";
     private static final Logger logger = LogManager.getLogger(CryptoMetricsLogger.class);
     private static final Map<String, DimensionSet> DIMENSION_CACHE = new ConcurrentHashMap<>();
     private static final int BATCH_SIZE = 10;
@@ -30,6 +32,8 @@ public class CryptoMetricsLogger {
                 try {
                     MetricsLogger ml = new MetricsLogger();
                     ml.setNamespace(NAMESPACE);
+                    ml.putMetadata("ServiceName", SERVICE_NAME);
+                    ml.putMetadata("ServiceType", SERVICE_TYPE);
                     return ml;
                 } catch (Exception e) {
                     logger.warn("Failed to create MetricsLogger for thread: {}", Thread.currentThread().getName(), e);
@@ -100,6 +104,18 @@ public class CryptoMetricsLogger {
     public static void setNamespace(String namespace) {
         if(!namespace.isBlank()) {
             NAMESPACE = namespace;
+        }
+    }
+
+    public static void setServiceName(String serviceNmae) {
+        if(!serviceNmae.isBlank()) {
+            SERVICE_NAME = serviceNmae;
+        }
+    }
+
+    public static void setServiceType(String serviceType) {
+        if(!serviceType.isBlank()) {
+            SERVICE_TYPE = serviceType;
         }
     }
 
