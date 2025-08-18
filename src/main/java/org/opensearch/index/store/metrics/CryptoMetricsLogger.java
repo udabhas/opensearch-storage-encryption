@@ -11,7 +11,11 @@ import software.amazon.cloudwatchlogs.emf.model.DimensionSet;
 import software.amazon.cloudwatchlogs.emf.model.Unit;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+
 import java.util.concurrent.ConcurrentHashMap;
+
+import org.opensearch.common.Randomness;
+
 import java.util.Map;
 
 public class CryptoMetricsLogger {
@@ -19,19 +23,20 @@ public class CryptoMetricsLogger {
     private static final Logger logger = LogManager.getLogger(CryptoMetricsLogger.class);
     private static final Map<String, DimensionSet> DIMENSION_CACHE = new ConcurrentHashMap<>();
     private static final int BATCH_SIZE = 10;
-    
-    private static final ThreadLocal<MetricsLogger> THREAD_LOCAL_LOGGER = 
-        ThreadLocal.withInitial(() -> {
-            try {
-                MetricsLogger ml = new MetricsLogger();
-                ml.setNamespace(NAMESPACE);
-                return ml;
-            } catch (Exception e) {
-                logger.warn("Failed to create MetricsLogger for thread: {}", Thread.currentThread().getName(), e);
-                return null;
-            }
-        });
-    
+    private static volatile double SAMPLING_RATE = 1.0;
+
+    private static final ThreadLocal<MetricsLogger> THREAD_LOCAL_LOGGER =
+            ThreadLocal.withInitial(() -> {
+                try {
+                    MetricsLogger ml = new MetricsLogger();
+                    ml.setNamespace(NAMESPACE);
+                    return ml;
+                } catch (Exception e) {
+                    logger.warn("Failed to create MetricsLogger for thread: {}", Thread.currentThread().getName(), e);
+                    return null;
+                }
+            });
+
     private static final ThreadLocal<Integer> BATCH_COUNTER = ThreadLocal.withInitial(() -> 0);
 
     public static class MetricsContext {
@@ -59,7 +64,7 @@ public class CryptoMetricsLogger {
     private CryptoMetricsLogger() {
         // Private constructor to prevent instantiation
     }
-    
+
     private static MetricsLogger getMetricsLogger() {
         return THREAD_LOCAL_LOGGER.get();
     }
@@ -88,16 +93,26 @@ public class CryptoMetricsLogger {
         }
     }
 
+    public static void setSamplingRate(double samplingRate) {
+        SAMPLING_RATE = Math.max(0.0, Math.min(1.0, samplingRate));
+    }
+
+
     private static void recordMetric(String metricName, Number value, Unit unit, DimensionSet dimensions) {
         try {
+            // Apply sampling
+            if (Randomness.get().nextDouble() > SAMPLING_RATE) {
+                return;
+            }
+
             MetricsLogger metrics = getMetricsLogger();
             if (metrics != null) {
                 metrics.putDimensions(dimensions);
                 metrics.putMetric(metricName, value.doubleValue(), unit);
-                
+
                 int count = BATCH_COUNTER.get() + 1;
                 BATCH_COUNTER.set(count);
-                
+
                 if (count >= BATCH_SIZE) {
                     metrics.flush();
                     BATCH_COUNTER.set(0);
@@ -107,6 +122,5 @@ public class CryptoMetricsLogger {
             logger.warn("Failed to record metric: {}", metricName, e);
         }
     }
-    
 
 }

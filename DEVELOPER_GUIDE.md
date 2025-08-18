@@ -112,6 +112,7 @@ emf.environment: "Development"
 emf.region: ${KMS_REGION}
 emf.service_name: "opensearch-storage-encryption"
 emf.service_type: "OpenSearch Plugin"
+emf.sampling_rate: 1.0
 EOF
 
 # Update JVM settings
