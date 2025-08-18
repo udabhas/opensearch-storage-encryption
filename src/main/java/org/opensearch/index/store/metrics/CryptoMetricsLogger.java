@@ -14,9 +14,19 @@ import org.apache.logging.log4j.Logger;
 
 public class CryptoMetricsLogger {
     private static final String NAMESPACE = "OpenSearch/StorageEncryption";
-    private static volatile CryptoMetricsLogger INSTANCE;
     private static final Logger logger = LogManager.getLogger(CryptoMetricsLogger.class);
-    private final MetricsLogger metrics;
+    
+    private static final ThreadLocal<MetricsLogger> THREAD_LOCAL_LOGGER = 
+        ThreadLocal.withInitial(() -> {
+            try {
+                MetricsLogger ml = new MetricsLogger();
+                ml.setNamespace(NAMESPACE);
+                return ml;
+            } catch (Exception e) {
+                logger.warn("Failed to create MetricsLogger for thread: {}", Thread.currentThread().getName(), e);
+                return null;
+            }
+        });
 
     public static class MetricsContext {
         private final String operation;
@@ -33,28 +43,14 @@ public class CryptoMetricsLogger {
     }
 
     private CryptoMetricsLogger() {
-        MetricsLogger temp = null;
-        try {
-            temp = new MetricsLogger();
-            temp.setNamespace(NAMESPACE);
-        } catch (Exception ex) {
-            logger.warn("Failed to initialize MetricsLogger", ex);
-        }
-        this.metrics = temp;
+        // Private constructor to prevent instantiation
+    }
+    
+    private static MetricsLogger getMetricsLogger() {
+        return THREAD_LOCAL_LOGGER.get();
     }
 
-    public static CryptoMetricsLogger getInstance() {
-        if (INSTANCE == null) {
-            synchronized (CryptoMetricsLogger.class) {
-                if (INSTANCE == null) {
-                    INSTANCE = new CryptoMetricsLogger();
-                }
-            }
-        }
-        return INSTANCE;
-    }
-
-    public void recordBytes(String metricName, long bytes, MetricsContext context) {
+    public static void recordBytes(String metricName, long bytes, MetricsContext context) {
         try {
             recordMetric(metricName, bytes, Unit.BYTES, context.toDimensionSet());
         } catch (Exception e) {
@@ -62,7 +58,7 @@ public class CryptoMetricsLogger {
         }
     }
 
-    public void recordCount(String metricName, long count, MetricsContext context) {
+    public static void recordCount(String metricName, long count, MetricsContext context) {
         try {
             recordMetric(metricName, count, Unit.COUNT, context.toDimensionSet());
         } catch (Exception e) {
@@ -70,8 +66,17 @@ public class CryptoMetricsLogger {
         }
     }
 
-    private void recordMetric(String metricName, Number value, Unit unit, DimensionSet dimensions) {
+    public static void recordRate(String metricName, double rate, Unit unit, MetricsContext context) {
         try {
+            recordMetric(metricName, rate, unit, context.toDimensionSet());
+        } catch (Exception e) {
+            logger.warn("Failed to record rate metric: {}", metricName, e);
+        }
+    }
+
+    private static void recordMetric(String metricName, Number value, Unit unit, DimensionSet dimensions) {
+        try {
+            MetricsLogger metrics = getMetricsLogger();
             if (metrics != null) {
                 metrics.putDimensions(dimensions);
                 metrics.putMetric(metricName, value.doubleValue(), unit);

@@ -64,7 +64,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             );
             success = true;
             openInputCount.incrementAndGet();
-            CryptoMetricsLogger.getInstance().recordCount("OpenInputOperations", openInputCount.get(), openInputContext);
+            CryptoMetricsLogger.recordCount("OpenInputOperations", openInputCount.get(), openInputContext);
             return indexInput;
         } finally {
             if (!success) {
@@ -84,7 +84,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         createOutputCount.incrementAndGet();
-        CryptoMetricsLogger.getInstance().recordCount("CreateOutputOperations", createOutputCount.get(), createOutputContext);
+        CryptoMetricsLogger.recordCount("CreateOutputOperations", createOutputCount.get(), createOutputContext);
         return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), provider);
     }
 

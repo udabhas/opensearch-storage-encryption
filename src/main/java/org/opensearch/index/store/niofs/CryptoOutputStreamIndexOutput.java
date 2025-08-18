@@ -117,8 +117,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 writeCount.incrementAndGet();
                 bytesWritten.addAndGet(length);
                 
-                CryptoMetricsLogger.getInstance().recordCount("WriteOperations", writeCount.get(), metricsContext);
-                CryptoMetricsLogger.getInstance().recordBytes("WriteBytes", bytesWritten.get(), metricsContext);
+                CryptoMetricsLogger.recordCount("WriteOperations", writeCount.get(), metricsContext);
+                CryptoMetricsLogger.recordBytes("WriteBytes", bytesWritten.get(), metricsContext);
             } catch (Throwable t) {
                 throw new IOException("Encryption failed at offset " + streamOffset, t);
             }

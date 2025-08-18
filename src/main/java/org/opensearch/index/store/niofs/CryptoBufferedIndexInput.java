@@ -140,8 +140,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             readCount.incrementAndGet();
             atomicBytesRead.addAndGet(result);
             
-            CryptoMetricsLogger.getInstance().recordCount("ReadOperations", readCount.get(), metricsContext);
-            CryptoMetricsLogger.getInstance().recordBytes("ReadBytes", atomicBytesRead.get(), metricsContext);
+            CryptoMetricsLogger.recordCount("ReadOperations", readCount.get(), metricsContext);
+            CryptoMetricsLogger.recordBytes("ReadBytes", atomicBytesRead.get(), metricsContext);
             
             return result;
         } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException
