@@ -18,6 +18,7 @@ public class CryptoMetricsLogger {
     private static final String NAMESPACE = "OpenSearch/StorageEncryption";
     private static final Logger logger = LogManager.getLogger(CryptoMetricsLogger.class);
     private static final Map<String, DimensionSet> DIMENSION_CACHE = new ConcurrentHashMap<>();
+    private static final int BATCH_SIZE = 10;
     
     private static final ThreadLocal<MetricsLogger> THREAD_LOCAL_LOGGER = 
         ThreadLocal.withInitial(() -> {
@@ -30,6 +31,8 @@ public class CryptoMetricsLogger {
                 return null;
             }
         });
+    
+    private static final ThreadLocal<Integer> BATCH_COUNTER = ThreadLocal.withInitial(() -> 0);
 
     public static class MetricsContext {
         private final String operation;
@@ -91,10 +94,19 @@ public class CryptoMetricsLogger {
             if (metrics != null) {
                 metrics.putDimensions(dimensions);
                 metrics.putMetric(metricName, value.doubleValue(), unit);
-                metrics.flush();
+                
+                int count = BATCH_COUNTER.get() + 1;
+                BATCH_COUNTER.set(count);
+                
+                if (count >= BATCH_SIZE) {
+                    metrics.flush();
+                    BATCH_COUNTER.set(0);
+                }
             }
         } catch (Exception e) {
             logger.warn("Failed to record metric: {}", metricName, e);
         }
     }
+    
+
 }
