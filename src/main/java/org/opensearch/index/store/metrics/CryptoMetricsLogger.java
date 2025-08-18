@@ -11,10 +11,13 @@ import software.amazon.cloudwatchlogs.emf.model.DimensionSet;
 import software.amazon.cloudwatchlogs.emf.model.Unit;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 public class CryptoMetricsLogger {
     private static final String NAMESPACE = "OpenSearch/StorageEncryption";
     private static final Logger logger = LogManager.getLogger(CryptoMetricsLogger.class);
+    private static final Map<String, DimensionSet> DIMENSION_CACHE = new ConcurrentHashMap<>();
     
     private static final ThreadLocal<MetricsLogger> THREAD_LOCAL_LOGGER = 
         ThreadLocal.withInitial(() -> {
@@ -38,7 +41,15 @@ public class CryptoMetricsLogger {
         }
 
         public DimensionSet toDimensionSet() throws InvalidDimensionException, DimensionSetExceededException {
-            return DimensionSet.of("Operation", operation, "DirectoryType", directoryType);
+            String key = operation + ":" + directoryType;
+            return DIMENSION_CACHE.computeIfAbsent(key, k -> {
+                try {
+                    return DimensionSet.of("Operation", operation, "DirectoryType", directoryType);
+                } catch (InvalidDimensionException | DimensionSetExceededException e) {
+                    logger.warn("Failed to create DimensionSet for key: {}", k, e);
+                    return null;
+                }
+            });
         }
     }
 
