@@ -100,11 +100,18 @@ echo "${AWS_SESSION_TOKEN}" | ./opensearch-keystore add -x kms.session_token
 echo "${AWS_ACCESS_KEY_ID}" | ./opensearch-keystore add -x kms.access_key
 echo "${AWS_SECRET_ACCESS_KEY}" | ./opensearch-keystore add -x kms.secret_key
 
-# Append KMS configuration to opensearch.yml
+# Append KMS and EMF configuration to opensearch.yml
 cat >> "${OPENSEARCH_DIST_DIR}/config/opensearch.yml" << EOF
 # KMS Configuration
 kms.region: ${KMS_REGION}
 kms.key_arn: ${KMS_KEY_ARN}
+
+# EMF (Embedded Metric Format) Configuration for CloudWatch metrics
+emf.enabled: true
+emf.environment: "Development"
+emf.region: ${KMS_REGION}
+emf.service_name: "opensearch-storage-encryption"
+emf.service_type: "OpenSearch Plugin"
 EOF
 
 # Update JVM settings
@@ -139,6 +146,51 @@ add_jvm_option "-XX:MaxDirectMemorySize=${JVM_DIRECT_MEM_SIZE}"
 # Start OpenSearch
 ./opensearch
 ```
+
+## EMF Metrics Configuration
+
+The plugin supports AWS Embedded Metric Format (EMF) for publishing metrics to CloudWatch.
+
+### Configuration Options
+
+Add these settings to `opensearch.yml`:
+
+```yaml
+# Enable/disable EMF metrics
+emf.enabled: true
+
+# Environment name (appears in CloudWatch dimensions)
+emf.environment: "Development"  # or "Production", "Staging"
+
+# AWS region for CloudWatch
+emf.region: "us-east-1"
+
+# Service identification
+emf.service_name: "opensearch-storage-encryption"
+emf.service_type: "OpenSearch Plugin"
+```
+
+### Expected Metrics
+
+When EMF is enabled, the plugin publishes these metrics to CloudWatch:
+
+**Namespace:** `OpenSearch/StorageEncryption`
+
+**Metrics:**
+- `ReadOperations` - Total read operations count
+- `ReadBytes` - Total bytes read
+- `WriteOperations` - Total write operations count  
+- `WriteBytes` - Total bytes written
+- `OpenInputOperations` - File open operations count
+- `CreateOutputOperations` - File create operations count
+
+**Dimensions:**
+- `Operation` - read, write, openInput, createOutput
+- `DirectoryType` - niofs, mmap, hybrid
+
+### Viewing Metrics
+
+Metrics appear in AWS CloudWatch under the `OpenSearch/StorageEncryption` namespace. Use CloudWatch dashboards to visualize encryption/decryption throughput and operation counts.
 
 ## Running Tests
 

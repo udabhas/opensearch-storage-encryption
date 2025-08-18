@@ -72,6 +72,13 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         }
     }, Property.NodeScope, Property.IndexScope);
 
+    // EMF settings
+    public static final Setting<Boolean> EMF_ENABLED_SETTING = Setting.boolSetting("emf.enabled", false, Property.NodeScope);
+    public static final Setting<String> EMF_ENVIRONMENT_SETTING = new Setting<>("emf.environment", "Local", Function.identity(), Property.NodeScope);
+    public static final Setting<String> EMF_REGION_SETTING = new Setting<>("emf.region", "us-east-1", Function.identity(), Property.NodeScope);
+    public static final Setting<String> EMF_SERVICE_NAME_SETTING = new Setting<>("emf.service_name", "opensearch-storage-encryption", Function.identity(), Property.NodeScope);
+    public static final Setting<String> EMF_SERVICE_TYPE_SETTING = new Setting<>("emf.service_type", "OpenSearch Plugin", Function.identity(), Property.NodeScope);
+
     MasterKeyProvider getKeyProvider(IndexSettings indexSettings) {
         final String KEY_PROVIDER_TYPE = indexSettings.getValue(INDEX_KMS_TYPE_SETTING);
         final Settings settings = Settings.builder().put(indexSettings.getNodeSettings(), false).build();
