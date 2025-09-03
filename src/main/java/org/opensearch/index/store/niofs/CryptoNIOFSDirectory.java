@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Provider;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.logging.log4j.LogManager;
@@ -50,6 +51,11 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
         LOGGER.info("running CryptoNIOFSDirectory.openInput ");
+
+        if (context == IOContext.READONCE) {
+            return super.openInput(name, context); // Return encrypted data
+        }
+
         if (name.contains("segments_") || name.endsWith(".si")) {
             return super.openInput(name, context);
         }
@@ -126,6 +132,18 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
             return fileSize - footerLength;
         }
+    }
+
+    @Override
+    public String[] listAll() throws IOException {
+        String[] files = super.listAll();
+        if (!Arrays.asList(files).contains("keyfile")) {
+            String[] result = new String[files.length + 1];
+            System.arraycopy(files, 0, result, 0, files.length);
+            result[files.length] = "keyfile";
+            return result;
+        }
+        return files;
     }
 
     @Override

@@ -53,7 +53,7 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
         String extension = FileSwitchDirectory.getExtension(name);
-
+        
         // TODO use the use-delegate method.
         if (!specialExtensions.contains(extension)) {
             return super.openInput(name, context);
