@@ -92,9 +92,13 @@ public class DefaultKeyResolver implements KeyResolver {
      * Writes a byte array to the specified file in the directory.
      */
     private void writeByteArrayFile(String fileName, byte[] data) throws IOException {
+        LOGGER.info("inside writeByteArrayFile for {}", fileName);
         try (IndexOutput out = directory.createOutput(fileName, IOContext.DEFAULT)) {
             out.writeInt(data.length);
             out.writeBytes(data, 0, data.length);
+        }
+        catch(IOException ex) {
+            LOGGER.error("Got error while writeByteArrayFile in keyFile", ex);
         }
     }
 
