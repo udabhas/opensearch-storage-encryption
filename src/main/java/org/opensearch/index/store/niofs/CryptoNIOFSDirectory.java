@@ -14,6 +14,8 @@ import java.nio.file.StandardOpenOption;
 import java.security.Provider;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
@@ -22,6 +24,7 @@ import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
+import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -35,15 +38,18 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public final KeyResolver keyResolver;
     private final AtomicLong nextTempFileCounter = new AtomicLong();
     private final int algorithmId = 1; // Default to AES_256_GCM_CTR
+    private static final Logger LOGGER = LogManager.getLogger(CryptoNIOFSDirectory.class);
 
     public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyResolver keyResolver) throws IOException {
         super(location, lockFactory);
+        LOGGER.info("Inside CryptoNIOFSDirectory Constructor");
         this.provider = provider;
         this.keyResolver = keyResolver;
     }
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
+        LOGGER.info("running CryptoNIOFSDirectory.openInput ");
         if (name.contains("segments_") || name.endsWith(".si")) {
             return super.openInput(name, context);
         }

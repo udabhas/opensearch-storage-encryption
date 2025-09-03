@@ -10,12 +10,15 @@ import java.security.Provider;
 
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
+import org.opensearch.index.store.CryptoDirectoryFactory;
 
 /**
  * Default implementation of {@link KeyResolver} responsible for managing
@@ -31,6 +34,7 @@ public class DefaultKeyResolver implements KeyResolver {
 
     private final Directory directory;
     private final MasterKeyProvider keyProvider;
+    private static final Logger LOGGER = LogManager.getLogger(DefaultKeyResolver.class);
 
     private Key dataKey;
 
@@ -56,6 +60,7 @@ public class DefaultKeyResolver implements KeyResolver {
      */
     private void initialize() throws IOException {
         try {
+            LOGGER.info("inside DefaultKeyResolver.initialize()..");
             dataKey = new SecretKeySpec(keyProvider.decryptKey(readByteArrayFile(KEY_FILE)), "AES");
         } catch (java.nio.file.NoSuchFileException e) {
             initNewKey();
