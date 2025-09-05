@@ -47,9 +47,31 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         this.keyResolver = keyResolver;
     }
 
+//    @Override
+//    public String[] listAll() throws IOException {
+//        String[] files = super.listAll();
+//        if (!Arrays.asList(files).contains("keyfile")) {
+//            String[] result = new String[files.length + 1];
+//            System.arraycopy(files, 0, result, 0, files.length);
+//            result[files.length] = "keyfile";
+//            return result;
+//        }
+//        return files;
+//    }
+
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        LOGGER.info("running CryptoNIOFSDirectory.openInput ");
+        LOGGER.info("CryptoNIOFSDirectory.openInput called for: {} with context: {}", name, context);
+
+        // Log stack trace to see who's calling this
+        if (name.endsWith(".tmp")) {
+            LOGGER.info("Temporary file access detected - Stack trace:");
+            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+            for (int i = 0; i < Math.min(10, stack.length); i++) {
+                LOGGER.info("  {}: {}.{}({}:{})", i, stack[i].getClassName(),
+                        stack[i].getMethodName(), stack[i].getFileName(), stack[i].getLineNumber());
+            }
+        }
         if (name.contains("segments_") || name.endsWith(".si")) {
             return super.openInput(name, context);
         }

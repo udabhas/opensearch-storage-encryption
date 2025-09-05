@@ -5,6 +5,7 @@
 package org.opensearch.index.store.key;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
 
@@ -51,6 +52,7 @@ public class DefaultKeyResolver implements KeyResolver {
     public DefaultKeyResolver(Directory directory, Provider provider, MasterKeyProvider keyProvider) throws IOException {
         this.directory = directory;
         this.keyProvider = keyProvider;
+        LOGGER.info("inside DefaultKeyResolver constructor for directory - {}", directory.toString());
         initialize();
     }
 
@@ -92,6 +94,7 @@ public class DefaultKeyResolver implements KeyResolver {
      * Writes a byte array to the specified file in the directory.
      */
     private void writeByteArrayFile(String fileName, byte[] data) throws IOException {
+        LOGGER.info("inside writeByteArrayFile for fileName -> {} , Directory - {}", fileName, directory.toString() );
         try (IndexOutput out = directory.createOutput(fileName, IOContext.DEFAULT)) {
             out.writeInt(data.length);
             out.writeBytes(data, 0, data.length);
