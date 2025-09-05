@@ -156,20 +156,22 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         deletePendingFiles();
     }
 
+    //TODO: remove Temp change for snapshot working. Remove after System
     @Override
     public void deleteFile(String fileName) throws IOException {
         LOGGER.info("inside delete file for fileNmae - {}, file - {}",fileName, directory.resolve(fileName));
         if ("keyfile".equals(fileName)) {
-            // Check if this is snapshot cleanup by examining stack trace
-            StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
-            LOGGER.info("stack trace == {}", (Object) Thread.currentThread().getStackTrace());
-            for (StackTraceElement element : stackTrace) {
-                if (element.getClassName().contains("FileRestoreContext") &&
-                        element.getMethodName().contains("afterRestore")) {
-                    // Skip deletion during snapshot cleanup
-                    return;
-                }
-            }
+            return;
+//            // Check if this is snapshot cleanup by examining stack trace
+//            StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
+//            LOGGER.info("stack trace == {}", (Object) Thread.currentThread().getStackTrace());
+//            for (StackTraceElement element : stackTrace) {
+//                if (element.getClassName().contains("FileRestoreContext") &&
+//                        element.getMethodName().contains("afterRestore")) {
+//                    // Skip deletion during snapshot cleanup
+//                    return;
+//                }
+//            }
         }
         super.deleteFile(fileName);
     }
