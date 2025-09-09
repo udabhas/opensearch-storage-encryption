@@ -19,8 +19,8 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
-import org.opensearch.index.store.iv.DefaultKeyIvResolver;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.DefaultKeyResolver;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**
@@ -31,7 +31,7 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
     private static final Logger logger = LogManager.getLogger(CryptoTranslogEncryptionTests.class);
 
     private Path tempDir;
-    private KeyIvResolver keyIvResolver;
+    private KeyResolver keyResolver;
     private MasterKeyProvider keyProvider;
 
     @Override
@@ -75,12 +75,12 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         };
 
         org.apache.lucene.store.Directory directory = new org.apache.lucene.store.NIOFSDirectory(tempDir);
-        keyIvResolver = new DefaultKeyIvResolver(directory, cryptoProvider, keyProvider);
+        keyResolver = new DefaultKeyResolver(directory, cryptoProvider, keyProvider);
     }
 
     public void testTranslogDataIsActuallyEncrypted() throws IOException {
         String testTranslogUUID = "test-encryption-uuid";
-        CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyIvResolver, testTranslogUUID);
+        CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyResolver, testTranslogUUID);
 
         Path translogPath = tempDir.resolve("test-encryption.tlog");
 
@@ -131,7 +131,7 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
      */
     public void testTranslogEncryptionDecryptionRoundTrip() throws IOException {
         String testTranslogUUID = "test-roundtrip-uuid";
-        CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyIvResolver, testTranslogUUID);
+        CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyResolver, testTranslogUUID);
 
         Path translogPath = tempDir.resolve("test-roundtrip.tlog");
 
