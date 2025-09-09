@@ -23,4 +23,6 @@ public interface KeyResolver {
      * @return the decrypted symmetric {@link Key}, typically AES
      */
     Key getDataKey();
+
+    byte[] getIvBytes();
 }

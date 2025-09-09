@@ -7,15 +7,19 @@ package org.opensearch.index.store.key;
 import java.io.IOException;
 import java.security.Key;
 import java.security.Provider;
+import java.security.SecureRandom;
 
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
+import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 
 /**
  * Default implementation of {@link KeyResolver} responsible for managing
@@ -28,6 +32,7 @@ import org.opensearch.common.crypto.MasterKeyProvider;
  * @opensearch.internal
  */
 public class DefaultKeyResolver implements KeyResolver {
+    private static final Logger LOGGER = LogManager.getLogger(DefaultKeyResolver.class);
 
     private final Directory directory;
     private final MasterKeyProvider keyProvider;
@@ -35,6 +40,8 @@ public class DefaultKeyResolver implements KeyResolver {
     private Key dataKey;
 
     private static final String KEY_FILE = "keyfile";
+    private static final String IV_FILE = "ivfile";
+    private final byte[] baseIV;
 
     /**
      * Constructs a new {@link DefaultKeyResolver} and ensures the key is initialized.
@@ -47,6 +54,7 @@ public class DefaultKeyResolver implements KeyResolver {
     public DefaultKeyResolver(Directory directory, Provider provider, MasterKeyProvider keyProvider) throws IOException {
         this.directory = directory;
         this.keyProvider = keyProvider;
+        this.baseIV = new byte[16];
         initialize();
     }
 
@@ -99,5 +107,28 @@ public class DefaultKeyResolver implements KeyResolver {
     @Override
     public Key getDataKey() {
         return dataKey;
+    }
+
+    // TODO: Remove this IV bytes and update translog to generate the IV bytes deterministically
+    @Override
+    public byte[] getIvBytes() {
+        try {
+            return readByteArrayFile(IV_FILE);
+        } catch (java.nio.file.NoSuchFileException e) {
+            initNewIV();
+            return this.baseIV.clone();
+        } catch (IOException ex) {
+            LOGGER.info("Encountered exception during getIV -> ", ex);
+            return this.baseIV.clone();
+        }
+    }
+
+    private void initNewIV() {
+        try {
+            new SecureRandom().nextBytes(this.baseIV);
+            writeByteArrayFile(IV_FILE, this.baseIV);
+        } catch (IOException ex) {
+            LOGGER.info("Encountered exception during initNewIV -> ", ex);
+        }
     }
 }
