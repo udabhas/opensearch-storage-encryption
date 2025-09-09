@@ -27,7 +27,7 @@ public class HkdfKeyDerivation {
     /**
      * Derive a key from Directory Key + MessageId using HKDF
      * 
-     * @param directoryKey the master key from KeyIvResolver (32 bytes)
+     * @param directoryKey the master key from KeyResolver (32 bytes)
      * @param messageId the unique file identifier (16 bytes from footer)
      * @param context the context string for key derivation
      * @param keyLength the desired output key length in bytes

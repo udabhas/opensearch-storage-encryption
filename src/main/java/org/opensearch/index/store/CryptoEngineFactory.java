@@ -15,8 +15,8 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngine;
-import org.opensearch.index.store.iv.DefaultKeyIvResolver;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.DefaultKeyResolver;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.translog.CryptoTranslogFactory;
 
 /**
@@ -38,11 +38,11 @@ public class CryptoEngineFactory implements EngineFactory {
     public Engine newReadWriteEngine(EngineConfig config) {
 
         try {
-            // Create a separate KeyIvResolver for translog encryption
-            KeyIvResolver keyIvResolver = createTranslogKeyIvResolver(config);
+            // Create a separate KeyResolver for translog encryption
+            KeyResolver keyResolver = createTranslogKeyResolver(config);
 
-            // Create the crypto translog factory using the same KeyIvResolver as the directory
-            CryptoTranslogFactory cryptoTranslogFactory = new CryptoTranslogFactory(keyIvResolver);
+            // Create the crypto translog factory using the same KeyResolver as the directory
+            CryptoTranslogFactory cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
 
             // Create new engine config by copying all fields from existing config
             // but replace the translog factory with our crypto version
@@ -59,9 +59,9 @@ public class CryptoEngineFactory implements EngineFactory {
     }
 
     /**
-     * Create a separate KeyIvResolver for translog encryption.
+     * Create a separate KeyResolver for translog encryption.
      */
-    private KeyIvResolver createTranslogKeyIvResolver(EngineConfig config) throws IOException {
+    private KeyResolver createTranslogKeyResolver(EngineConfig config) throws IOException {
         // Create a separate key resolver for translog files
 
         // Use the translog location for key storage
@@ -72,7 +72,7 @@ public class CryptoEngineFactory implements EngineFactory {
         CryptoDirectoryFactory directoryFactory = new CryptoDirectoryFactory();
 
         // Create a dedicated key resolver for translog
-        return new DefaultKeyIvResolver(
+        return new DefaultKeyResolver(
             keyDirectory,
             config.getIndexSettings().getValue(CryptoDirectoryFactory.INDEX_CRYPTO_PROVIDER_SETTING),
             directoryFactory.getKeyProvider(config.getIndexSettings())
