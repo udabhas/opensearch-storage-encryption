@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
 
@@ -30,11 +30,11 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectIOBlockLoader.class);
 
     private final Pool<MemorySegmentPool.SegmentHandle> segmentPool;
-    private final KeyIvResolver keyIvResolver;
+    private final KeyResolver keyResolver;
 
-    public CryptoDirectIOBlockLoader(Pool<MemorySegmentPool.SegmentHandle> segmentPool, KeyIvResolver keyIvResolver) {
+    public CryptoDirectIOBlockLoader(Pool<MemorySegmentPool.SegmentHandle> segmentPool, KeyResolver keyResolver) {
         this.segmentPool = segmentPool;
-        this.keyIvResolver = keyIvResolver;
+        this.keyResolver = keyResolver;
     }
 
     @Override
@@ -61,16 +61,22 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
+            byte[] ivBytes = new byte[32];
+            for(int i=0;i<32;i++){
+                ivBytes[i]=0x0;
+            }
+
+
             // decrypt the block to cache.
             MemorySegmentDecryptor
-                .decryptInPlace(
-                    arena,
-                    readBytes.address(),
-                    readBytes.byteSize(),
-                    keyIvResolver.getDataKey().getEncoded(),
-                    keyIvResolver.getIvBytes(),
-                    startOffset
-                );
+                    .decryptInPlace(
+                            arena,
+                            readBytes.address(),
+                            readBytes.byteSize(),
+                            keyResolver.getDataKey().getEncoded(),
+                            ivBytes,
+                            startOffset
+                    );
 
             if (bytesRead == 0) {
                 throw new RuntimeException("EOF or empty read at offset " + startOffset);

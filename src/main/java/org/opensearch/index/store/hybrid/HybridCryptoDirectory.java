@@ -14,11 +14,8 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.opensearch.index.store.directio.CryptoDirectIODirectory;
-import org.opensearch.index.store.iv.KeyIvResolver;
-import org.opensearch.common.util.io.IOUtils;
+//import org.opensearch.index.store.key.KeyIvResolver;
 import org.opensearch.index.store.key.KeyResolver;
-import org.opensearch.index.store.mmap.EagerDecryptedCryptoMMapDirectory;
-import org.opensearch.index.store.mmap.LazyDecryptedCryptoMMapDirectory;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 
 public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
@@ -32,16 +29,9 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
         LockFactory lockFactory,
         CryptoDirectIODirectory delegate,
         Provider provider,
-        KeyResolver keyResolver,
-        Set<String> nioExtensions
-        KeyIvResolver keyIvResolver
-    )
+        KeyResolver keyResolver)
         throws IOException {
         super(lockFactory, delegate.getDirectory(), provider, keyResolver);
-        this.lazyDecryptedCryptoMMapDirectoryDelegate = delegate;
-        this.eagerDecryptedCryptoMMapDirectory = eagerDecryptedCryptoMMapDirectory1;
-        this.specialExtensions = Set.of("kdd", "kdi", "kdm", "tip", "tim", "tmd", "cfs", "doc", "dvd", "nvd", "psm", "fdm");
-        super(lockFactory, delegate.getDirectory(), provider, keyIvResolver);
         this.cryptoDirectIODirectory = delegate;
         // todo can be moved to buffer-io with caching
         // "kdm", "tip", "tmd", "psm", "fdm", "kdi");

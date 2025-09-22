@@ -27,7 +27,7 @@ import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.block_loader.BlockLoader;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
@@ -43,13 +43,13 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final Pool<MemorySegmentPool.SegmentHandle> memorySegmentPool;
     private final BlockCache<RefCountedMemorySegment> blockCache;
     private final Worker readAheadworker;
-    private final KeyIvResolver keyIvResolver;
+    private final KeyResolver keyResolver;
 
     public CryptoDirectIODirectory(
         Path path,
         LockFactory lockFactory,
         Provider provider,
-        KeyIvResolver keyIvResolver,
+        KeyResolver keyResolver,
         Pool<MemorySegmentPool.SegmentHandle> memorySegmentPool,
         BlockCache<RefCountedMemorySegment> blockCache,
         BlockLoader<MemorySegmentPool.SegmentHandle> blockLoader,
@@ -57,7 +57,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     )
         throws IOException {
         super(path, lockFactory);
-        this.keyIvResolver = keyIvResolver;
+        this.keyResolver = keyResolver;
         this.memorySegmentPool = memorySegmentPool;
         this.blockCache = blockCache;
         this.readAheadworker = worker;
@@ -104,8 +104,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             name,
             path,
             fos,
-            this.keyIvResolver.getDataKey().getEncoded(),
-            keyIvResolver.getIvBytes(),
+            this.keyResolver.getDataKey().getEncoded(),
+            keyResolver.getIvBytes(),
             this.memorySegmentPool,
             this.blockCache
         );
@@ -127,8 +127,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             name,
             path,
             fos,
-            this.keyIvResolver.getDataKey().getEncoded(),
-            keyIvResolver.getIvBytes(),
+            this.keyResolver.getDataKey().getEncoded(),
+            keyResolver.getIvBytes(),
             this.memorySegmentPool,
             this.blockCache
         );

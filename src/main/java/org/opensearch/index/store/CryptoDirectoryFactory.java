@@ -47,10 +47,6 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.WARM_UP_PERCEN
 import org.opensearch.index.store.hybrid.HybridCryptoDirectory;
 import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
-import org.opensearch.index.store.mmap.EagerDecryptedCryptoMMapDirectory;
-import org.opensearch.index.store.mmap.LazyDecryptedCryptoMMapDirectory;
-import org.opensearch.index.store.iv.DefaultKeyIvResolver;
-import org.opensearch.index.store.iv.KeyIvResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
@@ -150,33 +146,15 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                 LOGGER.debug("Using HYBRIDFS directory");
 
                 CryptoDirectIODirectory cryptoDirectIODirectory = createCryptoDirectIODirectory(
-                LazyDecryptedCryptoMMapDirectory lazyDecryptedCryptoMMapDirectory = new LazyDecryptedCryptoMMapDirectory(
-                    location,
-                    provider,
+                        location,
+                        lockFactory,
+                        provider,
                         keyResolver
                 );
-                EagerDecryptedCryptoMMapDirectory egarDecryptedCryptoMMapDirectory = new EagerDecryptedCryptoMMapDirectory(
-                    location,
-                    provider,
-                        keyResolver
-                );
-                lazyDecryptedCryptoMMapDirectory.setPreloadExtensions(preLoadExtensions);
-
-                return new HybridCryptoDirectory(
-                    lockFactory,
-                    provider,
-                    keyIvResolver
-                        keyResolver,
-                    nioExtensions
-                );
-                return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyIvResolver);
+                return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyResolver);
             }
             case MMAPFS -> {
                 throw new AssertionError("MMAPFS not supported with index level encryption");
-                LOGGER.debug("Using MMAPFS directory");
-                LazyDecryptedCryptoMMapDirectory cryptoMMapDir = new LazyDecryptedCryptoMMapDirectory(location, provider, keyResolver);
-                cryptoMMapDir.setPreloadExtensions(preLoadExtensions);
-                return cryptoMMapDir;
             }
             case SIMPLEFS, NIOFS -> {
                 LOGGER.debug("Using NIOFS directory");
@@ -191,7 +169,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         Path location,
         LockFactory lockFactory,
         Provider provider,
-        KeyIvResolver keyIvResolver
+        KeyResolver keyResolver
     ) throws IOException {
         /*
         * ================================
@@ -232,7 +210,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         */
 
         // Create a per-directory loader that knows about this specific keyIvResolver
-        BlockLoader<MemorySegmentPool.SegmentHandle> loader = new CryptoDirectIOBlockLoader(sharedSegmentPool, keyIvResolver);
+        BlockLoader<MemorySegmentPool.SegmentHandle> loader = new CryptoDirectIOBlockLoader(sharedSegmentPool, keyResolver);
 
         // Create a directory-specific cache that wraps the shared cache with this directory's loader
         long maxBlocks = RESEVERED_POOL_SIZE_IN_BYTES / CACHE_BLOCK_SIZE;
@@ -250,7 +228,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             location,
             lockFactory,
             provider,
-            keyIvResolver,
+            keyResolver,
             sharedSegmentPool,
             directoryCache,
             loader,
