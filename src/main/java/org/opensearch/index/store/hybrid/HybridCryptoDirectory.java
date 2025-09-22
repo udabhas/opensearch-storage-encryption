@@ -40,28 +40,28 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        String extension = FileSwitchDirectory.getExtension(name);
-
-        ensureOpen();
-        ensureCanRead(name);
-
-        if (specialExtensions.contains(extension)) {
-            return cryptoDirectIODirectory.openInput(name, context);
-        }
+//        String extension = FileSwitchDirectory.getExtension(name);
+//
+//        ensureOpen();
+//        ensureCanRead(name);
+//
+//        if (specialExtensions.contains(extension)) {
+//            return cryptoDirectIODirectory.openInput(name, context);
+//        }
 
         return super.openInput(name, context);
     }
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
-        String extension = FileSwitchDirectory.getExtension(name);
-
-        ensureOpen();
-        ensureCanRead(name);
-
-        if (specialExtensions.contains(extension)) {
-            return cryptoDirectIODirectory.createOutput(name, context);
-        }
+//        String extension = FileSwitchDirectory.getExtension(name);
+//
+//        ensureOpen();
+//        ensureCanRead(name);
+//
+//        if (specialExtensions.contains(extension)) {
+//            return cryptoDirectIODirectory.createOutput(name, context);
+//        }
 
         return super.createOutput(name, context);
     }

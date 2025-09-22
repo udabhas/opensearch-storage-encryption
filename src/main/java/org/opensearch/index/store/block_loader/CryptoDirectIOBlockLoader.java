@@ -66,15 +66,20 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
-            byte[] messageId = readMessageIdFromFooter(filePath, channel);
-            int frameNumber = AesCipherFactory.getFrameNumber(startOffset);
-            long offsetWithinFrame = AesCipherFactory.getOffsetWithinFrame(startOffset);
-            byte[] ivBytes = AesCipherFactory.computeFrameIV(
-                    keyResolver.getDataKey().getEncoded(),
-                    messageId,
-                    frameNumber,
-                    offsetWithinFrame
-            );
+            byte[] ivBytes;
+            try {
+                byte[] messageId = readMessageIdFromFooter(filePath, channel);
+                int frameNumber = AesCipherFactory.getFrameNumber(startOffset);
+                long offsetWithinFrame = AesCipherFactory.getOffsetWithinFrame(startOffset);
+                ivBytes = AesCipherFactory.computeFrameIV(
+                        keyResolver.getDataKey().getEncoded(),
+                        messageId,
+                        frameNumber,
+                        offsetWithinFrame
+                );
+            } catch (Exception e) {
+                ivBytes = keyResolver.getIvBytes();
+            }
 
 
             // decrypt the block to cache.
@@ -141,11 +146,9 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
     private byte[] readMessageIdFromFooter(Path filePath, FileChannel channel) throws IOException {
         long fileSize = channel.size();
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            throw new
-                    IOException("File too small to contain footer: " + filePath);
+            throw new IOException("File too small to contain footer: " + filePath);
         }
 
-        // Read footer from end of file
         ByteBuffer footerBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         channel.read(footerBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         byte[] footerBytes = footerBuffer.array();
