@@ -9,8 +9,10 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_MA
 import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SIZE;
 import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SIZE_POWER;
 
+import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -20,7 +22,10 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
@@ -61,10 +66,15 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
-            byte[] ivBytes = new byte[32];
-            for(int i=0;i<32;i++){
-                ivBytes[i]=0x0;
-            }
+            byte[] messageId = readMessageIdFromFooter(filePath, channel);
+            int frameNumber = AesCipherFactory.getFrameNumber(startOffset);
+            long offsetWithinFrame = AesCipherFactory.getOffsetWithinFrame(startOffset);
+            byte[] ivBytes = AesCipherFactory.computeFrameIV(
+                    keyResolver.getDataKey().getEncoded(),
+                    messageId,
+                    frameNumber,
+                    offsetWithinFrame
+            );
 
 
             // decrypt the block to cache.
@@ -126,5 +136,21 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
                 handles[i].release();  // Release back to correct tier
             }
         }
+    }
+
+    private byte[] readMessageIdFromFooter(Path filePath, FileChannel channel) throws IOException {
+        long fileSize = channel.size();
+        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            throw new
+                    IOException("File too small to contain footer: " + filePath);
+        }
+
+        // Read footer from end of file
+        ByteBuffer footerBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        channel.read(footerBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        byte[] footerBytes = footerBuffer.array();
+
+        EncryptionFooter footer = EncryptionFooter.deserialize(footerBytes, keyResolver.getDataKey().getEncoded());
+        return footer.getMessageId();
     }
 }
