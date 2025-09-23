@@ -14,7 +14,6 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.opensearch.index.store.directio.CryptoDirectIODirectory;
-//import org.opensearch.index.store.key.KeyIvResolver;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 
@@ -40,14 +39,14 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        String extension = FileSwitchDirectory.getExtension(name);
-
-        ensureOpen();
-        ensureCanRead(name);
-
-        if (specialExtensions.contains(extension)) {
-            return cryptoDirectIODirectory.openInput(name, context);
-        }
+//        String extension = FileSwitchDirectory.getExtension(name);
+//
+//        ensureOpen();
+//        ensureCanRead(name);
+//
+//        if (specialExtensions.contains(extension)) {
+//            return cryptoDirectIODirectory.openInput(name, context);
+//        }
 
         return super.openInput(name, context);
     }
