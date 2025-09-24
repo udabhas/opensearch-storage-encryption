@@ -111,7 +111,7 @@ public class DefaultKeyResolver implements KeyResolver {
 
     // TODO: Remove this IV bytes and update translog to generate the IV bytes deterministically
     @Override
-    public byte[] getIvBytes() {
+    public synchronized byte[] getIvBytes() {
         try {
             return readByteArrayFile(IV_FILE);
         } catch (java.nio.file.NoSuchFileException e) {
@@ -123,8 +123,17 @@ public class DefaultKeyResolver implements KeyResolver {
         }
     }
 
-    private void initNewIV() {
+    private synchronized void initNewIV() {
         try {
+            // Double-check if file was created by another thread
+            try {
+                byte[] existingIV = readByteArrayFile(IV_FILE);
+                System.arraycopy(existingIV, 0, this.baseIV, 0, existingIV.length);
+                return;
+            } catch (java.nio.file.NoSuchFileException e) {
+                // File doesn't exist, proceed with creation
+            }
+            
             new SecureRandom().nextBytes(this.baseIV);
             writeByteArrayFile(IV_FILE, this.baseIV);
         } catch (IOException ex) {
