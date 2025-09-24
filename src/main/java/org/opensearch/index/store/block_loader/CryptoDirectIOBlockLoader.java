@@ -67,7 +67,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             long bytesRead = readBytes.byteSize();
 
 
-            byte[] messageId = readMessageIdFromFooter(filePath, channel);
+            byte[] messageId = readMessageIdFromFooter(filePath);
             byte[] directoryKey = keyResolver.getDataKey().getEncoded();
             byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveAesKey(
                     directoryKey, messageId, "file-encryption");
@@ -133,7 +133,9 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
         }
     }
 
-    private byte[] readMessageIdFromFooter(Path filePath, FileChannel channel) throws IOException {
+    private byte[] readMessageIdFromFooter(Path filePath) throws IOException {
+        // Use separate random access FileChannel to avoid position conflicts
+        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
         long fileSize = channel.size();
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             throw new IOException("File too small to contain footer: " + filePath);
@@ -156,8 +158,9 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
         ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
         channel.read(footerBuffer, fileSize - footerLength);
         
-        EncryptionFooter footer = EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
-        return footer.getMessageId();
+            EncryptionFooter footer = EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+            return footer.getMessageId();
+        }
     }
 
     /**
