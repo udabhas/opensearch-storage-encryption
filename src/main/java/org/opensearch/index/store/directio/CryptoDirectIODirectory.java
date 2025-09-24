@@ -178,7 +178,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
      */
     private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
         if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            return rawFileSize; // Too small for footer - treat as non-encrypted
+            return rawFileSize; // Too small for footer
         }
         
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
@@ -188,7 +188,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             
             byte[] minFooterBytes = minBuffer.array();
             if (!isValidOSEFFile(minFooterBytes)) {
-                return rawFileSize; // Not OSEF - treat as non-encrypted
+                return rawFileSize; // Not OSEF
             }
             
             int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);

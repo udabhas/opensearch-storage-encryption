@@ -149,11 +149,36 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             throw new IOException("File too small to contain footer: " + filePath);
         }
 
-        ByteBuffer footerBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        channel.read(footerBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        byte[] footerBytes = footerBuffer.array();
-
-        EncryptionFooter footer = EncryptionFooter.deserialize(footerBytes, keyResolver.getDataKey().getEncoded());
+        // Read minimum footer to check OSEF magic bytes
+        ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        byte[] minFooterBytes = minBuffer.array();
+        
+        // Validate OSEF magic bytes
+        if (!isValidOSEFFile(minFooterBytes)) {
+            throw new IOException("Not a valid OSEF file: " + filePath);
+        }
+        
+        int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
+        
+        // Read complete footer
+        ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+        channel.read(footerBuffer, fileSize - footerLength);
+        
+        EncryptionFooter footer = EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
         return footer.getMessageId();
+    }
+
+    /**
+     * Check if file has valid OSEF magic bytes
+     */
+    private boolean isValidOSEFFile(byte[] minFooterBytes) {
+        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
+        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
+            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 }
