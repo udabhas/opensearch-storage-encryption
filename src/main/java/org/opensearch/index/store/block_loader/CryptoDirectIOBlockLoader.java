@@ -66,32 +66,22 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
-            byte[] ivBytes;
-            try {
-                byte[] messageId = readMessageIdFromFooter(filePath, channel);
-                int frameNumber = AesCipherFactory.getFrameNumber(startOffset);
-                long offsetWithinFrame = AesCipherFactory.getOffsetWithinFrame(startOffset);
-                ivBytes = AesCipherFactory.computeFrameIV(
-                        keyResolver.getDataKey().getEncoded(),
-                        messageId,
-                        frameNumber,
-                        offsetWithinFrame
-                );
-            } catch (Exception e) {
-                ivBytes = keyResolver.getIvBytes();
-            }
 
-
-            // decrypt the block to cache.
-            MemorySegmentDecryptor
-                    .decryptInPlace(
-                            arena,
-                            readBytes.address(),
-                            readBytes.byteSize(),
-                            keyResolver.getDataKey().getEncoded(),
-                            ivBytes,
-                            startOffset
-                    );
+            byte[] messageId = readMessageIdFromFooter(filePath, channel);
+            byte[] directoryKey = keyResolver.getDataKey().getEncoded();
+            byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveAesKey(
+                    directoryKey, messageId, "file-encryption");
+            
+            // Use frame-based decryption with derived file key
+            MemorySegmentDecryptor.decryptInPlaceFrameBased(
+                readBytes.address(),
+                readBytes.byteSize(),
+                fileKey,                                    // Derived file key (matches write path)
+                directoryKey,                               // Directory key for IV computation
+                messageId,                                  // Message ID from footer
+                org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
+                startOffset                                 // File offset
+            );
 
             if (bytesRead == 0) {
                 throw new RuntimeException("EOF or empty read at offset " + startOffset);
@@ -154,9 +144,10 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
         channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         byte[] minFooterBytes = minBuffer.array();
         
-        // Validate OSEF magic bytes
+        // Check if this is an OSEF file
         if (!isValidOSEFFile(minFooterBytes)) {
-            throw new IOException("Not a valid OSEF file: " + filePath);
+            // Not an OSEF file - fall back to legacy decryption
+            throw new IOException("Not an OSEF file, using legacy IV");
         }
         
         int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
