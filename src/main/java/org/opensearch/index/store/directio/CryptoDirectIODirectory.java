@@ -9,6 +9,8 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SI
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -34,6 +36,8 @@ import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
 import org.opensearch.index.store.read_ahead.Worker;
 import org.opensearch.index.store.read_ahead.impl.ReadaheadManagerImpl;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 
 @SuppressForbidden(reason = "uses custom DirectIO")
 public final class CryptoDirectIODirectory extends FSDirectory {
@@ -69,20 +73,23 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         ensureCanRead(name);
 
         Path file = getDirectory().resolve(name);
-        long size = Files.size(file);
-        if (size == 0) {
+        long rawFileSize = Files.size(file);
+        if (rawFileSize == 0) {
             throw new IOException("Cannot open empty file with DirectIO: " + file);
         }
 
+        // Calculate content length with OSEF validation
+        long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
+
         ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker);
-        ReadaheadContext readAheadContext = readAheadManager.register(file, size);
-        BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, size);
+        ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
+        BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
 
         return CachedMemorySegmentIndexInput
             .newInstance(
                 "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
                 file,
-                size,
+                contentLength,
                 blockCache,
                 readAheadManager,
                 readAheadContext,
@@ -164,5 +171,57 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         }
 
         super.deleteFile(name);
+    }
+
+    /**
+     * Calculate content length with OSEF validation
+     */
+    private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
+        if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            return rawFileSize; // Too small for footer - treat as non-encrypted
+        }
+        
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+            // Read minimum footer to check magic bytes
+            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            
+            byte[] minFooterBytes = minBuffer.array();
+            if (!isValidOSEFFile(minFooterBytes)) {
+                return rawFileSize; // Not OSEF - treat as non-encrypted
+            }
+            
+            int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
+            
+            // Read and validate complete footer
+            ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+            int bytesRead = channel.read(footerBuffer, rawFileSize - footerLength);
+            
+            if (bytesRead != footerLength) {
+                throw new IOException("Failed to read complete OSEF footer: " + file);
+            }
+            
+            // Authenticate footer with directory key
+            try {
+                EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+            } catch (IOException e) {
+                throw new IOException("Invalid OSEF footer authentication: " + file, e);
+            }
+            
+            return rawFileSize - footerLength;
+        }
+    }
+
+    /**
+     * Check if file has valid OSEF magic bytes
+     */
+    private boolean isValidOSEFFile(byte[] minFooterBytes) {
+        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
+        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
+            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 }
