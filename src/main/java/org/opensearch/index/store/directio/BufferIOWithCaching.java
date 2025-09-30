@@ -25,6 +25,8 @@ import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheKey;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.cipher.OpenSslNativeCipher;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
 
@@ -76,7 +78,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
     private static class EncryptedOutputStream extends FilterOutputStream {
 
-        // TODO: Add Encryption Footer here. And get the messageID from it.
+        private final EncryptionFooter footer;
         private final byte[] key;
         private final byte[] iv;
         private final byte[] buffer;
@@ -103,6 +105,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.buffer = new byte[BUFFER_SIZE];
             this.memorySegmentPool = memorySegmentPool;
             this.blockCache = blockCache;
+            this.footer = EncryptionFooter.generateNew(EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE,
+                    (short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
         }
 
         @Override
