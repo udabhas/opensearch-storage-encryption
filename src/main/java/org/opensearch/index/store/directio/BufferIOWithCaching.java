@@ -76,6 +76,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
     private static class EncryptedOutputStream extends FilterOutputStream {
 
+        // TODO: Add Encryption Footer here. And get the messageID from it.
         private final byte[] key;
         private final byte[] iv;
         private final byte[] buffer;
@@ -241,6 +242,11 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             try {
                 // Encrypt data for disk write using OpenSSL native cipher
                 byte[] chunkToEncrypt = slice(data, offset, length);
+
+                // TODO: update the IV to be frame-based based on absolute offset. use OpensslNativeCipher.encryptGCM.
+                //  Check for frame-boundaries and use it to create a new frame if needed.
+                //  Once frame is done generate new GCM tag and store it in the footer.
+
                 byte[] encrypted = OpenSslNativeCipher.encrypt(key, iv, chunkToEncrypt, absoluteOffset);
                 out.write(encrypted);
             } catch (Throwable t) {
@@ -265,6 +271,9 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             try {
                 checkClosed();
                 forceFlushBuffer(); // Force flush ALL data including tail
+
+                // TODO: write enc footer here before super.close()
+
                 // Lucene writes footer here.
                 // this will also flush the buffer.
                 super.close();
@@ -306,7 +315,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
         private void checkClosed() throws IOException {
             if (isClosed) {
-                throw new IOException("Outout stream is already closed, this is unusual");
+                throw new IOException("Output stream is already closed, this is unusual");
             }
         }
     }

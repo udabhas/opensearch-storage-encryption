@@ -37,6 +37,7 @@ public final class OpenSslNativeCipher {
     public static final MethodHandle EVP_EncryptInit_ex;
     public static final MethodHandle EVP_EncryptUpdate;
     public static final MethodHandle EVP_aes_256_ctr;
+    public static final MethodHandle EVP_aes_256_gcm;
 
     private static final Linker LINKER = Linker.nativeLinker();
     private static final SymbolLookup LIBCRYPTO = loadLibcrypto();
@@ -138,6 +139,9 @@ public final class OpenSslNativeCipher {
             EVP_aes_256_ctr = LINKER
                 .downcallHandle(LIBCRYPTO.find("EVP_aes_256_ctr").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
 
+            EVP_aes_256_gcm = LINKER
+                .downcallHandle(LIBCRYPTO.find("EVP_aes_256_gcm").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
+
         } catch (Throwable t) {
             throw new OpenSslException("Failed to initialize OpenSSL method handles via Panama", t);
         }
@@ -214,6 +218,30 @@ public final class OpenSslNativeCipher {
             }
         }
     }
+
+    /**
+     * Initializes a new GCM cipher context.
+     *
+     * @return A new GCM cipher context
+     * @throws OpenSslException if cipher initialization fails
+     * @throws Throwable if there's an unexpected error
+     */
+    public static MemorySegment initGCMCipher() throws Throwable {
+        MemorySegment ctx = (MemorySegment) EVP_CIPHER_CTX_new.invoke();
+        if (ctx.address() == 0) {
+            throw new OpenSslException("EVP_CIPHER_CTX_new failed");
+        }
+        
+        MemorySegment cipher = (MemorySegment) EVP_aes_256_gcm.invoke();
+        if (cipher.address() == 0) {
+            EVP_CIPHER_CTX_free.invoke(ctx);
+            throw new OpenSslException("EVP_aes_256_gcm failed");
+        }
+        
+        return ctx;
+    }
+
+    // TODO: encryptGCM() , FinalizeAndGenerateTag(),
 
     private OpenSslNativeCipher() {
         // Utility class
