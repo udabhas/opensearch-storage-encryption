@@ -14,6 +14,7 @@ import java.io.OutputStream;
 import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
 import java.security.Key;
+import java.security.Security;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
@@ -349,7 +350,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(),
                                                            frameNumber, offsetWithinFrame);
 
-            this.currentCipher = algorithm.getEncryptionCipher(null);
+            this.currentCipher = algorithm.getEncryptionCipher(Security.getProvider("SunJCE"));
             AesGcmCipherFactory.initCipher(this.currentCipher, this.fileKey, frameIV,
                                             Cipher.ENCRYPT_MODE, offsetWithinFrame);
         }
