@@ -12,6 +12,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Provider;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.lucene.store.IOContext;
@@ -35,6 +37,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public final KeyResolver keyResolver;
     private final AtomicLong nextTempFileCounter = new AtomicLong();
     private final int algorithmId = 1; // Default to AES_256_GCM_CTR
+    private final Map<String, Long> contentLengthCache = new ConcurrentHashMap<>();
 
     public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyResolver keyResolver) throws IOException {
         super(location, lockFactory);
@@ -100,31 +103,42 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
-        if ((name.contains("segments_") || name.endsWith(".si"))) {
-            return super.fileLength(name);  // Non-encrypted files
+        if (name.contains("segments_") || name.endsWith(".si")) {
+            return super.fileLength(name);
         }
 
-        // Encrypted files: calculate variable footer length
+        // Check cache first
+        Long cachedLength = contentLengthCache.get(name);
+        if (cachedLength != null) {
+            return cachedLength;
+        }
+
         long fileSize = super.fileLength(name);
-        // Handle files that might be in process of being written
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            // File might be incomplete or very small
-            return Math.max(0, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);  // Assume minimum footer
+            return Math.max(0, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         }
 
         Path path = getDirectory().resolve(name);
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
-            // Read minimum footer to get actual length
             ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-
             int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
-            return fileSize - footerLength;
+            long contentLength = fileSize - footerLength;
+            
+            contentLengthCache.put(name, contentLength);
+            return contentLength;
         }
     }
 
     @Override
+    public void deleteFile(String name) throws IOException {
+        contentLengthCache.remove(name);
+        super.deleteFile(name);
+    }
+
+    @Override
     public synchronized void close() throws IOException {
+        contentLengthCache.clear();
         isOpen = false;
         deletePendingFiles();
     }
