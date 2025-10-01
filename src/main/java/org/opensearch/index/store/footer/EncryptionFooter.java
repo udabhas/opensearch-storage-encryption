@@ -46,6 +46,7 @@ public class EncryptionFooter {
     private final byte[] keyMetadata; // Currently empty - key data retrieved from keyfile
     private byte[] footerAuthTag; // 16-byte GCM auth tag for footer authentication
     private int frameCount;
+    private int footerLength;
     
     public EncryptionFooter(byte[] messageId, long frameSize, short algorithmId) {
         if (messageId.length != EncryptionMetadataTrailer.MESSAGE_ID_SIZE) {
@@ -57,6 +58,7 @@ public class EncryptionFooter {
         this.algorithmId = algorithmId;
         this.keyMetadata = new byte[0]; // Empty - currently using keyfile for key data
         this.frameCount = 0;
+        this.footerLength = 0;
     }
     
     public static EncryptionFooter generateNew(long frameSize, short algorithmId) {
@@ -184,6 +186,7 @@ public class EncryptionFooter {
         EncryptionFooter footer = new EncryptionFooter(messageId, frameSize, algorithmId);
         footer.frameCount = frameCount;
         footer.footerAuthTag = authTag;
+        footer.setFooterLength(footerLength);
         int tagStartPos = footerData.length - (footerLength - EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE);
         
         for (int i = 0; i < tagCount; i++) {
@@ -264,5 +267,13 @@ public class EncryptionFooter {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    public int getFooterLength() {
+        return footerLength;
+    }
+
+    public void setFooterLength(int length) {
+        footerLength = length;
     }
 }
