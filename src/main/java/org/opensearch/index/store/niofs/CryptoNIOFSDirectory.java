@@ -56,10 +56,10 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
         try {
             final IndexInput indexInput = new CryptoBufferedIndexInput(
-                "CryptoBufferedIndexInput(path=\"" + path + "\")",
-                fc,
-                context,
-                this.keyResolver
+                    "CryptoBufferedIndexInput(path=\"" + path + "\")",
+                    fc,
+                    context,
+                    this.keyResolver
             );
             success = true;
             return indexInput;
@@ -100,10 +100,10 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
-        if ((name.contains("segments_") || name.endsWith(".si")) ) {
+        if ((name.contains("segments_") || name.endsWith(".si"))) {
             return super.fileLength(name);  // Non-encrypted files
         }
-        
+
         // Encrypted files: calculate variable footer length
         long fileSize = super.fileLength(name);
         // Handle files that might be in process of being written
@@ -111,13 +111,13 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             // File might be incomplete or very small
             return Math.max(0, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);  // Assume minimum footer
         }
-        
+
         Path path = getDirectory().resolve(name);
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
             // Read minimum footer to get actual length
             ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            
+
             int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
             return fileSize - footerLength;
         }

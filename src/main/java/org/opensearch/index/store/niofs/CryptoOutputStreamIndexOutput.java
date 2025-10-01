@@ -136,6 +136,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 // Check if we need to start a new frame
                 int frameNumber = (int)(streamOffset / frameSize);
                 if (frameNumber != currentFrameNumber) {
+                    // add log line
                     finalizeCurrentFrame();
                     totalFrames = Math.max(totalFrames, frameNumber + 1);
                     initializeFrameCipher(frameNumber, streamOffset % frameSize);
@@ -237,6 +238,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                         }
 
                         // Extract and store GCM tag
+                        // TODO: update copy taking time
                         byte[] gcmTag = Arrays.copyOfRange(finalData, encryptedLength, finalData.length);
                         footer.addGcmTag(gcmTag);
                     }
