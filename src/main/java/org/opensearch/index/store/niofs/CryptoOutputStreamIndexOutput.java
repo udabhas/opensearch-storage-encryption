@@ -23,6 +23,9 @@ import javax.crypto.Cipher;
 import java.security.Key;
 import java.util.Arrays;
 
+import javax.crypto.Cipher;
+import java.security.Key;
+
 /**
  * An IndexOutput implementation that encrypts data before writing using native
  * OpenSSL AES-CTR.

@@ -34,7 +34,7 @@ import org.opensearch.watcher.ResourceWatcherService;
 /**
  * A plugin that enables index level encryption and decryption.
  */
-public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, EnginePlugin {
+public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin {
 
     /**
      * The default constructor.

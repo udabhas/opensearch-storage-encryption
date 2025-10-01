@@ -4,8 +4,6 @@
  */
 package org.opensearch.index.store.cipher;
 
-import static org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted;
-
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
@@ -18,6 +16,7 @@ import java.nio.file.Path;
 import java.util.Locale;
 
 import org.opensearch.common.SuppressForbidden;
+import static org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted;
 
 /**
  * Provides native bindings to OpenSSL EVP_aes_256_ctr using the Java Panama FFI.
