@@ -48,6 +48,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final BlockCache<RefCountedMemorySegment> blockCache;
     private final Worker readAheadworker;
     private final KeyResolver keyResolver;
+    private final Provider provider;
 
     public CryptoDirectIODirectory(
         Path path,
@@ -65,6 +66,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         this.memorySegmentPool = memorySegmentPool;
         this.blockCache = blockCache;
         this.readAheadworker = worker;
+        this.provider = provider;
     }
 
     @Override
@@ -108,13 +110,14 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new BufferIOWithCaching(
-            name,
-            path,
-            fos,
-            this.keyResolver.getDataKey().getEncoded(),
-            keyResolver.getIvBytes(),
-            this.memorySegmentPool,
-            this.blockCache
+                name,
+                path,
+                fos,
+                this.keyResolver.getDataKey().getEncoded(),
+                keyResolver.getIvBytes(),
+                this.memorySegmentPool,
+                this.blockCache,
+                this.provider
         );
 
     }
@@ -131,13 +134,14 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new BufferIOWithCaching(
-            name,
-            path,
-            fos,
-            this.keyResolver.getDataKey().getEncoded(),
-            keyResolver.getIvBytes(),
-            this.memorySegmentPool,
-            this.blockCache
+                name,
+                path,
+                fos,
+                this.keyResolver.getDataKey().getEncoded(),
+                keyResolver.getIvBytes(),
+                this.memorySegmentPool,
+                this.blockCache,
+                this.provider
         );
     }
 

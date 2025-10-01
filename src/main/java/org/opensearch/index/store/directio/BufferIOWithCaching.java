@@ -14,7 +14,7 @@ import java.io.OutputStream;
 import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
 import java.security.Key;
-import java.security.Security;
+import java.security.Provider;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
@@ -58,12 +58,12 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
     /**
      * Creates a new CryptoIndexOutput
      *
-     * @param name The name of the output
-     * @param path The path to write to
-     * @param os The output stream
-     * @param key The AES key (must be 32 bytes for AES-256)
-     * @param iv The initialization vector (must be 16 bytes)
-     * @throws IOException If there is an I/O error
+     * @param name     The name of the output
+     * @param path     The path to write to
+     * @param os       The output stream
+     * @param key      The AES key (must be 32 bytes for AES-256)
+     * @param iv       The initialization vector (must be 16 bytes)
+     * @throws IOException              If there is an I/O error
      * @throws IllegalArgumentException If key or iv lengths are invalid
      */
     public BufferIOWithCaching(
@@ -73,13 +73,13 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         byte[] key,
         byte[] iv,
         Pool<MemorySegmentPool.SegmentHandle> memorySegmentPool,
-        BlockCache<RefCountedMemorySegment> blockCache
-    )
+        BlockCache<RefCountedMemorySegment> blockCache,
+        Provider provider)
         throws IOException {
         super(
             "FSIndexOutput(path=\"" + path + "\")",
             name,
-            new EncryptedOutputStream(os, path, key, iv, memorySegmentPool, blockCache),
+            new EncryptedOutputStream(os, path, key, iv, memorySegmentPool, blockCache, provider),
             CHUNK_SIZE
         );
     }
@@ -95,6 +95,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         private final BlockCache<RefCountedMemorySegment> blockCache;
         private final long frameSize;
         private final EncryptionAlgorithm algorithm;
+        private final Provider provider;
 
         // Frame tracking
         private Cipher currentCipher;
@@ -111,7 +112,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             byte[] key,
             byte[] iv,
             Pool<MemorySegmentPool.SegmentHandle> memorySegmentPool,
-            BlockCache<RefCountedMemorySegment> blockCache
+            BlockCache<RefCountedMemorySegment> blockCache,
+            Provider provider
         ) {
             super(os);
             this.path = path;
@@ -119,9 +121,11 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.buffer = new byte[BUFFER_SIZE];
             this.memorySegmentPool = memorySegmentPool;
             this.blockCache = blockCache;
+            this.provider = provider;
+
             this.frameSize = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE;
             this.algorithm = EncryptionAlgorithm.fromId((short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
-            
+
             this.footer = EncryptionFooter.generateNew(frameSize, (short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
             
             // Derive file-specific key
@@ -350,7 +354,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(),
                                                            frameNumber, offsetWithinFrame);
 
-            this.currentCipher = algorithm.getEncryptionCipher(Security.getProvider("SunJCE"));
+            this.currentCipher = algorithm.getEncryptionCipher(provider);
             AesGcmCipherFactory.initCipher(this.currentCipher, this.fileKey, frameIV,
                                             Cipher.ENCRYPT_MODE, offsetWithinFrame);
         }
