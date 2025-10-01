@@ -38,6 +38,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     private final AtomicLong nextTempFileCounter = new AtomicLong();
     private final int algorithmId = 1; // Default to AES_256_GCM_CTR
     private final Map<String, Long> contentLengthCache = new ConcurrentHashMap<>();
+    private final Map<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
 
     public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyResolver keyResolver) throws IOException {
         super(location, lockFactory);
@@ -58,11 +59,15 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         boolean success = false;
 
         try {
+            // Get cached footer or read once
+            EncryptionFooter footer = getOrReadFooter(name, fc);
+            
             final IndexInput indexInput = new CryptoBufferedIndexInput(
                     "CryptoBufferedIndexInput(path=\"" + path + "\")",
                     fc,
                     context,
-                    this.keyResolver
+                    this.keyResolver,
+                    footer  // Pass cached footer
             );
             success = true;
             return indexInput;
@@ -130,15 +135,44 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         }
     }
 
+    private EncryptionFooter getOrReadFooter(String name, FileChannel fc) throws IOException {
+        return footerCache.computeIfAbsent(name, fileName -> {
+            try {
+                return readFooterFromFile(fc);
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to read footer for " + fileName, e);
+            }
+        });
+    }
+
+    private EncryptionFooter readFooterFromFile(FileChannel channel) throws IOException {
+        long fileSize = channel.size();
+        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            throw new IOException("File too small to contain encryption footer");
+        }
+        
+        ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        
+        int footerLength = EncryptionFooter.calculateFooterLength(minBuffer.array());
+        
+        ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+        channel.read(footerBuffer, fileSize - footerLength);
+        
+        return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+    }
+
     @Override
     public void deleteFile(String name) throws IOException {
         contentLengthCache.remove(name);
+        footerCache.remove(name);
         super.deleteFile(name);
     }
 
     @Override
     public synchronized void close() throws IOException {
         contentLengthCache.clear();
+        footerCache.clear();
         isOpen = false;
         deletePendingFiles();
     }

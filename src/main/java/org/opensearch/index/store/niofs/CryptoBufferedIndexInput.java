@@ -99,6 +99,34 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.messageId = messageId;  // Passed from parent
     }
 
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver, EncryptionFooter footer) throws IOException {
+        super(resourceDesc, context);
+        this.channel = fc;
+        this.off = 0L;
+        this.end = fc.size();
+        this.keyResolver = keyResolver;
+        this.isClone = false;
+
+        // Get directory key first
+        this.directoryKey = keyResolver.getDataKey().getEncoded();
+
+        // Read footer with temporary key for authentication
+        this.messageId = footer.getMessageId();
+        this.frameSize = footer.getFrameSize();
+        this.algorithm = EncryptionAlgorithm.fromId(footer.getAlgorithmId());
+
+        // Derive file-specific key using messageId from footer
+        byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
+        this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
+
+        // Calculate footer length
+        long fileSize = channel.size();
+        ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+    }
+
+
     @Override
     public void close() throws IOException {
         if (!isClone) {
