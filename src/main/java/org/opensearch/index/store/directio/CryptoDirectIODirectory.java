@@ -158,29 +158,77 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         readAheadworker.close();
     }
 
-    private EncryptionFooter getOrReadFooter(String fileName, Path file) throws IOException {
-        return footerCache.computeIfAbsent(fileName, name -> {
-            try {
-                return readFooterFromFile(file);
-            } catch (IOException e) {
-                throw new RuntimeException("Failed to read footer for " + name, e);
-            }
-        });
+    private EncryptionFooter getOrReadFooter(String fileName, Path file) {
+        EncryptionFooter footer = footerCache.get(fileName);
+        if(footer != null) {
+            return footer;
+        }
+
+        footer = readFooterFromFile(file);
+        if (footer != null) {
+            footerCache.put(fileName, footer);
+            return footer;
+        }
+        return null;
     }
 
-    private EncryptionFooter readFooterFromFile(Path file) throws IOException {
+//    private EncryptionFooter readFooterFromFile(Path file) throws IOException {
+//        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+//
+//            // TODO not throw exception, instead just return null.
+//            //  If its null then we would know that footer has not been written correctly
+//            //  and return rawFileSize and not add to cache
+//
+//            // So this method
+//
+//            /*
+//            -> open FC
+//            -> get the size of the file. if its less return null
+//            -> if its more check for the magic bytes. if not present return null
+//            -> continue to create ENc Footer
+//             */
+//
+//            long fileSize = channel.size();
+//            if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+//                throw new IOException("File too small to contain encryption footer");
+//            }
+//
+//            // Read maximum possible footer size in one operation
+//            int maxFooterSize = EncryptionMetadataTrailer.MIN_FOOTER_SIZE + (1000 * 16);
+//            ByteBuffer footerBuffer = ByteBuffer.allocate(Math.min(maxFooterSize, (int)fileSize));
+//            channel.read(footerBuffer, Math.max(0, fileSize - footerBuffer.capacity()));
+//
+//            return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+//        }
+//    }
+
+    private EncryptionFooter readFooterFromFile(Path file) {
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             long fileSize = channel.size();
             if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-                throw new IOException("File too small to contain encryption footer");
+                return null;
             }
-            
+
+            // Validate magic bytes
+            ByteBuffer magicBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MAGIC.length);
+            channel.read(magicBuffer, fileSize - EncryptionMetadataTrailer.MAGIC.length);
+
+            if (!isValidOSEFFile(magicBuffer.array())) {
+                return null;
+            }
+
             // Read maximum possible footer size in one operation
             int maxFooterSize = EncryptionMetadataTrailer.MIN_FOOTER_SIZE + (1000 * 16);
             ByteBuffer footerBuffer = ByteBuffer.allocate(Math.min(maxFooterSize, (int)fileSize));
             channel.read(footerBuffer, Math.max(0, fileSize - footerBuffer.capacity()));
-            
-            return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+
+            try {
+                return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+            } catch (IOException e) {
+                return null;
+            }
+        } catch (IOException e) {
+            return null;
         }
     }
 
@@ -230,6 +278,9 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         // Get cached footer and return content length
         String fileName = file.getFileName().toString();
         EncryptionFooter footer = getOrReadFooter(fileName, file);
+        if(footer == null) {
+            return rawFileSize;
+        }
         return rawFileSize - footer.getFooterLength();
     }
 
