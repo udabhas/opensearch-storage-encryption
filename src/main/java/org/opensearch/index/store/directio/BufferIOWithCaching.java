@@ -101,6 +101,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         private Cipher currentCipher;
         private int currentFrameNumber = 0;
         private long currentFrameOffset = 0;
+        private long currentFrameEnd;
         private int bufferPosition = 0;
         private long streamOffset = 0;
         private int totalFrames = 0;
@@ -124,6 +125,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.provider = provider;
 
             this.frameSize = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE;
+            this.currentFrameEnd = this.frameSize;
             this.algorithm = EncryptionAlgorithm.fromId((short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
 
             this.footer = EncryptionFooter.generateNew(frameSize, (short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
@@ -263,15 +265,16 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             long currentOffset = absoluteOffset;
 
             while (remaining > 0) {
-                int frameNumber = (int)(currentOffset / frameSize);
-                if (frameNumber != currentFrameNumber) {
+                if (currentOffset >= currentFrameEnd) {
                     finalizeCurrentFrame();
-                    totalFrames = Math.max(totalFrames, frameNumber + 1);
-                    initializeFrameCipher(frameNumber, currentOffset % frameSize);
+                    currentFrameNumber++;
+                    totalFrames = currentFrameNumber + 1;
+                    currentFrameOffset = 0;
+                    currentFrameEnd += frameSize;
+                    initializeFrameCipher(currentFrameNumber, 0);
                 }
 
-                long frameEnd = (frameNumber + 1) * frameSize;
-                int chunkSize = (int) Math.min(remaining, frameEnd - currentOffset);
+                int chunkSize = (int) Math.min(remaining, currentFrameEnd - currentOffset);
 
                 try {
                     byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
