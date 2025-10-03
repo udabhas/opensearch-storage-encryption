@@ -217,15 +217,15 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             return rawFileSize;
         }
         
-//        // Quick magic check first
-//        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-//            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//            channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//
-//            if (!isValidOSEFFile(minBuffer.array())) {
-//                return rawFileSize;
-//            }
-//        }
+        // Quick magic check first
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+
+            if (!isValidOSEFFile(minBuffer.array())) {
+                return rawFileSize;
+            }
+        }
         
         // Get cached footer and return content length
         String fileName = file.getFileName().toString();
