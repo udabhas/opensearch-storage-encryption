@@ -15,6 +15,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Provider;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.logging.log4j.LogManager;
@@ -50,6 +52,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final KeyResolver keyResolver;
     private final Provider provider;
 
+    private final Map<String,EncryptionFooter> cacheMap = new ConcurrentHashMap<>();
+
     public CryptoDirectIODirectory(
         Path path,
         LockFactory lockFactory,
@@ -81,7 +85,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         }
 
         // Calculate content length with OSEF validation
-        long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
+        long contentLength = calculateContentLengthWithValidation(name , file, rawFileSize);
 
         ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker);
         ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
@@ -180,9 +184,13 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     /**
      * Calculate content length with OSEF validation
      */
-    private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
+    private long calculateContentLengthWithValidation(String fileName, Path file, long rawFileSize) throws IOException {
         if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             return rawFileSize; // Too small for footer
+        }
+
+        if(cacheMap.get(fileName) != null) {
+            return rawFileSize - cacheMap.get(fileName).getFooterLength();
         }
         
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
@@ -191,7 +199,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             
             byte[] minFooterBytes = minBuffer.array();
-            if (!isValidOSEFFile(minFooterBytes)) {
+            if (!EncryptionFooter.isValidOSEFFile(minFooterBytes)) {
                 return rawFileSize; // Not OSEF
             }
             
@@ -207,25 +215,13 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             
             // Authenticate footer with directory key
             try {
-                EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+                EncryptionFooter footer = EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+                cacheMap.put(fileName, footer);
             } catch (IOException e) {
                 throw new IOException("Invalid OSEF footer authentication: " + file, e);
             }
             
             return rawFileSize - footerLength;
         }
-    }
-
-    /**
-     * Check if file has valid OSEF magic bytes
-     */
-    private boolean isValidOSEFFile(byte[] minFooterBytes) {
-        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
-        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
-            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
-                return false;
-            }
-        }
-        return true;
     }
 }

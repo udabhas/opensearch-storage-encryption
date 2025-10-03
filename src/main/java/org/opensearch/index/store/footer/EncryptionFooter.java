@@ -276,4 +276,17 @@ public class EncryptionFooter {
     public void setFooterLength(int length) {
         footerLength = length;
     }
+
+    /**
+     * Check if file has valid OSEF magic bytes
+     */
+    public static boolean isValidOSEFFile(byte[] minFooterBytes) {
+        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
+        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
+            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
 }
