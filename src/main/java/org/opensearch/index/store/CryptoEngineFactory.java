@@ -17,7 +17,7 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngine;
-import org.opensearch.index.store.key.DefaultKeyResolver;
+import org.opensearch.index.store.key.IndexKeyResolverRegistry;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.translog.CryptoTranslogFactory;
 
@@ -60,14 +60,10 @@ public class CryptoEngineFactory implements EngineFactory {
         }
     }
 
-    private KeyIvResolver createTranslogKeyIvResolver(EngineConfig config) throws IOException {
-        // Use index-level keys for translog encryption - same as directory encryption
     /**
      * Create a separate KeyResolver for translog encryption.
      */
     private KeyResolver createTranslogKeyResolver(EngineConfig config) throws IOException {
-        // Create a separate key resolver for translog files
-
         // Use the translog location for key storage
         Path translogPath = config.getTranslogConfig().getTranslogPath();
         Path indexDirectory = translogPath.getParent().getParent(); // Go up two levels: translog -> shard -> index
@@ -79,12 +75,6 @@ public class CryptoEngineFactory implements EngineFactory {
         // Create directory for index-level keys (same as CryptoDirectoryFactory)
         Directory indexKeyDirectory = FSDirectory.open(indexDirectory);
 
-        // Create a dedicated key resolver for translog
-        return new DefaultKeyResolver(
-            keyDirectory,
-            config.getIndexSettings().getValue(CryptoDirectoryFactory.INDEX_CRYPTO_PROVIDER_SETTING),
-            directoryFactory.getKeyProvider(config.getIndexSettings())
-        );
         // Use shared resolver registry to get the SAME resolver instance as CryptoDirectoryFactory
         String indexUuid = config.getIndexSettings().getIndex().getUUID();
         return IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);

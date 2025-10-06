@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.security.Key;
 import java.security.Provider;
 import java.security.SecureRandom;
+import java.util.Base64;
 
 import javax.crypto.spec.SecretKeySpec;
 
@@ -17,9 +18,12 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.opensearch.common.Randomness;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
+import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.OpenSslNativeCipher;
+import org.opensearch.index.store.iv.NodeLevelKeyCache;
 
 /**
  * Default implementation of {@link KeyResolver} responsible for managing
@@ -57,8 +61,7 @@ public class DefaultKeyResolver implements KeyResolver {
      * @param keyProvider the master key provider used to encrypt/decrypt data keys
      * @throws IOException if an I/O error occurs while reading or writing key metadata
      */
-    public DefaultKeyResolver(Directory directory, Provider provider, MasterKeyProvider keyProvider) throws IOException {
-    public DefaultKeyIvResolver(String indexUuid, Directory directory, Provider provider, MasterKeyProvider keyProvider)
+    public DefaultKeyResolver(String indexUuid, Directory directory, Provider provider, MasterKeyProvider keyProvider)
         throws IOException {
         this.indexUuid = indexUuid;
         this.directory = directory;
@@ -113,6 +116,8 @@ public class DefaultKeyResolver implements KeyResolver {
         try (IndexOutput out = directory.createOutput(fileName, IOContext.DEFAULT)) {
             out.writeString(value);
         }
+    }
+
     private void initNewKey() throws IOException {
         DataKeyPair pair = keyProvider.generateDataPair();
         dataKey = new SecretKeySpec(pair.getRawKey(), "AES");
