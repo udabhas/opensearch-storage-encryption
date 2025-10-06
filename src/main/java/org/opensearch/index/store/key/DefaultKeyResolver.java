@@ -2,82 +2,85 @@
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
-package org.opensearch.index.store.iv;
+package org.opensearch.index.store.key;
 
 import java.io.IOException;
 import java.security.Key;
 import java.security.Provider;
 import java.security.SecureRandom;
-import java.util.Base64;
 
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
-import org.opensearch.common.Randomness;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
-import org.opensearch.index.store.cipher.AesCipherFactory;
+import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 
 /**
- * Default implementation of {@link KeyIvResolver} responsible for managing
- * the encryption key and initialization vector (IV) used in encrypting and decrypting
- * Lucene index files.
+ * Default implementation of {@link KeyResolver} responsible for managing
+ * the encryption key used in encrypting and decrypting Lucene index files.
  *
  * Uses node-level cache for TTL-based key management with automatic refresh.
  * Always returns the last known key if Master Key Provider is unavailable to ensure operations can continue.
  *
  * Metadata files:
  * - "keyfile" stores the encrypted data key
- * - "ivFile" stores the base64-encoded IV
+ * - IVs are derived using HKDF
  *
  * @opensearch.internal
  */
-public class DefaultKeyIvResolver implements KeyIvResolver {
+public class DefaultKeyResolver implements KeyResolver {
+    private static final Logger LOGGER = LogManager.getLogger(DefaultKeyResolver.class);
 
     private final String indexUuid;
     private final Directory directory;
     private final MasterKeyProvider keyProvider;
 
+    private Key dataKey;
     private String iv;
 
     private static final String IV_FILE = "ivFile";
     private static final String KEY_FILE = "keyfile";
+    private final byte[] baseIV;
 
     /**
-     * Constructs a new {@link DefaultKeyIvResolver} and ensures the key and IV are initialized.
+     * Constructs a new {@link DefaultKeyResolver} and ensures the key is initialized.
      *
      * @param indexUuid the unique identifier for the index
      * @param directory the Lucene directory to read/write metadata files
      * @param provider the JCE provider used for cipher operations
      * @param keyProvider the master key provider used to encrypt/decrypt data keys
-     * @throws IOException if an I/O error occurs while reading or writing key/IV metadata
+     * @throws IOException if an I/O error occurs while reading or writing key metadata
      */
+    public DefaultKeyResolver(Directory directory, Provider provider, MasterKeyProvider keyProvider) throws IOException {
     public DefaultKeyIvResolver(String indexUuid, Directory directory, Provider provider, MasterKeyProvider keyProvider)
         throws IOException {
         this.indexUuid = indexUuid;
         this.directory = directory;
         this.keyProvider = keyProvider;
-
+        this.baseIV = new byte[16];
         initialize();
     }
 
     /**
-     * Attempts to load the IV and encrypted key from the directory.
+     * Attempts to load the encrypted key from the directory.
      * If not present, it generates and persists new values.
      */
     private void initialize() throws IOException {
         try {
-            iv = readStringFile(IV_FILE);
+            dataKey = new SecretKeySpec(keyProvider.decryptKey(readByteArrayFile(KEY_FILE)), "AES");
         } catch (java.nio.file.NoSuchFileException e) {
-            initNewKeyAndIv();
+            initNewKey();
         }
     }
 
     /**
-     * Generates a new AES data key and IV (if not present), and writes them to metadata files.
+     * Generates a new AES data key and writes it to metadata file.
      */
     private void initNewKeyAndIv() throws IOException {
         try {
@@ -110,6 +113,10 @@ public class DefaultKeyIvResolver implements KeyIvResolver {
         try (IndexOutput out = directory.createOutput(fileName, IOContext.DEFAULT)) {
             out.writeString(value);
         }
+    private void initNewKey() throws IOException {
+        DataKeyPair pair = keyProvider.generateDataPair();
+        dataKey = new SecretKeySpec(pair.getRawKey(), "AES");
+        writeByteArrayFile(KEY_FILE, pair.getEncryptedKey());
     }
 
     /**
@@ -162,12 +169,35 @@ public class DefaultKeyIvResolver implements KeyIvResolver {
         }
     }
 
-    /**
-     * {@inheritDoc}
-     */
+    // TODO: Remove this IV bytes and update translog to generate the IV bytes deterministically
     @Override
-    public byte[] getIvBytes() {
-        return Base64.getDecoder().decode(iv);
+    public synchronized byte[] getIvBytes() {
+        try {
+            return readByteArrayFile(IV_FILE);
+        } catch (java.nio.file.NoSuchFileException e) {
+            initNewIV();
+            return this.baseIV.clone();
+        } catch (IOException ex) {
+            LOGGER.info("Encountered exception during getIV -> ", ex);
+            return this.baseIV.clone();
+        }
     }
 
+    private synchronized void initNewIV() {
+        try {
+            // Double-check if file was created by another thread
+            try {
+                byte[] existingIV = readByteArrayFile(IV_FILE);
+                System.arraycopy(existingIV, 0, this.baseIV, 0, existingIV.length);
+                return;
+            } catch (java.nio.file.NoSuchFileException e) {
+                // File doesn't exist, proceed with creation
+            }
+
+            new SecureRandom().nextBytes(this.baseIV);
+            writeByteArrayFile(IV_FILE, this.baseIV);
+        } catch (IOException ex) {
+            LOGGER.info("Encountered exception during initNewIV -> ", ex);
+        }
+    }
 }

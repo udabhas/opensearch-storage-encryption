@@ -36,7 +36,12 @@ public final class OpenSslNativeCipher {
     public static final MethodHandle EVP_CIPHER_CTX_free;
     public static final MethodHandle EVP_EncryptInit_ex;
     public static final MethodHandle EVP_EncryptUpdate;
+    public static final MethodHandle EVP_EncryptFinal_ex;
+    public static final MethodHandle EVP_CIPHER_CTX_ctrl;
     public static final MethodHandle EVP_aes_256_ctr;
+    public static final MethodHandle EVP_aes_256_gcm;
+
+    public static final int EVP_CTRL_GCM_GET_TAG = 0x10;
 
     private static final Linker LINKER = Linker.nativeLinker();
     private static final SymbolLookup LIBCRYPTO = loadLibcrypto();
@@ -138,6 +143,32 @@ public final class OpenSslNativeCipher {
             EVP_aes_256_ctr = LINKER
                 .downcallHandle(LIBCRYPTO.find("EVP_aes_256_ctr").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
 
+            EVP_aes_256_gcm = LINKER
+                .downcallHandle(LIBCRYPTO.find("EVP_aes_256_gcm").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
+
+            EVP_EncryptFinal_ex = LINKER
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_EncryptFinal_ex").orElseThrow(),
+                    FunctionDescriptor.of(
+                        ValueLayout.JAVA_INT,
+                        ValueLayout.ADDRESS, // ctx
+                        ValueLayout.ADDRESS, // out
+                        ValueLayout.ADDRESS  // outLen
+                    )
+                );
+
+            EVP_CIPHER_CTX_ctrl = LINKER
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_CIPHER_CTX_ctrl").orElseThrow(),
+                    FunctionDescriptor.of(
+                        ValueLayout.JAVA_INT,
+                        ValueLayout.ADDRESS, // ctx
+                        ValueLayout.JAVA_INT, // type
+                        ValueLayout.JAVA_INT, // arg
+                        ValueLayout.ADDRESS  // ptr
+                    )
+                );
+
         } catch (Throwable t) {
             throw new OpenSslException("Failed to initialize OpenSSL method handles via Panama", t);
         }
@@ -145,14 +176,6 @@ public final class OpenSslNativeCipher {
 
     /**
      * Encrypts the input data using AES-256-CTR mode.
-     *
-     * @param key   The 32-byte encryption key
-     * @param iv    The 16-byte initialization vector
-     * @param input The data to encrypt
-     * @return The encrypted data
-     * @throws IllegalArgumentException if the input parameters are invalid
-     * @throws OpenSslException if encryption fails
-     * @throws Throwable if there's an unexpected error
      */
     public static byte[] encrypt(byte[] key, byte[] iv, byte[] input) throws Throwable {
         return encrypt(key, iv, input, 0L);
@@ -190,16 +213,8 @@ public final class OpenSslNativeCipher {
                     throw new OpenSslException("EVP_EncryptInit_ex failed");
                 }
 
-                int skipBytes = (int) (filePosition % AES_BLOCK_SIZE);
-                if (skipBytes > 0) {
-                    MemorySegment dummyIn = arena.allocate(ValueLayout.JAVA_BYTE, skipBytes);
-                    MemorySegment dummyOut = arena.allocate(skipBytes + AES_BLOCK_SIZE);
-                    MemorySegment dummyLen = arena.allocate(ValueLayout.JAVA_INT);
-                    EVP_EncryptUpdate.invoke(ctx, dummyOut, dummyLen, dummyIn, skipBytes);
-                }
-
                 MemorySegment inSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, input);
-                MemorySegment outSeg = arena.allocate(input.length + AES_BLOCK_SIZE);
+                MemorySegment outSeg = arena.allocate(input.length);
                 MemorySegment outLen = arena.allocate(ValueLayout.JAVA_INT);
 
                 rc = (int) EVP_EncryptUpdate.invoke(ctx, outSeg, outLen, inSeg, input.length);
@@ -213,6 +228,81 @@ public final class OpenSslNativeCipher {
                 EVP_CIPHER_CTX_free.invoke(ctx);
             }
         }
+    }
+
+    /**
+     * Initializes a GCM cipher context for streaming encryption.
+     */
+    public static MemorySegment initGCMCipher(byte[] key, byte[] iv, long filePosition, Arena arena) throws Throwable {
+        if (key == null || key.length != AES_256_KEY_SIZE) {
+            throw new IllegalArgumentException("Invalid key length: expected " + AES_256_KEY_SIZE + " bytes");
+        }
+        if (iv == null || iv.length != AES_BLOCK_SIZE) {
+            throw new IllegalArgumentException("Invalid IV length: expected " + AES_BLOCK_SIZE + " bytes");
+        }
+
+        MemorySegment ctx = (MemorySegment) EVP_CIPHER_CTX_new.invoke();
+        if (ctx.address() == 0) {
+            throw new OpenSslException("EVP_CIPHER_CTX_new failed");
+        }
+
+        MemorySegment cipher = (MemorySegment) EVP_aes_256_gcm.invoke();
+        if (cipher.address() == 0) {
+            EVP_CIPHER_CTX_free.invoke(ctx);
+            throw new OpenSslException("EVP_aes_256_gcm failed");
+        }
+
+        byte[] gcmIV = new byte[12];
+        System.arraycopy(iv, 0, gcmIV, 0, 12);
+
+        MemorySegment keySeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, key);
+        MemorySegment ivSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, gcmIV);
+
+        int rc = (int) EVP_EncryptInit_ex.invoke(ctx, cipher, MemorySegment.NULL, keySeg, ivSeg);
+        if (rc != 1) {
+            EVP_CIPHER_CTX_free.invoke(ctx);
+            throw new OpenSslException("EVP_EncryptInit_ex failed");
+        }
+
+        return ctx;
+    }
+
+    /**
+     * Encrypts data using an initialized GCM cipher context.
+     */
+    public static byte[] encryptUpdate(MemorySegment ctx, byte[] input, Arena arena) throws Throwable {
+        MemorySegment inSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, input);
+        MemorySegment outSeg = arena.allocate(input.length);
+        MemorySegment outLen = arena.allocate(ValueLayout.JAVA_INT);
+
+        int rc = (int) EVP_EncryptUpdate.invoke(ctx, outSeg, outLen, inSeg, input.length);
+        if (rc != 1) {
+            throw new OpenSslException("EVP_EncryptUpdate failed");
+        }
+
+        int bytesWritten = outLen.get(ValueLayout.JAVA_INT, 0);
+        return outSeg.asSlice(0, bytesWritten).toArray(ValueLayout.JAVA_BYTE);
+    }
+
+    /**
+     * Finalizes GCM encryption and returns the authentication tag.
+     */
+    public static byte[] finalizeAndGetTag(MemorySegment ctx, Arena arena) throws Throwable {
+        MemorySegment finalOut = arena.allocate(AES_BLOCK_SIZE);
+        MemorySegment finalLen = arena.allocate(ValueLayout.JAVA_INT);
+
+        int rc = (int) EVP_EncryptFinal_ex.invoke(ctx, finalOut, finalLen);
+        if (rc != 1) {
+            throw new OpenSslException("EVP_EncryptFinal_ex failed");
+        }
+
+        MemorySegment tagSeg = arena.allocate(16);
+        rc = (int) EVP_CIPHER_CTX_ctrl.invoke(ctx, EVP_CTRL_GCM_GET_TAG, 16, tagSeg);
+        if (rc != 1) {
+            throw new OpenSslException("Failed to get GCM tag");
+        }
+
+        return tagSeg.toArray(ValueLayout.JAVA_BYTE);
     }
 
     private OpenSslNativeCipher() {
