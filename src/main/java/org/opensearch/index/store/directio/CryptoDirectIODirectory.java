@@ -334,4 +334,12 @@ public final class CryptoDirectIODirectory extends FSDirectory {
 //                readFooterFromFile(file);
 //        });
 //    }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        ensureOpen();
+        Path file = getDirectory().resolve(name);
+        long rawFileSize = Files.size(file);
+        return calculateContentLengthWithValidation(file, rawFileSize);
+    }
 }

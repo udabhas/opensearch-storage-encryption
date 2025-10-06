@@ -81,4 +81,15 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
         cryptoDirectIODirectory.close(); // only closes its resources.
         super.close(); // actually closes pending files.
     }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        String extension = FileSwitchDirectory.getExtension(name);
+
+        if (specialExtensions.contains(extension)) {
+            return cryptoDirectIODirectory.fileLength(name);
+        }
+
+        return super.fileLength(name);
+    }
 }
