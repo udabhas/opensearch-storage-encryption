@@ -281,7 +281,11 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         if(footer == null) {
             return rawFileSize;
         }
-        return rawFileSize - footer.getFooterLength();
+        long fileLength =  rawFileSize - footer.getFooterLength();
+        if (fileLength < 0) {
+            return rawFileSize;
+        }
+        return fileLength;
     }
 
 //    private EncryptionFooter readFooterFromFile(Path file) throws IOException {
