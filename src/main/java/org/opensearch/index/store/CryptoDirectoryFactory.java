@@ -45,7 +45,7 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.READ_AHEAD_QUE
 import static org.opensearch.index.store.directio.DirectIoConfigs.RESEVERED_POOL_SIZE_IN_BYTES;
 import static org.opensearch.index.store.directio.DirectIoConfigs.WARM_UP_PERCENTAGE;
 import org.opensearch.index.store.hybrid.HybridCryptoDirectory;
-import org.opensearch.index.store.key.DefaultKeyResolver;
+import org.opensearch.index.store.key.IndexKeyResolverRegistry;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 import org.opensearch.index.store.pool.MemorySegmentPool;
@@ -166,9 +166,9 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
 
         // Use shared resolver registry to prevent race conditions
         String indexUuid = indexSettings.getIndex().getUUID();
-        KeyIvResolver keyIvResolver = IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);
-        Directory baseDir = new NIOFSDirectory(location, lockFactory);
-        KeyResolver keyResolver = new DefaultKeyResolver(baseDir, provider, getKeyProvider(indexSettings));
+        KeyResolver keyResolver = IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);
+//        Directory baseDir = new NIOFSDirectory(location, lockFactory);
+//        KeyResolver keyResolver = new DefaultKeyResolver(baseDir, provider, getKeyProvider(indexSettings));
 
         IndexModule.Type type = IndexModule.defaultStoreType(IndexModule.NODE_STORE_ALLOW_MMAP.get(indexSettings.getNodeSettings()));
 
@@ -180,9 +180,9 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                     location,
                     lockFactory,
                     provider,
-                    keyIvResolver
+                        keyResolver
                 );
-                return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyIvResolver);
+                return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyResolver);
             }
             case MMAPFS -> {
                 throw new AssertionError("MMAPFS not supported with index level encryption");

@@ -22,8 +22,6 @@ import org.opensearch.common.Randomness;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.index.store.cipher.AesCipherFactory;
-import org.opensearch.index.store.cipher.OpenSslNativeCipher;
-import org.opensearch.index.store.iv.NodeLevelKeyCache;
 
 /**
  * Default implementation of {@link KeyResolver} responsible for managing

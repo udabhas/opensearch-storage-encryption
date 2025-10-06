@@ -20,7 +20,9 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.store.key.DefaultKeyResolver;
+import org.opensearch.index.store.key.IndexKeyResolverRegistry;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**
@@ -35,11 +37,11 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
     /**
      * Helper method to register the resolver in the IndexKeyResolverRegistry
      */
-    private void registerResolver(String indexUuid, KeyIvResolver resolver) throws Exception {
+    private void registerResolver(String indexUuid, KeyResolver resolver) throws Exception {
         Field resolverCacheField = IndexKeyResolverRegistry.class.getDeclaredField("resolverCache");
         resolverCacheField.setAccessible(true);
         @SuppressWarnings("unchecked")
-        ConcurrentMap<String, KeyIvResolver> resolverCache = (ConcurrentMap<String, KeyIvResolver>) resolverCacheField.get(null);
+        ConcurrentMap<String, KeyResolver> resolverCache = (ConcurrentMap<String, KeyResolver>) resolverCacheField.get(null);
         resolverCache.put(indexUuid, resolver);
     }
 
@@ -94,10 +96,10 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         // Use a test index UUID
         testIndexUuid = "test-index-uuid-" + System.currentTimeMillis();
         org.apache.lucene.store.Directory directory = new org.apache.lucene.store.NIOFSDirectory(tempDir);
-        keyIvResolver = new DefaultKeyIvResolver(testIndexUuid, directory, cryptoProvider, keyProvider);
+        keyResolver = new DefaultKeyResolver(testIndexUuid, directory, cryptoProvider, keyProvider);
 
         // Register the resolver with IndexKeyResolverRegistry so cache can find it
-        registerResolver(testIndexUuid, keyIvResolver);
+        registerResolver(testIndexUuid, keyResolver);
     }
 
     @Override
@@ -107,7 +109,6 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         // Clear the IndexKeyResolverRegistry cache
         IndexKeyResolverRegistry.clearCache();
         super.tearDown();
-        keyResolver = new DefaultKeyResolver(directory, cryptoProvider, keyProvider);
     }
 
     public void testTranslogDataIsActuallyEncrypted() throws IOException {
