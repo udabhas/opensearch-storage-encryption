@@ -8,6 +8,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.Provider;
 import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
@@ -36,6 +37,9 @@ public class AesCipherFactory {
 
     /** The algorrithm. */
     public static final String ALGORITHM = "AES";
+
+    // Cache for frame base IVs: key = (messageIdHash << 32) | frameNumber, value = 16-byte base IV
+    private static final ConcurrentHashMap<Long, byte[]> FRAME_IV_CACHE = new ConcurrentHashMap<>(256);
 
     /**
      * Returns a new Cipher instance configured for AES/CTR/NoPadding using the given provider.
@@ -142,18 +146,19 @@ public class AesCipherFactory {
             throw new IllegalArgumentException("Invalid frame number: " + frameNumber);
         }
         
-        // Derive frame-specific base IV using HKDF
-        String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
-        byte[] frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+        // Cache key: combine messageId hash and frameNumber
+        long cacheKey = ((long) Arrays.hashCode(messageId) << 32) | frameNumber;
         
-        // Modify last 4 bytes for block counter within frame
+        // Get or compute frame base IV (expensive HKDF operation)
+        byte[] frameBaseIV = FRAME_IV_CACHE.computeIfAbsent(cacheKey, k -> {
+            String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
+            return HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+        });
+        
+        // Fast path: copy base IV and update counter bytes only
         byte[] frameIV = Arrays.copyOf(frameBaseIV, 16);
-        int blockOffset = (int) (offsetWithinFrame / AES_BLOCK_SIZE_BYTES);
+        int blockOffset = (int) (offsetWithinFrame / AES_BLOCK_SIZE_BYTES) + 2;
 
-        // Add 2 for GCM compatibility: counter 0 (reserved) + counter 1 (auth) + data counters start at 2
-        blockOffset += 2;
-
-        // Bytes 12-15: Block counter within frame (4 bytes, big-endian)
         frameIV[12] = (byte) (blockOffset >>> 24);
         frameIV[13] = (byte) (blockOffset >>> 16);
         frameIV[14] = (byte) (blockOffset >>> 8);
