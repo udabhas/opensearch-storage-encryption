@@ -21,7 +21,8 @@ import java.nio.charset.StandardCharsets;
  */
 public class HkdfKeyDerivation {
     
-    private static final String HMAC_ALGORITHM = "HmacSHA256";
+//    private static final String HMAC_ALGORITHM = "HmacSHA256";
+    private static final String HMAC_ALGORITHM = "HmacSHA384";
     private static final int HASH_LENGTH = 32; // SHA-256 output length
     
     /**
