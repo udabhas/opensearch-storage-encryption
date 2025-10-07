@@ -4,12 +4,6 @@
  */
 package org.opensearch.index.store;
 
-import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SIZE;
-import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_INITIAL_SIZE;
-import static org.opensearch.index.store.directio.DirectIoConfigs.READ_AHEAD_QUEUE_SIZE;
-import static org.opensearch.index.store.directio.DirectIoConfigs.RESEVERED_POOL_SIZE_IN_BYTES;
-import static org.opensearch.index.store.directio.DirectIoConfigs.WARM_UP_PERCENTAGE;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -45,9 +39,14 @@ import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
 import org.opensearch.index.store.directio.CryptoDirectIODirectory;
+import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SIZE;
+import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_INITIAL_SIZE;
+import static org.opensearch.index.store.directio.DirectIoConfigs.READ_AHEAD_QUEUE_SIZE;
+import static org.opensearch.index.store.directio.DirectIoConfigs.RESEVERED_POOL_SIZE_IN_BYTES;
+import static org.opensearch.index.store.directio.DirectIoConfigs.WARM_UP_PERCENTAGE;
 import org.opensearch.index.store.hybrid.HybridCryptoDirectory;
-import org.opensearch.index.store.iv.IndexKeyResolverRegistry;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.IndexKeyResolverRegistry;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
@@ -99,7 +98,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     }, Property.NodeScope, Property.IndexScope);
 
     /**
-     * Specifies the node-level TTL for data keys in seconds. 
+     * Specifies the node-level TTL for data keys in seconds.
      * Default is 3600 seconds (1 hour).
      * Set to -1 to disable key refresh (keys are loaded once and cached forever).
      * This setting applies globally to all indices.
@@ -158,7 +157,6 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         final Provider provider = indexSettings.getValue(INDEX_CRYPTO_PROVIDER_SETTING);
 
         // Use index-level key resolver - store keys at index level
-
         Path indexDirectory = location.getParent().getParent(); // Go up two levels: index -> shard -> index
         MasterKeyProvider keyProvider = getKeyProvider(indexSettings);
 
@@ -167,7 +165,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
 
         // Use shared resolver registry to prevent race conditions
         String indexUuid = indexSettings.getIndex().getUUID();
-        KeyIvResolver keyIvResolver = IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);
+        KeyResolver keyResolver = IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);
 
         IndexModule.Type type = IndexModule.defaultStoreType(IndexModule.NODE_STORE_ALLOW_MMAP.get(indexSettings.getNodeSettings()));
 
@@ -179,16 +177,16 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                     location,
                     lockFactory,
                     provider,
-                    keyIvResolver
+                        keyResolver
                 );
-                return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyIvResolver);
+                return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyResolver);
             }
             case MMAPFS -> {
                 throw new AssertionError("MMAPFS not supported with index level encryption");
             }
             case SIMPLEFS, NIOFS -> {
                 LOGGER.debug("Using NIOFS directory");
-                return new CryptoNIOFSDirectory(lockFactory, location, provider, keyIvResolver);
+                return new CryptoNIOFSDirectory(lockFactory, location, provider, keyResolver);
             }
             default -> throw new AssertionError("unexpected built-in store type [" + type + "]");
         }
@@ -199,7 +197,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         Path location,
         LockFactory lockFactory,
         Provider provider,
-        KeyIvResolver keyIvResolver
+        KeyResolver keyResolver
     ) throws IOException {
         /*
         * ================================
@@ -236,11 +234,11 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         * -----------
         * - Caffeine eviction is single-threaded by default (runs in caller thread via `Runnable::run`),
         *   which avoids offloading release to background threads that may hold on to native memory.
-        * 
+        *
         */
 
         // Create a per-directory loader that knows about this specific keyIvResolver
-        BlockLoader<MemorySegmentPool.SegmentHandle> loader = new CryptoDirectIOBlockLoader(sharedSegmentPool, keyIvResolver);
+        BlockLoader<MemorySegmentPool.SegmentHandle> loader = new CryptoDirectIOBlockLoader(sharedSegmentPool, keyResolver);
 
         // Create a directory-specific cache that wraps the shared cache with this directory's loader
         long maxBlocks = RESEVERED_POOL_SIZE_IN_BYTES / CACHE_BLOCK_SIZE;
@@ -258,7 +256,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             location,
             lockFactory,
             provider,
-            keyIvResolver,
+            keyResolver,
             sharedSegmentPool,
             directoryCache,
             loader,

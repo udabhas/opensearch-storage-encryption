@@ -9,19 +9,26 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_MA
 import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SIZE;
 import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SIZE_POWER;
 
+import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
 
@@ -30,11 +37,12 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectIOBlockLoader.class);
 
     private final Pool<MemorySegmentPool.SegmentHandle> segmentPool;
-    private final KeyIvResolver keyIvResolver;
+    private final KeyResolver keyResolver;
+    private final Map<Path, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
 
-    public CryptoDirectIOBlockLoader(Pool<MemorySegmentPool.SegmentHandle> segmentPool, KeyIvResolver keyIvResolver) {
+    public CryptoDirectIOBlockLoader(Pool<MemorySegmentPool.SegmentHandle> segmentPool, KeyResolver keyResolver) {
         this.segmentPool = segmentPool;
-        this.keyIvResolver = keyIvResolver;
+        this.keyResolver = keyResolver;
     }
 
     @Override
@@ -61,16 +69,22 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
-            // decrypt the block to cache.
-            MemorySegmentDecryptor
-                .decryptInPlace(
-                    arena,
-                    readBytes.address(),
-                    readBytes.byteSize(),
-                    keyIvResolver.getDataKey().getEncoded(),
-                    keyIvResolver.getIvBytes(),
-                    startOffset
-                );
+            EncryptionFooter footer = getOrReadFooter(filePath);
+            byte[] messageId = footer.getMessageId();
+            byte[] directoryKey = keyResolver.getDataKey().getEncoded();
+            byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveAesKey(
+                    directoryKey, messageId, "file-encryption");
+            
+            // Use frame-based decryption with derived file key
+            MemorySegmentDecryptor.decryptInPlaceFrameBased(
+                readBytes.address(),
+                readBytes.byteSize(),
+                fileKey,                                    // Derived file key (matches write path)
+                directoryKey,                               // Directory key for IV computation
+                messageId,                                  // Message ID from footer
+                org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
+                startOffset                                 // File offset
+            );
 
             if (bytesRead == 0) {
                 throw new RuntimeException("EOF or empty read at offset " + startOffset);
@@ -120,5 +134,53 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
                 handles[i].release();  // Release back to correct tier
             }
         }
+    }
+
+    private EncryptionFooter getOrReadFooter(Path filePath) throws IOException {
+        EncryptionFooter footer = footerCache.get(filePath);
+        if (footer != null) {
+            return footer;
+        }
+        
+        footer = readFooterFromFile(filePath);
+        footerCache.put(filePath, footer);
+        return footer;
+    }
+
+    private EncryptionFooter readFooterFromFile(Path filePath) throws IOException {
+        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
+            long fileSize = channel.size();
+            if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+                throw new IOException("File too small to contain footer: " + filePath);
+            }
+
+            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            byte[] minFooterBytes = minBuffer.array();
+            
+            if (!isValidOSEFFile(minFooterBytes)) {
+                throw new IOException("Not an OSEF file, using legacy IV");
+            }
+            
+            int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
+            
+            ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+            channel.read(footerBuffer, fileSize - footerLength);
+            
+            return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+        }
+    }
+
+    /**
+     * Check if file has valid OSEF magic bytes
+     */
+    private boolean isValidOSEFFile(byte[] minFooterBytes) {
+        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
+        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
+            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 }

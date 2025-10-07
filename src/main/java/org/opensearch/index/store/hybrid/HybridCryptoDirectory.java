@@ -14,7 +14,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.opensearch.index.store.directio.CryptoDirectIODirectory;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 
 public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
@@ -24,9 +24,13 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
     // Only these extensions get special routing - everything else goes to NIOFS
     private final Set<String> specialExtensions;
 
-    public HybridCryptoDirectory(LockFactory lockFactory, CryptoDirectIODirectory delegate, Provider provider, KeyIvResolver keyIvResolver)
+    public HybridCryptoDirectory(
+        LockFactory lockFactory,
+        CryptoDirectIODirectory delegate,
+        Provider provider,
+        KeyResolver keyResolver)
         throws IOException {
-        super(lockFactory, delegate.getDirectory(), provider, keyIvResolver);
+        super(lockFactory, delegate.getDirectory(), provider, keyResolver);
         this.cryptoDirectIODirectory = delegate;
         // todo can be moved to buffer-io with caching
         // "kdm", "tip", "tmd", "psm", "fdm", "kdi");
@@ -76,5 +80,16 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
     public void close() throws IOException {
         cryptoDirectIODirectory.close(); // only closes its resources.
         super.close(); // actually closes pending files.
+    }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        String extension = FileSwitchDirectory.getExtension(name);
+
+        if (specialExtensions.contains(extension)) {
+            return cryptoDirectIODirectory.fileLength(name);
+        }
+
+        return super.fileLength(name);
     }
 }
