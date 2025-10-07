@@ -8,9 +8,13 @@ import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.Provider;
 import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
+
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
+import org.opensearch.index.store.key.HkdfKeyDerivation;
 
 /**
  * Factory utility for creating and initializing Cipher instances
@@ -33,6 +37,9 @@ public class AesCipherFactory {
 
     /** The algorrithm. */
     public static final String ALGORITHM = "AES";
+
+    // Cache for frame base IVs: key = (messageIdHash << 32) | frameNumber, value = 16-byte base IV
+    private static final ConcurrentHashMap<Long, byte[]> FRAME_IV_CACHE = new ConcurrentHashMap<>(256);
 
     /**
      * Returns a new Cipher instance configured for AES/CTR/NoPadding using the given provider.
@@ -120,5 +127,57 @@ public class AesCipherFactory {
         ivCopy[AesCipherFactory.IV_ARRAY_LENGTH - 4] = (byte) (blockOffset >>> 24);
 
         return ivCopy;
+    }
+    
+    /**
+     * Compute frame-specific IV for large file encryption
+     * 
+     * @param directoryKey the directory's master key (32 bytes)
+     * @param messageId the file's unique MessageId (16 bytes)
+     * @param frameNumber the frame number (0-based)
+     * @param offsetWithinFrame the byte offset within the frame
+     * @return frame-specific IV for encryption/decryption
+     */
+    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, int frameNumber, long offsetWithinFrame) {
+        if (messageId.length != 16) {
+            throw new IllegalArgumentException("MessageId must be 16 bytes");
+        }
+        if (frameNumber < 0 || frameNumber >= EncryptionMetadataTrailer.MAX_FRAMES_PER_FILE) {
+            throw new IllegalArgumentException("Invalid frame number: " + frameNumber);
+        }
+        
+        // Cache key: combine messageId hash and frameNumber
+        long cacheKey = ((long) Arrays.hashCode(messageId) << 32) | frameNumber;
+        
+        // Get or compute frame base IV (expensive HKDF operation)
+        byte[] frameBaseIV = FRAME_IV_CACHE.computeIfAbsent(cacheKey, k -> {
+            String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
+            return HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+        });
+        
+        // Fast path: copy base IV and update counter bytes only
+        byte[] frameIV = Arrays.copyOf(frameBaseIV, 16);
+        int blockOffset = (int) (offsetWithinFrame / AES_BLOCK_SIZE_BYTES) + 2;
+
+        frameIV[12] = (byte) (blockOffset >>> 24);
+        frameIV[13] = (byte) (blockOffset >>> 16);
+        frameIV[14] = (byte) (blockOffset >>> 8);
+        frameIV[15] = (byte) blockOffset;
+        
+        return frameIV;
+    }
+
+    /**
+     * Calculate which frame contains a given file offset
+     */
+    public static int getFrameNumber(long fileOffset) {
+        return (int) (fileOffset >>> 36);
+    }
+
+    /**
+     * Calculate offset within a frame
+     */
+    public static long getOffsetWithinFrame(long fileOffset) {
+        return fileOffset & 0xFFFFFFFFFFL;
     }
 }

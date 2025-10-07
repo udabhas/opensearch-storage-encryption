@@ -9,10 +9,14 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SI
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Provider;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.logging.log4j.LogManager;
@@ -27,13 +31,15 @@ import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.block_loader.BlockLoader;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
 import org.opensearch.index.store.read_ahead.Worker;
 import org.opensearch.index.store.read_ahead.impl.ReadaheadManagerImpl;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 
 @SuppressForbidden(reason = "uses custom DirectIO")
 public final class CryptoDirectIODirectory extends FSDirectory {
@@ -43,13 +49,16 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final Pool<MemorySegmentPool.SegmentHandle> memorySegmentPool;
     private final BlockCache<RefCountedMemorySegment> blockCache;
     private final Worker readAheadworker;
-    private final KeyIvResolver keyIvResolver;
+    private final KeyResolver keyResolver;
+    private final Provider provider;
+    private int cacheHits, cacheMiss;
+    private final Map<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
 
     public CryptoDirectIODirectory(
         Path path,
         LockFactory lockFactory,
         Provider provider,
-        KeyIvResolver keyIvResolver,
+        KeyResolver keyResolver,
         Pool<MemorySegmentPool.SegmentHandle> memorySegmentPool,
         BlockCache<RefCountedMemorySegment> blockCache,
         BlockLoader<MemorySegmentPool.SegmentHandle> blockLoader,
@@ -57,10 +66,14 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     )
         throws IOException {
         super(path, lockFactory);
-        this.keyIvResolver = keyIvResolver;
+        this.keyResolver = keyResolver;
         this.memorySegmentPool = memorySegmentPool;
         this.blockCache = blockCache;
         this.readAheadworker = worker;
+        this.provider = provider;
+
+        this.cacheMiss = 0;
+        this.cacheHits = 0;
     }
 
     @Override
@@ -69,20 +82,22 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         ensureCanRead(name);
 
         Path file = getDirectory().resolve(name);
-        long size = Files.size(file);
-        if (size == 0) {
+        long rawFileSize = Files.size(file);
+        if (rawFileSize == 0) {
             throw new IOException("Cannot open empty file with DirectIO: " + file);
         }
 
+        long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
+
         ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker);
-        ReadaheadContext readAheadContext = readAheadManager.register(file, size);
-        BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, size);
+        ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
+        BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
 
         return CachedMemorySegmentIndexInput
             .newInstance(
                 "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
                 file,
-                size,
+                contentLength,
                 blockCache,
                 readAheadManager,
                 readAheadContext,
@@ -101,13 +116,14 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new BufferIOWithCaching(
-            name,
-            path,
-            fos,
-            this.keyIvResolver.getDataKey().getEncoded(),
-            keyIvResolver.getIvBytes(),
-            this.memorySegmentPool,
-            this.blockCache
+                name,
+                path,
+                fos,
+                this.keyResolver.getDataKey().getEncoded(),
+                keyResolver.getIvBytes(),
+                this.memorySegmentPool,
+                this.blockCache,
+                this.provider
         );
 
     }
@@ -124,27 +140,77 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new BufferIOWithCaching(
-            name,
-            path,
-            fos,
-            this.keyIvResolver.getDataKey().getEncoded(),
-            keyIvResolver.getIvBytes(),
-            this.memorySegmentPool,
-            this.blockCache
+                name,
+                path,
+                fos,
+                this.keyResolver.getDataKey().getEncoded(),
+                keyResolver.getIvBytes(),
+                this.memorySegmentPool,
+                this.blockCache,
+                this.provider
         );
     }
 
-    // only close resources owned by this directory type.
-    // the actual directory is closed only once (see HybridCryptoDirectory.java)
     @Override
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
+        footerCache.clear();
+        LOGGER.info("Total Cache Hits = {} , Cache Misses = {} , Total Calls = {}", cacheHits, cacheMiss, cacheHits + cacheMiss);
         readAheadworker.close();
+    }
+
+    private EncryptionFooter getOrReadFooter(String fileName, Path file) {
+        EncryptionFooter footer = footerCache.get(fileName);
+        if (footer != null) {
+            cacheHits++;
+            return footer;
+        }
+        cacheMiss++;
+        footer = readFooterFromFile(file);
+        if (footer != null) {
+            footerCache.put(fileName, footer);
+        }
+        return footer;
+    }
+
+    private EncryptionFooter readFooterFromFile(Path file) {
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+            long fileSize = channel.size();
+            if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+                return null;
+            }
+
+            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            minBuffer.flip();
+            
+            byte[] minBytes = minBuffer.array();
+            
+            if (!isValidOSEFFile(minBytes)) {
+                return null;
+            }
+
+            int footerLength = EncryptionFooter.calculateFooterLength(minBytes);
+            
+            if (footerLength == EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+                return EncryptionFooter.deserialize(minBytes, keyResolver.getDataKey().getEncoded());
+            }
+            
+            ByteBuffer fullBuffer = ByteBuffer.allocate(footerLength);
+            channel.read(fullBuffer, fileSize - footerLength);
+            
+            return EncryptionFooter.deserialize(fullBuffer.array(), keyResolver.getDataKey().getEncoded());
+        } catch (Exception e) {
+            LOGGER.warn("Failed to read footer from file: {}", file, e);
+            return null;
+        }
     }
 
     @Override
     public void deleteFile(String name) throws IOException {
         Path file = getDirectory().resolve(name);
+        
+        footerCache.remove(name);
 
         if (blockCache != null) {
             try {
@@ -158,11 +224,44 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                     }
                 }
             } catch (IOException e) {
-                // Fall back to path-based invalidation if file size unavailable
                 LOGGER.warn("Failed to get file size", e);
             }
         }
 
         super.deleteFile(name);
+    }
+
+    private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
+        if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            return rawFileSize;
+        }
+        
+        String fileName = file.getFileName().toString();
+        EncryptionFooter footer = getOrReadFooter(fileName, file);
+        
+        if (footer == null) {
+            return rawFileSize;
+        }
+        
+        long fileLength = rawFileSize - footer.getFooterLength();
+        return fileLength < 0 ? rawFileSize : fileLength;
+    }
+
+    private boolean isValidOSEFFile(byte[] minFooterBytes) {
+        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
+        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
+            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        ensureOpen();
+        Path file = getDirectory().resolve(name);
+        long rawFileSize = Files.size(file);
+        return calculateContentLengthWithValidation(file, rawFileSize);
     }
 }
