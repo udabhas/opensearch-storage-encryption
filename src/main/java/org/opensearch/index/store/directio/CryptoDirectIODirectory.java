@@ -250,41 +250,19 @@ public final class CryptoDirectIODirectory extends FSDirectory {
      * Calculate content length with OSEF validation
      */
     private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
-        String fileName = file.getFileName().toString();
-        
         if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            LOGGER.info("File {} too small ({} bytes), returning raw size", fileName, rawFileSize);
             return rawFileSize;
         }
         
-        // Quick magic check first
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-
-            if (!isValidOSEFFile(minBuffer.array())) {
-                LOGGER.info("File {} has no valid OSEF magic bytes, returning raw size", fileName);
-                return rawFileSize;
-            }
-        }
-        
-        LOGGER.info("File {} has valid OSEF magic, reading footer", fileName);
-        
-        // Get cached footer and return content length
+        String fileName = file.getFileName().toString();
         EncryptionFooter footer = getOrReadFooter(fileName, file);
-        if(footer == null) {
-            LOGGER.warn("File {} footer is null, returning raw size", fileName);
+        
+        if (footer == null) {
             return rawFileSize;
         }
         
         long fileLength = rawFileSize - footer.getFooterLength();
-        LOGGER.info("File {} calculated length: {} (raw={}, footerLen={})", fileName, fileLength, rawFileSize, footer.getFooterLength());
-        
-        if (fileLength < 0) {
-            LOGGER.error("File {} has negative content length! Returning raw size", fileName);
-            return rawFileSize;
-        }
-        return fileLength;
+        return fileLength < 0 ? rawFileSize : fileLength;
     }
 
     /**
