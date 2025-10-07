@@ -91,6 +91,9 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
         BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
 
+        LOGGER.info("Calling {} , and its raw size - {} , with content-length = {} , context - {}",
+                name, rawFileSize, contentLength, context );
+
         return CachedMemorySegmentIndexInput
             .newInstance(
                 "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
@@ -161,46 +164,20 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private EncryptionFooter getOrReadFooter(String fileName, Path file) {
         EncryptionFooter footer = footerCache.get(fileName);
         if(footer != null) {
+            LOGGER.info("Footer cache hit for {}", fileName);
             return footer;
         }
 
+        LOGGER.info("Footer cache miss for {}, reading from file", fileName);
         footer = readFooterFromFile(file);
         if (footer != null) {
+            LOGGER.info("Footer read successfully for {}, footerLength={}", fileName, footer.getFooterLength());
             footerCache.put(fileName, footer);
             return footer;
         }
+        LOGGER.warn("Failed to read footer for {}", fileName);
         return null;
     }
-
-//    private EncryptionFooter readFooterFromFile(Path file) throws IOException {
-//        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-//
-//            // TODO not throw exception, instead just return null.
-//            //  If its null then we would know that footer has not been written correctly
-//            //  and return rawFileSize and not add to cache
-//
-//            // So this method
-//
-//            /*
-//            -> open FC
-//            -> get the size of the file. if its less return null
-//            -> if its more check for the magic bytes. if not present return null
-//            -> continue to create ENc Footer
-//             */
-//
-//            long fileSize = channel.size();
-//            if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-//                throw new IOException("File too small to contain encryption footer");
-//            }
-//
-//            // Read maximum possible footer size in one operation
-//            int maxFooterSize = EncryptionMetadataTrailer.MIN_FOOTER_SIZE + (1000 * 16);
-//            ByteBuffer footerBuffer = ByteBuffer.allocate(Math.min(maxFooterSize, (int)fileSize));
-//            channel.read(footerBuffer, Math.max(0, fileSize - footerBuffer.capacity()));
-//
-//            return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
-//        }
-//    }
 
     private EncryptionFooter readFooterFromFile(Path file) {
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
@@ -212,22 +189,25 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             // Validate magic bytes
             ByteBuffer magicBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MAGIC.length);
             channel.read(magicBuffer, fileSize - EncryptionMetadataTrailer.MAGIC.length);
+            magicBuffer.flip();
 
             if (!isValidOSEFFile(magicBuffer.array())) {
                 return null;
             }
 
-            // Read maximum possible footer size in one operation
-            int maxFooterSize = EncryptionMetadataTrailer.MIN_FOOTER_SIZE + (1000 * 16);
-            ByteBuffer footerBuffer = ByteBuffer.allocate(Math.min(maxFooterSize, (int)fileSize));
-            channel.read(footerBuffer, Math.max(0, fileSize - footerBuffer.capacity()));
-
-            try {
-                return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
-            } catch (IOException e) {
-                return null;
-            }
-        } catch (IOException e) {
+            // Read MIN_FOOTER_SIZE to get footer length
+            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            
+            int footerLength = EncryptionFooter.calculateFooterLength(minBuffer.array());
+            
+            // Read complete footer from correct position
+            ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+            channel.read(footerBuffer, fileSize - footerLength);
+            
+            return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+        } catch (Exception e) {
+            LOGGER.warn("Failed to read footer from file: {}", file, e);
             return null;
         }
     }
@@ -261,7 +241,10 @@ public final class CryptoDirectIODirectory extends FSDirectory {
      * Calculate content length with OSEF validation
      */
     private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
+        String fileName = file.getFileName().toString();
+        
         if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            LOGGER.info("File {} too small ({} bytes), returning raw size", fileName, rawFileSize);
             return rawFileSize;
         }
         
@@ -271,54 +254,29 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
 
             if (!isValidOSEFFile(minBuffer.array())) {
+                LOGGER.info("File {} has no valid OSEF magic bytes, returning raw size", fileName);
                 return rawFileSize;
             }
         }
         
+        LOGGER.info("File {} has valid OSEF magic, reading footer", fileName);
+        
         // Get cached footer and return content length
-        String fileName = file.getFileName().toString();
         EncryptionFooter footer = getOrReadFooter(fileName, file);
         if(footer == null) {
+            LOGGER.warn("File {} footer is null, returning raw size", fileName);
             return rawFileSize;
         }
-        long fileLength =  rawFileSize - footer.getFooterLength();
+        
+        long fileLength = rawFileSize - footer.getFooterLength();
+        LOGGER.info("File {} calculated length: {} (raw={}, footerLen={})", fileName, fileLength, rawFileSize, footer.getFooterLength());
+        
         if (fileLength < 0) {
+            LOGGER.error("File {} has negative content length! Returning raw size", fileName);
             return rawFileSize;
         }
         return fileLength;
     }
-
-//    private EncryptionFooter readFooterFromFile(Path file) throws IOException {
-//        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-//
-//            long rawFileSize = channel.size();
-//            // Read minimum footer to check magic bytes
-//            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//            channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//
-//            byte[] minFooterBytes = minBuffer.array();
-//            if (!isValidOSEFFile(minFooterBytes)) {
-//                throw new IOException("Invalid OSEF footer authentication: " + file);
-//            }
-//
-//            int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
-//
-//            // Read and validate complete footer
-//            ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
-//            int bytesRead = channel.read(footerBuffer, rawFileSize - footerLength);
-//
-//            if (bytesRead != footerLength) {
-//                throw new IOException("Failed to read complete OSEF footer: " + file);
-//            }
-//
-//            // Authenticate footer with directory key
-//            try {
-//                return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
-//            } catch (IOException e) {
-//                throw new IOException("Invalid OSEF footer authentication: " + file, e);
-//            }
-//        }
-//    }
 
     /**
      * Check if file has valid OSEF magic bytes
@@ -332,12 +290,6 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         }
         return true;
     }
-
-//    private EncryptionFooter getOrReadFooter(String fileName, Path file) throws IOException {
-//        return footerCache.computeIfAbsent(fileName, name -> {
-//                readFooterFromFile(file);
-//        });
-//    }
 
     @Override
     public long fileLength(String name) throws IOException {
