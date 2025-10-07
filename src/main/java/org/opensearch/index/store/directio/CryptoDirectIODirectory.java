@@ -51,7 +51,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final Worker readAheadworker;
     private final KeyResolver keyResolver;
     private final Provider provider;
-    private int cacheHit , cacheMiss;
+    private int cacheHits, cacheMiss;
     private final Map<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
 
     public CryptoDirectIODirectory(
@@ -71,8 +71,9 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         this.blockCache = blockCache;
         this.readAheadworker = worker;
         this.provider = provider;
-        this.cacheHit = 0;
+
         this.cacheMiss = 0;
+        this.cacheHits = 0;
     }
 
     @Override
@@ -86,15 +87,11 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             throw new IOException("Cannot open empty file with DirectIO: " + file);
         }
 
-        // Calculate content length with OSEF validation
         long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
 
         ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker);
         ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
         BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
-
-        LOGGER.info("Calling {} , and its raw size - {} , with content-length = {} , context - {}",
-                name, rawFileSize, contentLength, context );
 
         return CachedMemorySegmentIndexInput
             .newInstance(
@@ -154,33 +151,26 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         );
     }
 
-    // only close resources owned by this directory type.
-    // the actual directory is closed only once (see HybridCryptoDirectory.java)
     @Override
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
         footerCache.clear();
-        LOGGER.info("Total Cache Hits = {} , Cache Misses = {} , Total Calls = {}", cacheHit, cacheMiss, cacheHit + cacheMiss);
+        LOGGER.info("Total Cache Hits = {} , Cache Misses = {} , Total Calls = {}", cacheHits, cacheMiss, cacheHits + cacheMiss);
         readAheadworker.close();
     }
 
     private EncryptionFooter getOrReadFooter(String fileName, Path file) {
         EncryptionFooter footer = footerCache.get(fileName);
-        if(footer != null) {
-            LOGGER.info("Footer cache hit for {}", fileName);
-            cacheHit++;
+        if (footer != null) {
+            cacheHits++;
             return footer;
         }
         cacheMiss++;
-        LOGGER.info("Footer cache miss for {}, reading from file", fileName);
         footer = readFooterFromFile(file);
         if (footer != null) {
-            LOGGER.info("Footer read successfully for {}, footerLength={}", fileName, footer.getFooterLength());
             footerCache.put(fileName, footer);
-            return footer;
         }
-        LOGGER.warn("Failed to read footer for {}", fileName);
-        return null;
+        return footer;
     }
 
     private EncryptionFooter readFooterFromFile(Path file) {
@@ -190,27 +180,22 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 return null;
             }
 
-            // Single read: Read MIN_FOOTER_SIZE which contains magic + footer length
             ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             minBuffer.flip();
             
             byte[] minBytes = minBuffer.array();
             
-            // Validate magic bytes in-memory
             if (!isValidOSEFFile(minBytes)) {
                 return null;
             }
 
-            // Extract footer length from already-read bytes
             int footerLength = EncryptionFooter.calculateFooterLength(minBytes);
             
-            // If footer equals MIN size, we already have it all
             if (footerLength == EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
                 return EncryptionFooter.deserialize(minBytes, keyResolver.getDataKey().getEncoded());
             }
             
-            // Only read additional bytes if footer is larger
             ByteBuffer fullBuffer = ByteBuffer.allocate(footerLength);
             channel.read(fullBuffer, fileSize - footerLength);
             
@@ -246,9 +231,6 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         super.deleteFile(name);
     }
 
-    /**
-     * Calculate content length with OSEF validation
-     */
     private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
         if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             return rawFileSize;
@@ -265,9 +247,6 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         return fileLength < 0 ? rawFileSize : fileLength;
     }
 
-    /**
-     * Check if file has valid OSEF magic bytes
-     */
     private boolean isValidOSEFFile(byte[] minFooterBytes) {
         int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
         for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
