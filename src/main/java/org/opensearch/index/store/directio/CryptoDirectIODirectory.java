@@ -51,7 +51,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final Worker readAheadworker;
     private final KeyResolver keyResolver;
     private final Provider provider;
-
+    private int cacheHit , cacheMiss;
     private final Map<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
 
     public CryptoDirectIODirectory(
@@ -71,6 +71,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         this.blockCache = blockCache;
         this.readAheadworker = worker;
         this.provider = provider;
+        this.cacheHit = 0;
+        this.cacheMiss = 0;
     }
 
     @Override
@@ -158,6 +160,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
         footerCache.clear();
+        LOGGER.info("Total Cache Hits = {} , Cache Misses = {} , Total Calls = {}", cacheHit, cacheMiss, cacheHit + cacheMiss);
         readAheadworker.close();
     }
 
@@ -165,9 +168,10 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         EncryptionFooter footer = footerCache.get(fileName);
         if(footer != null) {
             LOGGER.info("Footer cache hit for {}", fileName);
+            cacheHit++;
             return footer;
         }
-
+        cacheMiss++;
         LOGGER.info("Footer cache miss for {}, reading from file", fileName);
         footer = readFooterFromFile(file);
         if (footer != null) {
@@ -186,26 +190,31 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 return null;
             }
 
-            // Validate magic bytes
-            ByteBuffer magicBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MAGIC.length);
-            channel.read(magicBuffer, fileSize - EncryptionMetadataTrailer.MAGIC.length);
-            magicBuffer.flip();
-
-            if (!isValidOSEFFile(magicBuffer.array())) {
+            // Single read: Read MIN_FOOTER_SIZE which contains magic + footer length
+            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            minBuffer.flip();
+            
+            byte[] minBytes = minBuffer.array();
+            
+            // Validate magic bytes in-memory
+            if (!isValidOSEFFile(minBytes)) {
                 return null;
             }
 
-            // Read MIN_FOOTER_SIZE to get footer length
-            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            // Extract footer length from already-read bytes
+            int footerLength = EncryptionFooter.calculateFooterLength(minBytes);
             
-            int footerLength = EncryptionFooter.calculateFooterLength(minBuffer.array());
+            // If footer equals MIN size, we already have it all
+            if (footerLength == EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+                return EncryptionFooter.deserialize(minBytes, keyResolver.getDataKey().getEncoded());
+            }
             
-            // Read complete footer from correct position
-            ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
-            channel.read(footerBuffer, fileSize - footerLength);
+            // Only read additional bytes if footer is larger
+            ByteBuffer fullBuffer = ByteBuffer.allocate(footerLength);
+            channel.read(fullBuffer, fileSize - footerLength);
             
-            return EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+            return EncryptionFooter.deserialize(fullBuffer.array(), keyResolver.getDataKey().getEncoded());
         } catch (Exception e) {
             LOGGER.warn("Failed to read footer from file: {}", file, e);
             return null;
