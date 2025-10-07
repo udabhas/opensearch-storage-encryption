@@ -157,7 +157,6 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         final Provider provider = indexSettings.getValue(INDEX_CRYPTO_PROVIDER_SETTING);
 
         // Use index-level key resolver - store keys at index level
-
         Path indexDirectory = location.getParent().getParent(); // Go up two levels: index -> shard -> index
         MasterKeyProvider keyProvider = getKeyProvider(indexSettings);
 
@@ -167,8 +166,6 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // Use shared resolver registry to prevent race conditions
         String indexUuid = indexSettings.getIndex().getUUID();
         KeyResolver keyResolver = IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);
-//        Directory baseDir = new NIOFSDirectory(location, lockFactory);
-//        KeyResolver keyResolver = new DefaultKeyResolver(baseDir, provider, getKeyProvider(indexSettings));
 
         IndexModule.Type type = IndexModule.defaultStoreType(IndexModule.NODE_STORE_ALLOW_MMAP.get(indexSettings.getNodeSettings()));
 

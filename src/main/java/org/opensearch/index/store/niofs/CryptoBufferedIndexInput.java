@@ -118,12 +118,6 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         // Derive file-specific key using messageId from footer
         byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
-
-        // Calculate footer length
-//        long fileSize = channel.size();
-//        ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//        channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//        this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
     }
 
 
@@ -274,6 +268,4 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         // Use directory key for footer authentication (before file key derivation)
         return EncryptionFooter.deserialize(footerBuffer.array(), directoryKey);
     }
-    
-
 }
