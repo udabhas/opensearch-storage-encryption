@@ -114,11 +114,21 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         
         Path path = getDirectory().resolve(name);
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
-            // Read minimum footer to get actual length
-            ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            
-            int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+//            // Read minimum footer to get actual length
+//            ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+//            channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+//
+//            int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+//            long logicalFileSize =  fileSize - footerLength;
+//            if (logicalFileSize > 0) {
+//                return logicalFileSize;
+//            }else {
+//                return fileSize;
+//            }
+//
+
+            EncryptionFooter footer =  EncryptionFooter.readFromChannel(channel, this.keyResolver.getDataKey().getEncoded());
+            int footerLength = footer.getFooterLength();
             long logicalFileSize =  fileSize - footerLength;
             if (logicalFileSize > 0) {
                 return logicalFileSize;
