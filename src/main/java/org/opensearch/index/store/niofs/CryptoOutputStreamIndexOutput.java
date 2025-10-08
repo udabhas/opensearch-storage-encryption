@@ -21,6 +21,7 @@ import org.opensearch.index.store.key.KeyResolver;
 
 import javax.crypto.Cipher;
 import java.security.Key;
+import java.security.Provider;
 import java.util.Arrays;
 
 /**
@@ -34,7 +35,6 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
     private static final int CHUNK_SIZE = 8_192;
     private static final int BUFFER_SIZE = 65_536;
-
     /**
      * Creates a new CryptoIndexOutput with per-file key derivation
      *
@@ -46,7 +46,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
      * @throws IOException If there is an I/O error
      */
     public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId) throws IOException {
-        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider, algorithmId), CHUNK_SIZE);
+        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider, algorithmId, path), CHUNK_SIZE);
     }
 
     private static class EncryptedOutputStream extends FilterOutputStream {
@@ -68,7 +68,9 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private int totalFrames = 0;
         private boolean isClosed = false;
 
-        EncryptedOutputStream(OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId) {
+        private final String filePath;
+
+        EncryptedOutputStream(OutputStream os, KeyResolver keyResolver, Provider provider, int algorithmId, Path path) {
             super(os);
 
             this.frameSize = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE;
@@ -82,6 +84,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             this.provider = provider;
             this.algorithm = EncryptionAlgorithm.fromId((short) algorithmId);
             this.buffer = new byte[BUFFER_SIZE];
+
+            this.filePath = path.toAbsolutePath().toString();
 
             // Initialize first frame cipher
             initializeFrameCipher(0, 0);
@@ -214,7 +218,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
             // Derive frame-specific IV
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(),
-                                                           frameNumber, offsetWithinFrame);
+                                                           frameNumber, offsetWithinFrame, filePath);
 
             this.currentCipher = algorithm.getEncryptionCipher(provider);
             AesGcmCipherFactory.initCipher(this.currentCipher, this.fileKey, frameIV,

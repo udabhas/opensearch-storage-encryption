@@ -83,7 +83,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
                 directoryKey,                               // Directory key for IV computation
                 messageId,                                  // Message ID from footer
                 org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
-                startOffset                                 // File offset
+                startOffset,                                 // File offset
+                    filePath
             );
 
             if (bytesRead == 0) {

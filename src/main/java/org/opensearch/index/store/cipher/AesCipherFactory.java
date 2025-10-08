@@ -8,7 +8,6 @@ import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.Provider;
 import java.util.Arrays;
-import java.util.concurrent.ConcurrentHashMap;
 
 import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
@@ -39,7 +38,9 @@ public class AesCipherFactory {
     public static final String ALGORITHM = "AES";
 
     // Cache for frame base IVs: key = (messageIdHash << 32) | frameNumber, value = 16-byte base IV
-    private static final ConcurrentHashMap<Long, byte[]> FRAME_IV_CACHE = new ConcurrentHashMap<>(256);
+//    private static final ConcurrentHashMap<Long, byte[]> FRAME_IV_CACHE = new ConcurrentHashMap<>(256);
+
+    private static final EncryptionCache encryptionCache = EncryptionCache.getInstance();
 
     /**
      * Returns a new Cipher instance configured for AES/CTR/NoPadding using the given provider.
@@ -131,14 +132,15 @@ public class AesCipherFactory {
     
     /**
      * Compute frame-specific IV for large file encryption
-     * 
-     * @param directoryKey the directory's master key (32 bytes)
-     * @param messageId the file's unique MessageId (16 bytes)
-     * @param frameNumber the frame number (0-based)
+     *
+     * @param directoryKey      the directory's master key (32 bytes)
+     * @param messageId         the file's unique MessageId (16 bytes)
+     * @param frameNumber       the frame number (0-based)
      * @param offsetWithinFrame the byte offset within the frame
+     * @param filePath
      * @return frame-specific IV for encryption/decryption
      */
-    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, int frameNumber, long offsetWithinFrame) {
+    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, int frameNumber, long offsetWithinFrame, String filePath) {
         if (messageId.length != 16) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }
@@ -149,12 +151,15 @@ public class AesCipherFactory {
         // Cache key: combine messageId hash and frameNumber
         long cacheKey = ((long) Arrays.hashCode(messageId) << 32) | frameNumber;
         
-        // Get or compute frame base IV (expensive HKDF operation)
-        byte[] frameBaseIV = FRAME_IV_CACHE.computeIfAbsent(cacheKey, k -> {
-            String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
-            return HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
-        });
-        
+//        // Get or compute frame base IV (expensive HKDF operation)
+//        byte[] frameBaseIV = FRAME_IV_CACHE.computeIfAbsent(cacheKey, k -> {
+//            String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
+//            return HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+//        });
+
+        String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
+        byte[] frameBaseIV =  HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+
         // Fast path: copy base IV and update counter bytes only
         byte[] frameIV = Arrays.copyOf(frameBaseIV, 16);
         int blockOffset = (int) (offsetWithinFrame / AES_BLOCK_SIZE_BYTES) + 2;

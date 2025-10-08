@@ -10,6 +10,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Path;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 
@@ -53,9 +54,11 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private final long frameSize;
     private final EncryptionAlgorithm algorithm;
 
+    private final String filePath;
+
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver) throws IOException {
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver, String filePath) throws IOException {
         super(resourceDesc, context);
         this.channel = fc;
         this.off = 0L;
@@ -81,9 +84,11 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+
+        this.filePath = filePath;
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId, String filePath)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -97,9 +102,10 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.algorithm = EncryptionAlgorithm.fromId(algorithmId);
         this.directoryKey = directoryKey;  // Passed from parent
         this.messageId = messageId;  // Passed from parent
+        this.filePath = filePath;
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver, EncryptionFooter footer) throws IOException {
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver, EncryptionFooter footer, Path path) throws IOException {
         super(resourceDesc, context);
         this.channel = fc;
         this.off = 0L;
@@ -118,6 +124,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         // Derive file-specific key using messageId from footer
         byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
+
+        this.filePath = path.toAbsolutePath().toString();
     }
 
 
@@ -154,7 +162,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             frameSize,
             algorithm.getAlgorithmId(),
             directoryKey,  // Pass directory key
-            messageId      // Pass message ID
+            messageId, // Pass message ID
+                this.filePath
         );
     }
 
@@ -198,7 +207,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             Cipher cipher = algorithm.getDecryptionCipher();
             
             // Derive frame-specific IV
-            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame);
+            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame, this.filePath);
             
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
             
