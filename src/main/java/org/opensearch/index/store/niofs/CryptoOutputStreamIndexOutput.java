@@ -187,9 +187,10 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
                 // Set final frame count in footer
                 footer.setFrameCount(totalFrames);
+//                footer.
 
                 // Write footer with directory key for authentication
-                out.write(footer.serialize(this.directoryKey));
+                out.write( footer.serialize(this.filePath, this.directoryKey));
 
                 super.close();
             } catch (IOException e) {

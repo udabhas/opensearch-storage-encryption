@@ -307,7 +307,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 
                 finalizeCurrentFrame();
                 footer.setFrameCount(totalFrames);
-                out.write(footer.serialize(this.directoryKey));
+                out.write(footer.serialize(null, this.directoryKey));
 
                 super.close();
                 loadFinalBlocksIntoCache();
