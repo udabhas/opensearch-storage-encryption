@@ -133,7 +133,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.fileKey = new javax.crypto.spec.SecretKeySpec(derivedKey, "AES");
             
             // Initialize first frame cipher
-            initializeFrameCipher(0, 0);
+            initializeFrameCipher(0, 0, path);
         }
 
         @Override
@@ -214,7 +214,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 int chunkLen = Math.min(length - offsetInBuffer, CACHE_BLOCK_SIZE - blockOffset);
 
                 cacheBlockIfEligible(path, full, arrayOffset + offsetInBuffer, blockAlignedOffset, blockOffset, chunkLen);
-                writeEncryptedChunk(data, arrayOffset + offsetInBuffer, chunkLen, absoluteOffset);
+                writeEncryptedChunk(data, arrayOffset + offsetInBuffer, chunkLen, absoluteOffset, path);
                 offsetInBuffer += chunkLen;
             }
 
@@ -256,7 +256,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             }
         }
 
-        private void writeEncryptedChunk(byte[] data, int offset, int length, long absoluteOffset
+        private void writeEncryptedChunk(byte[] data, int offset, int length, long absoluteOffset, Path filePath
         ) throws IOException {
             int remaining = length;
             int dataOffset = offset;
@@ -267,7 +267,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 if (frameNumber != currentFrameNumber) {
                     finalizeCurrentFrame();
                     totalFrames = Math.max(totalFrames, frameNumber + 1);
-                    initializeFrameCipher(frameNumber, currentOffset % frameSize);
+                    initializeFrameCipher(frameNumber, currentOffset % frameSize, filePath);
                 }
 
                 long frameEnd = (frameNumber + 1) * frameSize;
@@ -347,12 +347,12 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             }
         }
 
-        private void initializeFrameCipher(int frameNumber, long offsetWithinFrame) {
+        private void initializeFrameCipher(int frameNumber, long offsetWithinFrame, Path filePath) {
             this.currentFrameNumber = frameNumber;
             this.currentFrameOffset = offsetWithinFrame;
 
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(),
-                                                           frameNumber, offsetWithinFrame);
+                                                           frameNumber, offsetWithinFrame, filePath.toAbsolutePath().toString());
 
             this.currentCipher = algorithm.getEncryptionCipher(provider);
             AesGcmCipherFactory.initCipher(this.currentCipher, this.fileKey, frameIV,

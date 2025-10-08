@@ -59,7 +59,8 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
                 "CryptoBufferedIndexInput(path=\"" + path + "\")",
                 fc,
                 context,
-                this.keyResolver
+                this.keyResolver,
+                    path
             );
             success = true;
             return indexInput;
@@ -81,7 +82,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId);
+        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId, path);
     }
 
     @Override
@@ -95,7 +96,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId);
+        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId, path);
     }
 
     @Override
@@ -109,8 +110,6 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         // Handle files that might be in process of being written
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             return fileSize;
-            // File might be incomplete or very small
-//            return Math.max(0, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);  // Assume minimum footer
         }
         
         Path path = getDirectory().resolve(name);

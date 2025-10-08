@@ -127,14 +127,15 @@ public class AesCipherFactory {
     
     /**
      * Compute frame-specific IV for large file encryption
-     * 
-     * @param directoryKey the directory's master key (32 bytes)
-     * @param messageId the file's unique MessageId (16 bytes)
-     * @param frameNumber the frame number (0-based)
+     *
+     * @param directoryKey      the directory's master key (32 bytes)
+     * @param messageId         the file's unique MessageId (16 bytes)
+     * @param frameNumber       the frame number (0-based)
      * @param offsetWithinFrame the byte offset within the frame
+     * @param filePath
      * @return frame-specific IV for encryption/decryption
      */
-    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, int frameNumber, long offsetWithinFrame) {
+    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, int frameNumber, long offsetWithinFrame, String filePath) {
         if (messageId.length != 16) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }

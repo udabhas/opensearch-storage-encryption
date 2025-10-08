@@ -71,16 +71,17 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             byte[] directoryKey = keyResolver.getDataKey().getEncoded();
             byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveAesKey(
                     directoryKey, messageId, "file-encryption");
-            
+
             // Use frame-based decryption with derived file key
             MemorySegmentDecryptor.decryptInPlaceFrameBased(
-                readBytes.address(),
-                readBytes.byteSize(),
-                fileKey,                                    // Derived file key (matches write path)
-                directoryKey,                               // Directory key for IV computation
-                messageId,                                  // Message ID from footer
-                org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
-                startOffset                                 // File offset
+                    readBytes.address(),
+                    readBytes.byteSize(),
+                    fileKey,                                    // Derived file key (matches write path)
+                    directoryKey,                               // Directory key for IV computation
+                    messageId,                                  // Message ID from footer
+                    org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
+                    startOffset,                                 // File offset
+                    filePath
             );
 
             if (bytesRead == 0) {

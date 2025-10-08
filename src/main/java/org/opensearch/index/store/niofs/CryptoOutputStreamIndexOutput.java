@@ -45,8 +45,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
      * @param provider The JCE provider to use
      * @throws IOException If there is an I/O error
      */
-    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId) throws IOException {
-        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider, algorithmId), CHUNK_SIZE);
+    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath) throws IOException {
+        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider, algorithmId, filePath), CHUNK_SIZE);
     }
 
     private static class EncryptedOutputStream extends FilterOutputStream {
@@ -68,7 +68,9 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private int totalFrames = 0;
         private boolean isClosed = false;
 
-        EncryptedOutputStream(OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId) {
+        private final Path filePath;
+
+        EncryptedOutputStream(OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath) {
             super(os);
 
             this.frameSize = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE;
@@ -82,6 +84,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             this.provider = provider;
             this.algorithm = EncryptionAlgorithm.fromId((short) algorithmId);
             this.buffer = new byte[BUFFER_SIZE];
+
+            this.filePath = filePath;
 
             // Initialize first frame cipher
             initializeFrameCipher(0, 0);
@@ -213,7 +217,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
             // Derive frame-specific IV
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(),
-                                                           frameNumber, offsetWithinFrame);
+                                                           frameNumber, offsetWithinFrame, filePath.toAbsolutePath().toString());
 
             this.currentCipher = algorithm.getEncryptionCipher(provider);
             AesGcmCipherFactory.initCipher(this.currentCipher, this.fileKey, frameIV,

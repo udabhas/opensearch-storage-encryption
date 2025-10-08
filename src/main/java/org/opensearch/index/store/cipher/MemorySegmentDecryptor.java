@@ -9,6 +9,7 @@ import static org.opensearch.index.store.cipher.AesCipherFactory.CIPHER_POOL;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
+import java.nio.file.Path;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
@@ -149,12 +150,12 @@ public class MemorySegmentDecryptor {
     /**
      * Frame-based decryption for large files
      */
-    public static void decryptInPlaceFrameBased(long addr, long length, byte[] fileKey, byte[] directoryKey, byte[] messageId, long frameSize, long fileOffset) throws Exception {
+    public static void decryptInPlaceFrameBased(long addr, long length, byte[] fileKey, byte[] directoryKey, byte[] messageId, long frameSize, long fileOffset, Path filePath) throws Exception {
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(fileKey, AesCipherFactory.ALGORITHM);
         
         // Calculate frame-based IV
-        byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, (int)(fileOffset / frameSize), fileOffset % frameSize);
+        byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, (int)(fileOffset / frameSize), fileOffset % frameSize, filePath.toAbsolutePath().toString());
         
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 

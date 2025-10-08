@@ -10,6 +10,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Path;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 
@@ -55,13 +56,17 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver) throws IOException {
+    private final Path filePath;
+
+
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver, Path filePath) throws IOException {
         super(resourceDesc, context);
         this.channel = fc;
         this.off = 0L;
         this.end = fc.size();
         this.keyResolver = keyResolver;
         this.isClone = false;
+        this.filePath = filePath;
         
         // Get directory key first
         this.directoryKey = keyResolver.getDataKey().getEncoded();
@@ -83,7 +88,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId, Path filePath)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -97,6 +102,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.algorithm = EncryptionAlgorithm.fromId(algorithmId);
         this.directoryKey = directoryKey;  // Passed from parent
         this.messageId = messageId;  // Passed from parent
+        this.filePath = filePath;
     }
 
     @Override
@@ -121,18 +127,19 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             );
         }
         return new CryptoBufferedIndexInput(
-            getFullSliceDescription(sliceDescription),
-            channel,
-            off + offset,
-            length,
-            getBufferSize(),
-            keyResolver,
-            keySpec,  // Pass the already-derived keySpec
-            footerLength,
-            frameSize,
-            algorithm.getAlgorithmId(),
-            directoryKey,  // Pass directory key
-            messageId      // Pass message ID
+                getFullSliceDescription(sliceDescription),
+                channel,
+                off + offset,
+                length,
+                getBufferSize(),
+                keyResolver,
+                keySpec,  // Pass the already-derived keySpec
+                footerLength,
+                frameSize,
+                algorithm.getAlgorithmId(),
+                directoryKey,  // Pass directory key
+                messageId,      // Pass message ID
+                filePath
         );
     }
 
@@ -176,7 +183,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             Cipher cipher = algorithm.getDecryptionCipher();
             
             // Derive frame-specific IV
-            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame);
+            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame, this.filePath.toAbsolutePath().toString());
             
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
             
@@ -246,6 +253,4 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         // Use directory key for footer authentication (before file key derivation)
         return EncryptionFooter.deserialize(footerBuffer.array(), directoryKey);
     }
-    
-
 }
