@@ -265,4 +265,35 @@ public class EncryptionFooter {
             return false;
         }
     }
+
+    /**
+     * Read and deserialize footer from a FileChannel
+     *
+     * @param channel FileChannel to read from
+     * @param fileKey Key for footer authentication
+     * @return Deserialized EncryptionFooter
+     * @throws IOException If reading or deserialization fails
+     */
+    public static EncryptionFooter readFromChannel(java.nio.channels.FileChannel channel, byte[] fileKey) throws IOException {
+        long fileSize = channel.size();
+        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            throw new IOException("File too small to contain encryption footer");
+        }
+
+        // Read minimum footer to get actual length
+        ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+
+        int footerLength = calculateFooterLength(minBuffer.array());
+
+        // Read complete footer
+        ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+        int bytesRead = channel.read(footerBuffer, fileSize - footerLength);
+
+        if (bytesRead != footerLength) {
+            throw new IOException("Failed to read complete footer");
+        }
+
+        return deserialize(footerBuffer.array(), fileKey);
+    }
 }
