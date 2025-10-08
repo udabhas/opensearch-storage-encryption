@@ -10,6 +10,7 @@ package org.opensearch.index.store.cipher;
 
 import org.opensearch.index.store.footer.EncryptionFooter;
 
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -41,8 +42,8 @@ public class EncryptionCache {
         footerCache.putIfAbsent(filePath, footer);
     }
 
-    public byte[] getFrameIv(String filePath, int frameNumber) {
-        return frameIvCache.get(getCacheKey(filePath, frameNumber));
+    public Optional<byte[]> getFrameIv(String filePath, int frameNumber) {
+        return Optional.ofNullable(frameIvCache.get(getCacheKey(filePath, frameNumber)));
     }
 
     public void putFrameIv(String filePath, int frameNumber, byte[] iv) {
