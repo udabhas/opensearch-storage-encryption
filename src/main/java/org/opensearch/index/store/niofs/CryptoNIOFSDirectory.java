@@ -108,8 +108,9 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         long fileSize = super.fileLength(name);
         // Handle files that might be in process of being written
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            return fileSize;
             // File might be incomplete or very small
-            return Math.max(0, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);  // Assume minimum footer
+//            return Math.max(0, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);  // Assume minimum footer
         }
         
         Path path = getDirectory().resolve(name);
@@ -119,7 +120,12 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             
             int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
-            return fileSize - footerLength;
+            long logicalFileSize =  fileSize - footerLength;
+            if (logicalFileSize > 0) {
+                return logicalFileSize;
+            }else {
+                return fileSize;
+            }
         }
     }
 
