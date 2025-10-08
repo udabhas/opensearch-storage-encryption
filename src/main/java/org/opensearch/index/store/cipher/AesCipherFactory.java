@@ -37,9 +37,6 @@ public class AesCipherFactory {
     /** The algorrithm. */
     public static final String ALGORITHM = "AES";
 
-    // Cache for frame base IVs: key = (messageIdHash << 32) | frameNumber, value = 16-byte base IV
-//    private static final ConcurrentHashMap<Long, byte[]> FRAME_IV_CACHE = new ConcurrentHashMap<>(256);
-
     private static final EncryptionCache encryptionCache = EncryptionCache.getInstance();
 
     /**
@@ -148,22 +145,28 @@ public class AesCipherFactory {
             throw new IllegalArgumentException("Invalid frame number: " + frameNumber);
         }
         
-        // Cache key: combine messageId hash and frameNumber
-        long cacheKey = ((long) Arrays.hashCode(messageId) << 32) | frameNumber;
+        // Check cache first
+        byte[] frameBaseIV = encryptionCache.getFrameIv(filePath, frameNumber);
         
-//        // Get or compute frame base IV (expensive HKDF operation)
-//        byte[] frameBaseIV = FRAME_IV_CACHE.computeIfAbsent(cacheKey, k -> {
-//            String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
-//            return HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
-//        });
-
-        String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
-        byte[] frameBaseIV =  HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
-
-        // Fast path: copy base IV and update counter bytes only
-        byte[] frameIV = Arrays.copyOf(frameBaseIV, 16);
+        // Cache miss - compute and store
+        if (frameBaseIV == null) {
+            String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
+            frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+            
+            // Zero out last 4 bytes before caching
+            frameBaseIV[12] = 0;
+            frameBaseIV[13] = 0;
+            frameBaseIV[14] = 0;
+            frameBaseIV[15] = 0;
+            
+            encryptionCache.putFrameIv(filePath, frameNumber, frameBaseIV);
+        }
+        
+        // Copy first 12 bytes and update counter bytes
+        byte[] frameIV = new byte[16];
+        System.arraycopy(frameBaseIV, 0, frameIV, 0, 12);
         int blockOffset = (int) (offsetWithinFrame / AES_BLOCK_SIZE_BYTES) + 2;
-
+        
         frameIV[12] = (byte) (blockOffset >>> 24);
         frameIV[13] = (byte) (blockOffset >>> 16);
         frameIV[14] = (byte) (blockOffset >>> 8);
