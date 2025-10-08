@@ -40,7 +40,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     private final AtomicLong nextTempFileCounter = new AtomicLong();
     private final int algorithmId = 1; // Default to AES_256_GCM_CTR
     private final Map<String, Long> contentLengthCache = new ConcurrentHashMap<>();
-    private final Map<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
+//    private final Map<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
     private static final Logger LOGGER = LogManager.getLogger(CryptoNIOFSDirectory.class);
 
     public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyResolver keyResolver) throws IOException {
@@ -63,8 +63,8 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
         try {
             // Get cached footer or read once
-            EncryptionFooter footer = getOrReadFooter(name, fc);
-            
+//            EncryptionFooter footer = getOrReadFooter(name, fc);
+            EncryptionFooter footer = readFooterFromFile(fc);
             final IndexInput indexInput = new CryptoBufferedIndexInput(
                     "CryptoBufferedIndexInput(path=\"" + path + "\")",
                     fc,
@@ -149,15 +149,15 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         }
     }
 
-    private EncryptionFooter getOrReadFooter(String name, FileChannel fc) throws IOException {
-        return footerCache.computeIfAbsent(name, fileName -> {
-            try {
-                return readFooterFromFile(fc);
-            } catch (IOException e) {
-                throw new RuntimeException("Failed to read footer for " + fileName, e);
-            }
-        });
-    }
+//    private EncryptionFooter getOrReadFooter(String name, FileChannel fc) throws IOException {
+////        return footerCache.computeIfAbsent(name, fileName -> {
+////            try {
+//                return readFooterFromFile(fc);
+////            } catch (IOException e) {
+////                throw new RuntimeException("Failed to read footer for " + fileName, e);
+////            }
+////        });
+//    }
 
     private EncryptionFooter readFooterFromFile(FileChannel channel) throws IOException {
         long fileSize = channel.size();
@@ -179,14 +179,14 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     @Override
     public void deleteFile(String name) throws IOException {
         contentLengthCache.remove(name);
-        footerCache.remove(name);
+//        footerCache.remove(name);
         super.deleteFile(name);
     }
 
     @Override
     public synchronized void close() throws IOException {
         contentLengthCache.clear();
-        footerCache.clear();
+//        footerCache.clear();
         isOpen = false;
         deletePendingFiles();
     }
