@@ -137,30 +137,34 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
     private byte[] readMessageIdFromFooter(Path filePath) throws IOException {
         // Use separate random access FileChannel to avoid position conflicts
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
-        long fileSize = channel.size();
-        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            throw new IOException("File too small to contain footer: " + filePath);
-        }
+            long fileSize = channel.size();
+            if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+                throw new IOException("File too small to contain footer: " + filePath);
+            }
 
-        // Read minimum footer to check OSEF magic bytes
-        ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        byte[] minFooterBytes = minBuffer.array();
-        
-        // Check if this is an OSEF file
-        if (!isValidOSEFFile(minFooterBytes)) {
-            // Not an OSEF file - fall back to legacy decryption
-            throw new IOException("Not an OSEF file, using legacy IV");
-        }
-        
-        int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
-        
-        // Read complete footer
-        ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
-        channel.read(footerBuffer, fileSize - footerLength);
-        
-            EncryptionFooter footer = EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+            // Read minimum footer to check OSEF magic bytes
+            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            byte[] minFooterBytes = minBuffer.array();
+
+            // Check if this is an OSEF file
+            if (!isValidOSEFFile(minFooterBytes)) {
+                // Not an OSEF file - fall back to legacy decryption
+                throw new IOException("Not an OSEF file, using legacy IV");
+            }
+
+            int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
+
+            // Read complete footer
+            ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
+            channel.read(footerBuffer, fileSize - footerLength);
+
+//            EncryptionFooter footer = EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
+            EncryptionFooter footer = EncryptionFooter.readFromChannel(channel, keyResolver.getDataKey().getEncoded());
             return footer.getMessageId();
+
+//            // Use Common method to get footer
+//            EncryptionFooter footer = EncryptionFooter.readFromChannel(channel, keyResolver.getDataKey().getEncoded());
         }
     }
 
