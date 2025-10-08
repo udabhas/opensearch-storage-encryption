@@ -14,6 +14,7 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
+import org.opensearch.index.store.cipher.EncryptionCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
@@ -188,6 +189,9 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
                 // Set final frame count in footer
                 footer.setFrameCount(totalFrames);
+
+                // Cache footer before writing
+                EncryptionCache.getInstance().putFooter(filePath, footer);
 
                 // Write footer with directory key for authentication
                 out.write(footer.serialize(this.directoryKey));
