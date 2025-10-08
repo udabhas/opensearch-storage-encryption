@@ -8,13 +8,16 @@
 package org.opensearch.index.store.footer;
 
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
+import org.opensearch.index.store.cipher.EncryptionCache;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
@@ -274,7 +277,15 @@ public class EncryptionFooter {
      * @return Deserialized EncryptionFooter
      * @throws IOException If reading or deserialization fails
      */
-    public static EncryptionFooter readFromChannel(java.nio.channels.FileChannel channel, byte[] fileKey) throws IOException {
+    public static EncryptionFooter readFromChannel(Path filePath , java.nio.channels.FileChannel channel, byte[] fileKey) throws IOException {
+
+        EncryptionCache encryptionCache = EncryptionCache.getInstance();
+        Optional<EncryptionFooter> encFooterOptional =  encryptionCache.getFooter(filePath.toAbsolutePath().toString());
+
+        if(encFooterOptional.isPresent()) {
+            return encFooterOptional.get();
+        }
+
         long fileSize = channel.size();
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             throw new IOException("File too small to contain encryption footer");
@@ -294,6 +305,8 @@ public class EncryptionFooter {
             throw new IOException("Failed to read complete footer");
         }
 
-        return deserialize(footerBuffer.array(), fileKey);
+        EncryptionFooter footer = deserialize(footerBuffer.array(), fileKey);
+        encryptionCache.putFooter(filePath.toAbsolutePath().toString(), footer);
+        return footer;
     }
 }

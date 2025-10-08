@@ -160,7 +160,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<MemorySegmentPool.
             channel.read(footerBuffer, fileSize - footerLength);
 
 //            EncryptionFooter footer = EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
-            EncryptionFooter footer = EncryptionFooter.readFromChannel(channel, keyResolver.getDataKey().getEncoded());
+            EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath, channel, keyResolver.getDataKey().getEncoded());
             return footer.getMessageId();
 
 //            // Use Common method to get footer

@@ -34,8 +34,8 @@ public class EncryptionCache {
         return filePath + SEPARATOR + frameNumber;
     }
 
-    public EncryptionFooter getFooter(String filePath) {
-        return footerCache.get(filePath);
+    public Optional<EncryptionFooter> getFooter(String filePath) {
+        return Optional.ofNullable(footerCache.get(filePath));
     }
 
     public void putFooter(String filePath, EncryptionFooter footer) {
