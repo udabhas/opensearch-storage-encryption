@@ -39,7 +39,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public final KeyResolver keyResolver;
     private final AtomicLong nextTempFileCounter = new AtomicLong();
     private final int algorithmId = 1; // Default to AES_256_GCM_CTR
-    private final Map<String, Long> contentLengthCache = new ConcurrentHashMap<>();
+//    private final Map<String, Long> contentLengthCache = new ConcurrentHashMap<>();
 //    private final Map<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
     private static final Logger LOGGER = LogManager.getLogger(CryptoNIOFSDirectory.class);
 
@@ -117,10 +117,10 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         }
 
         // Check cache first
-        Long cachedLength = contentLengthCache.get(name);
-        if (cachedLength != null) {
-            return cachedLength;
-        }
+//        Long cachedLength = contentLengthCache.get(name);
+//        if (cachedLength != null) {
+//            return cachedLength;
+//        }
 
         long fileSize = super.fileLength(name);
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
@@ -144,7 +144,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             if (contentLength < 0) {
                 return fileSize;
             }
-            contentLengthCache.put(name, contentLength);
+//            contentLengthCache.put(name, contentLength);
             return contentLength;
         }
     }
@@ -178,14 +178,14 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public void deleteFile(String name) throws IOException {
-        contentLengthCache.remove(name);
+//        contentLengthCache.remove(name);
 //        footerCache.remove(name);
         super.deleteFile(name);
     }
 
     @Override
     public synchronized void close() throws IOException {
-        contentLengthCache.clear();
+//        contentLengthCache.clear();
 //        footerCache.clear();
         isOpen = false;
         deletePendingFiles();
