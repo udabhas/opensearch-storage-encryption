@@ -80,17 +80,11 @@ public class EncryptionFooter {
 
     public byte[] serialize(Path filePath, byte[] fileKey) throws IOException {
 
-        if(filePath != null) {
-            EncryptionCache encryptionCache = EncryptionCache.getInstance();
-            encryptionCache.putFooter(filePath.toAbsolutePath().toString(), this);
-        }
-
         // Build footer data without auth tag
         byte[] footerData = buildFooterDataWithoutAuthTag();
 
         // Set footer length (includes auth tag)
         this.setFooterLength(footerData.length + EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE);
-
 
         if(filePath != null) {
             EncryptionCache encryptionCache = EncryptionCache.getInstance();
