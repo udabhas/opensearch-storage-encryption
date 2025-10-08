@@ -298,12 +298,12 @@ public class EncryptionFooter {
      */
     public static EncryptionFooter readFromChannel(Path filePath , java.nio.channels.FileChannel channel, byte[] fileKey) throws IOException {
 
-        EncryptionCache encryptionCache = EncryptionCache.getInstance();
-        Optional<EncryptionFooter> encFooterOptional =  encryptionCache.getFooter(filePath.toAbsolutePath().toString());
-
-        if(encFooterOptional.isPresent()) {
-            return encFooterOptional.get();
-        }
+//        EncryptionCache encryptionCache = EncryptionCache.getInstance();
+//        Optional<EncryptionFooter> encFooterOptional =  encryptionCache.getFooter(filePath.toAbsolutePath().toString());
+//
+//        if(encFooterOptional.isPresent()) {
+//            return encFooterOptional.get();
+//        }
 
         long fileSize = channel.size();
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
@@ -325,7 +325,7 @@ public class EncryptionFooter {
         }
 
         EncryptionFooter footer = deserialize(footerBuffer.array(), fileKey);
-        encryptionCache.putFooter(filePath.toAbsolutePath().toString(), footer);
+//        encryptionCache.putFooter(filePath.toAbsolutePath().toString(), footer);
         return footer;
     }
 }
