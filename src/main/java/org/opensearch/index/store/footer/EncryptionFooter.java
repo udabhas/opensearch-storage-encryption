@@ -86,10 +86,10 @@ public class EncryptionFooter {
         // Set footer length (includes auth tag)
         this.setFooterLength(footerData.length + EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE);
 
-        if(filePath != null) {
-            EncryptionCache encryptionCache = EncryptionCache.getInstance();
-            encryptionCache.putFooter(filePath.toAbsolutePath().toString(), this);
-        }
+//        if(filePath != null) {
+//            EncryptionCache encryptionCache = EncryptionCache.getInstance();
+//            encryptionCache.putFooter(filePath.toAbsolutePath().toString(), this);
+//        }
 
         // Generate auth tag
         this.footerAuthTag = generateFooterAuthTag(fileKey, footerData);

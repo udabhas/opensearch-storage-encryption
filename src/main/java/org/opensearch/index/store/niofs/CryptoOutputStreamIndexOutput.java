@@ -14,6 +14,7 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
+import org.opensearch.index.store.cipher.EncryptionCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
@@ -193,6 +194,12 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 out.write( footer.serialize(this.filePath, this.directoryKey));
 
                 super.close();
+
+                if(filePath != null) {
+                    EncryptionCache encryptionCache = EncryptionCache.getInstance();
+                    encryptionCache.putFooter(filePath.toAbsolutePath().toString(), footer);
+                }
+
             } catch (IOException e) {
                 exception = e;
             } finally {
