@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.security.Provider;
 import java.util.Set;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.FileSwitchDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -18,7 +20,7 @@ import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 
 public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
-
+    private static final Logger LOGGER = LogManager.getLogger(HybridCryptoDirectory.class);
     private final CryptoDirectIODirectory cryptoDirectIODirectory;
 
     // Only these extensions get special routing - everything else goes to NIOFS
@@ -74,6 +76,7 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public void close() throws IOException {
+        LOGGER.info("inside close call in HybridDirectory - {} ", getDirectory().toString());
         cryptoDirectIODirectory.close(); // only closes its resources.
         super.close(); // actually closes pending files.
     }
