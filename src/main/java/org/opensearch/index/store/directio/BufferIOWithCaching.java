@@ -32,6 +32,7 @@ import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
+import org.opensearch.index.store.cipher.EncryptionCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
@@ -308,6 +309,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 finalizeCurrentFrame();
                 footer.setFrameCount(totalFrames);
                 out.write(footer.serialize(null, this.directoryKey));
+
+                EncryptionCache.getInstance().putFooter(path.toAbsolutePath().toString(), footer);
 
                 super.close();
                 loadFinalBlocksIntoCache();
