@@ -2,7 +2,7 @@
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
-package org.opensearch.index.store.iv;
+package org.opensearch.index.store.key;
 
 import java.io.IOException;
 import java.security.Provider;
@@ -13,6 +13,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.Directory;
 import org.opensearch.common.crypto.MasterKeyProvider;
+import org.opensearch.index.store.key.DefaultKeyResolver;
+import org.opensearch.index.store.key.KeyResolver;
 
 /**
  * Registry that ensures only one KeyIvResolver instance exists per index UUID.
@@ -42,7 +44,7 @@ public class IndexKeyResolverRegistry {
      * @return the KeyIvResolver instance for this index
      * @throws RuntimeException if resolver creation fails
      */
-    public static KeyIvResolver getOrCreateResolver(
+    public static KeyResolver getOrCreateResolver(
         String indexUuid,
         Directory indexDirectory,
         Provider provider,
@@ -50,7 +52,7 @@ public class IndexKeyResolverRegistry {
     ) {
         return resolverCache.computeIfAbsent(indexUuid, uuid -> {
             try {
-                return new DefaultKeyIvResolver(indexUuid, indexDirectory, provider, keyProvider);
+                return new DefaultKeyResolver(indexUuid, indexDirectory, provider, keyProvider);
             } catch (IOException e) {
                 throw new RuntimeException("Failed to create KeyIvResolver for index: " + uuid, e);
             }
@@ -63,7 +65,7 @@ public class IndexKeyResolverRegistry {
      * @param indexUuid the unique identifier for the index
      * @return the KeyIvResolver instance for this index, or null if none exists
      */
-    public static KeyIvResolver getResolver(String indexUuid) {
+    public static KeyResolver getResolver(String indexUuid) {
         return resolverCache.get(indexUuid);
     }
 
@@ -75,8 +77,8 @@ public class IndexKeyResolverRegistry {
      * @param indexUuid the unique identifier for the index
      * @return the removed resolver, or null if no resolver was cached for this index
      */
-    public static KeyIvResolver removeResolver(String indexUuid) {
-        KeyIvResolver removed = resolverCache.remove(indexUuid);
+    public static KeyResolver removeResolver(String indexUuid) {
+        KeyResolver removed = resolverCache.remove(indexUuid);
         if (removed != null) {
             // Evict from node-level cache when index is removed
             try {

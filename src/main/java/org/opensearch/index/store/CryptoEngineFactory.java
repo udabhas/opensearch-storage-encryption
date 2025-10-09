@@ -17,6 +17,7 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngine;
+import org.opensearch.index.store.iv.IndexKeyResolverRegistry;
 import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.translog.CryptoTranslogFactory;
@@ -67,7 +68,6 @@ public class CryptoEngineFactory implements EngineFactory {
         // Create a separate key resolver for translog files
 
         // Use the translog location for key storage
-    private KeyIvResolver createTranslogKeyIvResolver(EngineConfig config) throws IOException {
         // Use index-level keys for translog encryption - same as directory encryption
         Path translogPath = config.getTranslogConfig().getTranslogPath();
         Path indexDirectory = translogPath.getParent().getParent(); // Go up two levels: translog -> shard -> index
