@@ -20,6 +20,7 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.common.util.io.IOUtils;
+import org.opensearch.index.store.cipher.EncryptionCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
@@ -35,11 +36,13 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public final KeyResolver keyResolver;
     private final AtomicLong nextTempFileCounter = new AtomicLong();
     private final int algorithmId = 1; // Default to AES_256_GCM_CTR
+    private final Path dirPath;
 
     public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyResolver keyResolver) throws IOException {
         super(location, lockFactory);
         this.provider = provider;
         this.keyResolver = keyResolver;
+        this.dirPath = getDirectory();
     }
 
     @Override
@@ -132,5 +135,14 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public synchronized void close() throws IOException {
         isOpen = false;
         deletePendingFiles();
+        EncryptionCache.getInstance().invalidateDirectory(this.dirPath.toAbsolutePath().toString());
     }
+
+    @Override
+    public void deleteFile(String name) throws IOException {
+        super.deleteFile(name);
+        Path path = this.dirPath.resolve(name);
+        EncryptionCache.getInstance().invalidateFile(path.toAbsolutePath().toString());
+    }
+
 }

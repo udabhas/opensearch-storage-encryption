@@ -55,6 +55,12 @@ public class EncryptionCache {
         frameIvCache.keySet().removeIf(key -> key.startsWith(filePath + SEPARATOR));
     }
 
+    public void invalidateDirectory(String directoryPath) {
+        String dirPrefix = directoryPath.endsWith("/") ? directoryPath : directoryPath + "/";
+        footerCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
+        frameIvCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
+    }
+
     public void clear() {
         footerCache.clear();
         frameIvCache.clear();
