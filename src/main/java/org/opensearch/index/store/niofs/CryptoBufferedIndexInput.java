@@ -83,10 +83,11 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
         
         // Calculate footer length
-        long fileSize = channel.size();
-        ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
+//        long fileSize = channel.size();
+        this.footerLength = footer.getFooterLength();
+//        ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+//        channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+//        this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
     }
 
     public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId, Path filePath)
