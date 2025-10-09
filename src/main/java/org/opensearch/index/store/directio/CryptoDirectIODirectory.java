@@ -53,16 +53,16 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final Path dirPath;
 
     public CryptoDirectIODirectory(
-        Path path,
-        LockFactory lockFactory,
-        Provider provider,
-        KeyResolver keyResolver,
-        Pool<MemorySegmentPool.SegmentHandle> memorySegmentPool,
-        BlockCache<RefCountedMemorySegment> blockCache,
-        BlockLoader<MemorySegmentPool.SegmentHandle> blockLoader,
-        Worker worker
+            Path path,
+            LockFactory lockFactory,
+            Provider provider,
+            KeyResolver keyResolver,
+            Pool<MemorySegmentPool.SegmentHandle> memorySegmentPool,
+            BlockCache<RefCountedMemorySegment> blockCache,
+            BlockLoader<MemorySegmentPool.SegmentHandle> blockLoader,
+            Worker worker
     )
-        throws IOException {
+            throws IOException {
         super(path, lockFactory);
         this.keyResolver = keyResolver;
         this.memorySegmentPool = memorySegmentPool;
@@ -91,15 +91,15 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
 
         return CachedMemorySegmentIndexInput
-            .newInstance(
-                "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
-                file,
-                contentLength,
-                blockCache,
-                readAheadManager,
-                readAheadContext,
-                pinRegistry
-            );
+                .newInstance(
+                        "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
+                        file,
+                        contentLength,
+                        blockCache,
+                        readAheadManager,
+                        readAheadContext,
+                        pinRegistry
+                );
     }
 
     @Override
@@ -188,48 +188,39 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             return rawFileSize; // Too small for footer
         }
-        
+
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            // Read minimum footer to check magic bytes
-            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            
-            byte[] minFooterBytes = minBuffer.array();
-            if (!isValidOSEFFile(minFooterBytes)) {
-                return rawFileSize; // Not OSEF
-            }
-            
-            int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
-            
-            // Read and validate complete footer
-            ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
-            int bytesRead = channel.read(footerBuffer, rawFileSize - footerLength);
-            
-            if (bytesRead != footerLength) {
-                throw new IOException("Failed to read complete OSEF footer: " + file);
-            }
-            
-            // Authenticate footer with directory key
+            // magic bytes check before expensive footer reading
+//            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+//            channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+//
+//            byte[] minFooterBytes = minBuffer.array();
+//            if (!isValidOSEFFile(minFooterBytes)) {
+//                return rawFileSize; // Not OSEF
+//            }
+
+            // Read footer and authentication
             try {
-                EncryptionFooter.deserialize(footerBuffer.array(), keyResolver.getDataKey().getEncoded());
-            } catch (IOException e) {
-                throw new IOException("Invalid OSEF footer authentication: " + file, e);
+                EncryptionFooter footer = EncryptionFooter.readFromChannel(file, channel, keyResolver.getDataKey().getEncoded());
+                return rawFileSize - footer.getFooterLength();
+            } catch (EncryptionFooter.NotOSEFFileException e) {
+                // throw new IOException("Invalid OSEF footer authentication: " + file, e);
+                LOGGER.error("Encountered error while reading footer of file - {}, returning rawfileSize - {}", file.toString(), rawFileSize, e);
+                return rawFileSize;
             }
-            
-            return rawFileSize - footerLength;
         }
     }
 
-    /**
-     * Check if file has valid OSEF magic bytes
-     */
-    private boolean isValidOSEFFile(byte[] minFooterBytes) {
-        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
-        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
-            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
+//    /**
+//     * Check if file has valid OSEF magic bytes
+//     */
+//    private boolean isValidOSEFFile(byte[] minFooterBytes) {
+//        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
+//        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
+//            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
+//                return false;
+//            }
+//        }
+//        return true;
+//    }
 }
