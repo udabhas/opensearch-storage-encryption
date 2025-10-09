@@ -28,7 +28,7 @@ public class IndexKeyResolverRegistry {
     private static final Logger logger = LogManager.getLogger(IndexKeyResolverRegistry.class);
 
     // Thread-safe cache of resolvers by index UUID
-    private static final ConcurrentMap<String, KeyIvResolver> resolverCache = new ConcurrentHashMap<>();
+    private static final ConcurrentMap<String, KeyResolver> resolverCache = new ConcurrentHashMap<>();
 
     /**
      * Gets or creates a KeyIvResolver for the specified index UUID.

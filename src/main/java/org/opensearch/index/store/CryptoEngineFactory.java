@@ -17,8 +17,7 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngine;
-import org.opensearch.index.store.iv.IndexKeyResolverRegistry;
-import org.opensearch.index.store.key.DefaultKeyResolver;
+import org.opensearch.index.store.key.IndexKeyResolverRegistry;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.translog.CryptoTranslogFactory;
 
@@ -91,11 +90,11 @@ public class CryptoEngineFactory implements EngineFactory {
         // Reuse the same logic as CryptoDirectoryFactory
         return new CryptoDirectoryFactory().getKeyProvider(config.getIndexSettings());
         // Create a dedicated key resolver for translog
-        return new DefaultKeyResolver(
-            keyDirectory,
-            config.getIndexSettings().getValue(CryptoDirectoryFactory.INDEX_CRYPTO_PROVIDER_SETTING),
-            directoryFactory.getKeyProvider(config.getIndexSettings())
-        );
+//        return new DefaultKeyResolver(
+//            keyDirectory,
+//            config.getIndexSettings().getValue(CryptoDirectoryFactory.INDEX_CRYPTO_PROVIDER_SETTING),
+//            directoryFactory.getKeyProvider(config.getIndexSettings())
+//        );
     }
 
 }
