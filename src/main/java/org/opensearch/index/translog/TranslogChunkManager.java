@@ -21,7 +21,7 @@ import org.apache.logging.log4j.Logger;
 import org.apache.lucene.codecs.CodecUtil;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.KeyResolver;
 
 /**
  * Manages 8KB encrypted chunks for translog files using AES-GCM authentication.
@@ -43,7 +43,7 @@ public class TranslogChunkManager {
     public static final int CHUNK_WITH_TAG_SIZE = GCM_CHUNK_SIZE + GCM_TAG_SIZE;     // 8208 bytes max
 
     private final FileChannel delegate;
-    private final KeyIvResolver keyIvResolver;
+    private final KeyResolver keyResolver;
     private final Path filePath;
     private final String translogUUID;
 
@@ -69,16 +69,16 @@ public class TranslogChunkManager {
      * Creates a new TranslogChunkManager for managing encrypted chunks.
      *
      * @param delegate the underlying FileChannel for actual I/O operations
-     * @param keyIvResolver the key and IV resolver for encryption operations
+     * @param keyResolver the key and IV resolver for encryption operations
      * @param filePath the file path (used for logging and debugging)
      * @param translogUUID the translog UUID for exact header size calculation
      */
-    public TranslogChunkManager(FileChannel delegate, KeyIvResolver keyIvResolver, Path filePath, String translogUUID) {
+    public TranslogChunkManager(FileChannel delegate, KeyResolver keyResolver, Path filePath, String translogUUID) {
         if (translogUUID == null) {
             throw new IllegalArgumentException("translogUUID is required for exact header size calculation");
         }
         this.delegate = delegate;
-        this.keyIvResolver = keyIvResolver;
+        this.keyResolver = keyResolver;
         this.filePath = filePath;
         this.translogUUID = translogUUID;
     }
@@ -190,8 +190,8 @@ public class TranslogChunkManager {
             buffer.get(encryptedWithTag);
 
             // Use existing key management
-            Key key = keyIvResolver.getDataKey();
-            byte[] baseIV = keyIvResolver.getIvBytes();
+            Key key = keyResolver.getDataKey();
+            byte[] baseIV = keyResolver.getIvBytes();
 
             // Use existing IV computation for this chunk
             long chunkOffset = (long) chunkIndex * GCM_CHUNK_SIZE;
@@ -211,8 +211,8 @@ public class TranslogChunkManager {
     public void encryptAndWriteChunk(int chunkIndex, byte[] plainData) throws IOException {
         try {
             // Use existing key management
-            Key key = keyIvResolver.getDataKey();
-            byte[] baseIV = keyIvResolver.getIvBytes();
+            Key key = keyResolver.getDataKey();
+            byte[] baseIV = keyResolver.getIvBytes();
 
             // Use existing IV computation for this chunk
             long chunkOffset = (long) chunkIndex * GCM_CHUNK_SIZE;
