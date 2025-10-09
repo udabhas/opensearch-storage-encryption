@@ -29,6 +29,7 @@ import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.block_loader.BlockLoader;
+import org.opensearch.index.store.cipher.EncryptionCache;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
@@ -49,6 +50,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final Worker readAheadworker;
     private final KeyResolver keyResolver;
     private final Provider provider;
+    private final Path dirPath;
 
     public CryptoDirectIODirectory(
         Path path,
@@ -67,6 +69,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         this.blockCache = blockCache;
         this.readAheadworker = worker;
         this.provider = provider;
+        this.dirPath = getDirectory();
     }
 
     @Override
@@ -151,6 +154,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
         readAheadworker.close();
+        EncryptionCache.getInstance().invalidateDirectory(this.dirPath.toAbsolutePath().toString());
     }
 
     @Override
@@ -173,7 +177,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 LOGGER.warn("Failed to get file size", e);
             }
         }
-
+        EncryptionCache.getInstance().invalidateFile(file.toAbsolutePath().toString());
         super.deleteFile(name);
     }
 
