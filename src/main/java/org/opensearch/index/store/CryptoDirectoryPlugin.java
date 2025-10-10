@@ -57,6 +57,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         return Arrays
             .asList(
                 CryptoDirectoryFactory.INDEX_KMS_TYPE_SETTING,
+                CryptoDirectoryFactory.INDEX_KMS_KEY_ARN_SETTING,
                 CryptoDirectoryFactory.INDEX_CRYPTO_PROVIDER_SETTING,
                 CryptoDirectoryFactory.NODE_DATA_KEY_TTL_SECONDS_SETTING
             );

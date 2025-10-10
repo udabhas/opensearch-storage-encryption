@@ -123,6 +123,16 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     }, Property.NodeScope, Property.IndexScope);
 
     /**
+     * Specifies the Key management plugin type to be used. The desired KMS
+     * plugin should be installed.
+     */
+    public static final Setting<String> INDEX_KMS_KEY_ARN_SETTING = new Setting<>("index.store.kms.key_arn", "", Function.identity(), (s) -> {
+        if (s == null || s.isEmpty()) {
+            throw new SettingsException("index.store.kms.key_arn must be set");
+        }
+    }, Property.NodeScope, Property.IndexScope);
+
+    /**
      * Specifies the node-level TTL for data keys in seconds. 
      * Default is 3600 seconds (1 hour).
      * Set to -1 to disable key refresh (keys are loaded once and cached forever).
@@ -143,8 +153,14 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
 
     MasterKeyProvider getKeyProvider(IndexSettings indexSettings) {
         final String KEY_PROVIDER_TYPE = indexSettings.getValue(INDEX_KMS_TYPE_SETTING);
-        final Settings settings = Settings.builder().put(indexSettings.getNodeSettings(), false).build();
-        CryptoMetadata cryptoMetadata = new CryptoMetadata("", KEY_PROVIDER_TYPE, settings);
+//        final String KEY_ARN = indexSettings.getValue(INDEX_KMS_KEY_ARN_SETTING);
+//        final Settings settings = Settings.builder().put(indexSettings.getNodeSettings(), false).build();
+//        indexSettings.getSettings().normal
+
+        Settings cryptoSettings = Settings.builder().normalizePrefix("index.store.").build();
+//        Settings cryptoSettings = Settings.builder().put(cryptoMetadata.settings()).normalizePrefix("kms.").build();
+//        final Settings settings = Settings.builder().put(indexSettings.getSettings()., false).build();
+        CryptoMetadata cryptoMetadata = new CryptoMetadata("", KEY_PROVIDER_TYPE, cryptoSettings);
         MasterKeyProvider keyProvider;
         try {
             keyProvider = CryptoHandlerRegistry
