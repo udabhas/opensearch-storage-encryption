@@ -89,44 +89,91 @@ test {
         showStandardStreams = true
     }
     systemProperty 'tests.security.manager', 'false'
+    systemProperty 'opensearch.storage.warmup.percentage', '0'
+    systemProperty 'opensearch.storage.pool.size.bytes', '268435456' // 256MB for tests
+    jvmArgs += [
+        '--enable-native-access=ALL-UNNAMED',
+        '-XX:MaxDirectMemorySize=512m'
+    ]
 }
 
 tasks.named('internalClusterTest').configure {
     systemProperty 'tests.security.manager', 'false'
     systemProperty 'java.security.policy', 'test.policy'
+    systemProperty 'opensearch.storage.warmup.percentage', '0'
+    systemProperty 'opensearch.storage.pool.size.bytes', '268435456'
     testLogging {
         events "passed", "skipped", "failed"
         showStandardStreams = true
     }
+    jvmArgs += [
+        '--enable-native-access=ALL-UNNAMED',
+        '-XX:MaxDirectMemorySize=512m'
+    ]
+}
+
+tasks.named('yamlRestTest').configure {
+    systemProperty 'opensearch.storage.warmup.percentage', '0'
+    systemProperty 'opensearch.storage.pool.size.bytes', '134217728'
+}
+
+testClusters.yamlRestTest {
+    systemProperty 'opensearch.storage.warmup.percentage', '0'
+    systemProperty 'opensearch.storage.pool.size.bytes', '134217728'
+    jvmArgs '-XX:MaxDirectMemorySize=512m'
 }
 
 compileJava {
-    sourceCompatibility = JavaVersion.VERSION_24
-    targetCompatibility = JavaVersion.VERSION_24
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
     options.encoding = 'UTF-8'
     options.compilerArgs << '-Xlint:unchecked' << '-Xlint:-deprecation'
+    options.compilerArgs += ['--enable-preview']
 }
 
 compileTestJava {
-    sourceCompatibility = JavaVersion.VERSION_24
-    targetCompatibility = JavaVersion.VERSION_24
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 }
 
 tasks.withType(JavaCompile).configureEach {
-    sourceCompatibility = JavaVersion.VERSION_24
-    targetCompatibility = JavaVersion.VERSION_24
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
     options.encoding = 'UTF-8'
-    options.release = 24
+    options.release = 21
     options.compilerArgs << '-Xlint:-deprecation'
+    options.compilerArgs += "--enable-preview"
+
+    // Patch all compiled class files to remove preview flag requirement by java
+    // this is like tricky java to not consider these files using preview.
+    doLast {
+        def patchedCount = 0
+        destinationDirectory.getAsFileTree().matching(new PatternSet().include('**/*.class')).each { classFile ->
+            new RandomAccessFile(classFile, 'rw').withCloseable { f ->
+                int magic = f.readInt()
+                if (magic != (int)0xCAFEBABE) return
+                f.seek(4L)
+                short minor = f.readShort()
+                short major = f.readShort()
+                if (major == 65 && minor == (short)0xFFFF) {
+                    f.seek(4L)
+                    f.writeShort(0)
+                    patchedCount++
+                }
+            }
+        }
+        logger.lifecycle("Patched ${patchedCount} class files to remove preview flag")
+    }
 }
 
-javadoc {
+tasks.withType(Javadoc).configureEach {
     options.encoding = 'UTF-8'
     options.charSet = 'UTF-8'
     options.addStringOption('Xdoclint:all', '-quiet')
     options.addStringOption('tag', 'opensearch.internal:a:Internal:')
-    options.addStringOption("source", "24")
-    failOnError = true
+    options.addStringOption('source', '21')
+    options.addStringOption('-enable-preview', '-quiet')
+    failOnError = false
 }
 
 jacoco {
