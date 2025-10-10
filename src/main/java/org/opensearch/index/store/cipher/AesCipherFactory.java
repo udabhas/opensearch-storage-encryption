@@ -144,22 +144,29 @@ public class AesCipherFactory {
             throw new IllegalArgumentException("Invalid frame number: " + frameNumber);
         }
 
-        // Get IV from cache.
         EncryptionCache encryptionCache = EncryptionCache.getInstance();
-        Optional<byte[]> frameBaseIVOptional   = encryptionCache.getFrameIv(filePath, frameNumber);
         byte[] frameBaseIV;
-        if(frameBaseIVOptional.isPresent()) {
-            frameBaseIV = frameBaseIVOptional.get();
-        } else {
-            // Derive frame-specific base IV using HKDF
-            String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
-            frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
-            encryptionCache.putFrameIv(filePath,frameNumber,frameBaseIV);
-        }
         
-//        // Derive frame-specific base IV using HKDF
-//        String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
-//        byte[] frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+        // Try to get from footer cache first
+        Optional<org.opensearch.index.store.footer.EncryptionFooter> footerOpt = encryptionCache.getFooter(filePath);
+        if (footerOpt.isPresent()) {
+            Optional<byte[]> cachedIV = footerOpt.get().getFrameIV(frameNumber);
+            if (cachedIV.isPresent()) {
+                frameBaseIV = cachedIV.get();
+            } else {
+                frameBaseIV = deriveAndStoreInFooter(directoryKey, messageId, frameNumber, footerOpt.get());
+            }
+        } else {
+            // Fallback to old cache mechanism
+            Optional<byte[]> frameBaseIVOptional = encryptionCache.getFrameIv(filePath, frameNumber);
+            if (frameBaseIVOptional.isPresent()) {
+                frameBaseIV = frameBaseIVOptional.get();
+            } else {
+                String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
+                frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+                encryptionCache.putFrameIv(filePath, frameNumber, frameBaseIV);
+            }
+        }
         
         // Modify last 4 bytes for block counter within frame
         byte[] frameIV = Arrays.copyOf(frameBaseIV, 16);
@@ -176,6 +183,15 @@ public class AesCipherFactory {
         
         return frameIV;
     }
+
+    private static byte[] deriveAndStoreInFooter(byte[] directoryKey, byte[] messageId, int frameNumber, 
+                                                  org.opensearch.index.store.footer.EncryptionFooter footer) {
+        String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
+        byte[] frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
+        footer.putFrameIV(frameNumber, frameBaseIV);
+        return frameBaseIV;
+    }
+    
 
     /**
      * Calculate which frame contains a given file offset
