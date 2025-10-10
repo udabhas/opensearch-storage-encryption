@@ -157,7 +157,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
 //        final Settings settings = Settings.builder().put(indexSettings.getNodeSettings(), false).build();
 //        indexSettings.getSettings().normal
 
-        Settings cryptoSettings = Settings.builder().normalizePrefix("index.store.").build();
+        Settings cryptoSettings = Settings.builder().put(indexSettings.getSettings()).normalizePrefix("index.store.").build();
 //        Settings cryptoSettings = Settings.builder().put(cryptoMetadata.settings()).normalizePrefix("kms.").build();
 //        final Settings settings = Settings.builder().put(indexSettings.getSettings()., false).build();
         CryptoMetadata cryptoMetadata = new CryptoMetadata("", KEY_PROVIDER_TYPE, cryptoSettings);
