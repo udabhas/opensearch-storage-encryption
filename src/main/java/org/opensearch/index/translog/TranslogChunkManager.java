@@ -16,6 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.Key;
 
+import javax.crypto.Cipher;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.codecs.CodecUtil;
@@ -49,6 +51,13 @@ public class TranslogChunkManager {
 
     // Header size - calculated exactly using TranslogHeader.headerSizeInBytes()
     private volatile int actualHeaderSize = -1;
+
+    // Streaming cipher state for write operations
+    private Cipher currentCipher;
+    private int currentBlockNumber = 0;
+    private int currentBlockBytesWritten = 0;
+    private static final int BLOCK_SIZE = 8192; // 8KB blocks
+    private long fileWritePosition = 0;
 
     /**
      * Helper class for chunk position mapping
@@ -168,18 +177,21 @@ public class TranslogChunkManager {
      * Returns empty array if chunk doesn't exist or channel is write-only.
      */
     public byte[] readAndDecryptChunk(int chunkIndex) throws IOException {
+        System.out.println("[DEBUG] readAndDecryptChunk: chunkIndex=" + chunkIndex);
         try {
             // Calculate disk position for this chunk
             long diskPosition = determineHeaderSize() + ((long) chunkIndex * CHUNK_WITH_TAG_SIZE);
 
             // Check if chunk exists and we can read it
             if (!canReadChunk(diskPosition)) {
+                System.out.println("[DEBUG] Cannot read chunk at position " + diskPosition);
                 return new byte[0]; // New chunk or write-only channel
             }
 
             // Read encrypted chunk + tag from disk
             ByteBuffer buffer = ByteBuffer.allocate(CHUNK_WITH_TAG_SIZE);
             int bytesRead = delegate.read(buffer, diskPosition);
+            System.out.println("[DEBUG] Read " + bytesRead + " bytes from disk at position " + diskPosition);
             if (bytesRead <= GCM_TAG_SIZE) {
                 return new byte[0]; // Empty or invalid chunk
             }
@@ -198,7 +210,9 @@ public class TranslogChunkManager {
             byte[] chunkIV = computeOffsetIVForAesGcmEncrypted(baseIV, chunkOffset);
 
             // Use existing GCM decryption with authentication
-            return AesGcmCipherFactory.decryptWithTag(key, chunkIV, encryptedWithTag);
+            byte[] decrypted = AesGcmCipherFactory.decryptWithTag(key, chunkIV, encryptedWithTag);
+            System.out.println("[DEBUG] Decrypted " + decrypted.length + " bytes from chunk " + chunkIndex);
+            return decrypted;
 
         } catch (Exception e) {
             throw new IOException("Failed to decrypt chunk " + chunkIndex, e);
@@ -270,8 +284,8 @@ public class TranslogChunkManager {
     }
 
     /**
-     * Writes data to encrypted chunks at the specified position.
-     * This method handles chunk boundary crossing and encryption using read-modify-write pattern.
+     * Writes data using streaming cipher with auto block management.
+     * Handles block boundaries by finalizing cipher and writing tag inline.
      *
      * @param src the buffer containing data to write
      * @param position the file position to write to
@@ -279,39 +293,67 @@ public class TranslogChunkManager {
      * @throws IOException if writing fails
      */
     public int writeToChunks(ByteBuffer src, long position) throws IOException {
+        System.out.println("[DEBUG] writeToChunks: src.remaining=" + src.remaining() + ", position=" + position);
         if (src.remaining() == 0) {
             return 0;
         }
 
         int headerSize = determineHeaderSize();
 
-        // Header writes remain unchanged
+        // Header writes remain unencrypted - write at exact position
         if (position < headerSize) {
-            return delegate.write(src, position);
+            int written = delegate.write(src, position);
+            System.out.println("[DEBUG] Header write: " + written + " bytes at position " + position);
+            return written;
         }
 
-        // Chunk-based encrypted writes
-        ChunkInfo chunkInfo = getChunkInfo(position);
-
-        // Read-modify-write chunk pattern
-        byte[] existingChunk = readAndDecryptChunk(chunkInfo.chunkIndex);
-
-        // Expand chunk buffer if needed
-        int requiredSize = chunkInfo.offsetInChunk + src.remaining();
-        byte[] modifiedChunk = existingChunk;
-        if (existingChunk.length < requiredSize) {
-            modifiedChunk = new byte[Math.min(requiredSize, GCM_CHUNK_SIZE)];
-            System.arraycopy(existingChunk, 0, modifiedChunk, 0, existingChunk.length);
+        if (fileWritePosition == 0) {
+            fileWritePosition = headerSize;
         }
 
-        // Apply modifications
-        int bytesToWrite = Math.min(src.remaining(), GCM_CHUNK_SIZE - chunkInfo.offsetInChunk);
-        src.get(modifiedChunk, chunkInfo.offsetInChunk, bytesToWrite);
+        int totalWritten = 0;
 
-        // Encrypt and write back
-        encryptAndWriteChunk(chunkInfo.chunkIndex, modifiedChunk);
+        while (src.hasRemaining()) {
+            System.out.println("[DEBUG] Loop: currentCipher=" + (currentCipher != null ? "active" : "null") + 
+                ", currentBlockBytesWritten=" + currentBlockBytesWritten + ", BLOCK_SIZE=" + BLOCK_SIZE);
+            // Initialize cipher on first write or when block is full
+            if (currentCipher == null || currentBlockBytesWritten >= BLOCK_SIZE) {
+                if (currentCipher != null) {
+                    // Block is full - finalize and write tag
+                    System.out.println("[DEBUG] Block full, finalizing...");
+                    finalizeCurrentBlock();
+                }
+                // Start new block
+                initializeBlockCipher(currentBlockNumber++);
+            }
 
-        return bytesToWrite;
+            // Write what fits in current block
+            int toWrite = Math.min(src.remaining(), BLOCK_SIZE - currentBlockBytesWritten);
+            System.out.println("[DEBUG] Writing " + toWrite + " bytes to current block");
+
+            byte[] plainData = new byte[toWrite];
+            src.get(plainData);
+
+            // Stream encrypt using current cipher (no tag yet)
+            byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(
+                    position + totalWritten,
+                    currentCipher,
+                    plainData,
+                    toWrite
+            );
+            System.out.println("[DEBUG] Encrypted " + encrypted.length + " bytes");
+
+            // Write encrypted data immediately at tracked position
+            int written = delegate.write(ByteBuffer.wrap(encrypted), fileWritePosition);
+            fileWritePosition += written;
+
+            currentBlockBytesWritten += toWrite;
+            totalWritten += toWrite;
+            System.out.println("[DEBUG] Total written so far: " + totalWritten + ", currentBlockBytesWritten=" + currentBlockBytesWritten);
+        }
+
+        System.out.println("[DEBUG] writeToChunks completed: totalWritten=" + totalWritten);
+        return totalWritten;
     }
 
     /**
@@ -388,5 +430,51 @@ public class TranslogChunkManager {
         }
 
         return transferred;
+    }
+
+    /**
+     * Initialize GCM cipher for a new block
+     */
+    private void initializeBlockCipher(int blockNumber) throws IOException {
+        System.out.println("[DEBUG] Initializing cipher for block " + blockNumber + " at file " + filePath);
+        Key key = keyResolver.getDataKey();
+        byte[] baseIV = keyResolver.getIvBytes();
+        long offset = (long) blockNumber * BLOCK_SIZE;
+
+        this.currentCipher = AesGcmCipherFactory.initializeGCMCipher(key, baseIV, offset);
+        this.currentBlockNumber = blockNumber;
+        this.currentBlockBytesWritten = 0;
+        System.out.println("[DEBUG] Cipher initialized for block " + blockNumber + ", offset=" + offset);
+    }
+
+    /**
+     * Finalize current block and write tag inline
+     */
+    private void finalizeCurrentBlock() throws IOException {
+        if (currentCipher == null) {
+            System.out.println("[DEBUG] finalizeCurrentBlock called but currentCipher is null");
+            return;
+        }
+        System.out.println("[DEBUG] Finalizing block " + currentBlockNumber + " with " + currentBlockBytesWritten + " bytes written");
+        byte[] tag = AesGcmCipherFactory.finalizeAndGetTag(currentCipher);
+        int written = delegate.write(ByteBuffer.wrap(tag), fileWritePosition);
+        fileWritePosition += written;
+        System.out.println("[DEBUG] Block " + currentBlockNumber + " finalized and tag written at position " + (fileWritePosition - written));
+    }
+
+    /**
+     * Close and finalize last block
+     */
+    public void close() throws IOException {
+        System.out.println("[DEBUG] Closing TranslogChunkManager for file " + filePath + 
+            ", currentCipher=" + (currentCipher != null ? "active" : "null") + 
+            ", bytesWritten=" + currentBlockBytesWritten);
+        if (currentCipher != null) {
+            finalizeCurrentBlock();
+            currentCipher = null;
+            System.out.println("[DEBUG] Last block finalized on close");
+        } else {
+            System.out.println("[DEBUG] No active cipher to finalize on close");
+        }
     }
 }
