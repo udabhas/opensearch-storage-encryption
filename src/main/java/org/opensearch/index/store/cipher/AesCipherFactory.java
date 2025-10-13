@@ -13,6 +13,7 @@ import java.util.Optional;
 import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
 
+import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 
@@ -148,7 +149,7 @@ public class AesCipherFactory {
         byte[] frameBaseIV;
         
         // Try to get from footer cache first
-        Optional<org.opensearch.index.store.footer.EncryptionFooter> footerOpt = encryptionCache.getFooter(filePath);
+        Optional<EncryptionFooter> footerOpt = encryptionCache.getFooter(filePath);
         if (footerOpt.isPresent()) {
             Optional<byte[]> cachedIV = footerOpt.get().getFrameIV(frameNumber);
             if (cachedIV.isPresent()) {

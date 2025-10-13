@@ -72,7 +72,6 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.directoryKey = keyResolver.getDataKey().getEncoded();
         
         // Read footer with temporary key for authentication
-//        EncryptionFooter footer = readFooterFromFile();
         EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath, channel,directoryKey);
         this.messageId = footer.getMessageId();
         this.frameSize = footer.getFrameSize();
@@ -83,11 +82,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
         
         // Calculate footer length
-//        long fileSize = channel.size();
         this.footerLength = footer.getFooterLength();
-//        ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//        channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//        this.footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
     }
 
     public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId, Path filePath)
@@ -185,7 +180,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             Cipher cipher = algorithm.getDecryptionCipher();
             
             // Derive frame-specific IV
-            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame, this.filePath.toAbsolutePath().toString());
+            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame,
+                    this.filePath.toAbsolutePath().toString());
             
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
             
