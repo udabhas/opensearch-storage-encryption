@@ -37,12 +37,14 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     private final AtomicLong nextTempFileCounter = new AtomicLong();
     private final int algorithmId = 1; // Default to AES_256_GCM_CTR
     private final Path dirPath;
+    private final String dirPathString;
 
     public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyResolver keyResolver) throws IOException {
         super(location, lockFactory);
         this.provider = provider;
         this.keyResolver = keyResolver;
         this.dirPath = getDirectory();
+        this.dirPathString = dirPath.toAbsolutePath().toString();
     }
 
     @Override
@@ -104,30 +106,33 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
-        if ((name.contains("segments_") || name.endsWith(".si")) ) {
-            return super.fileLength(name);  // Non-encrypted files
+        if (name.contains("segments_") || name.endsWith(".si")) {
+            return super.fileLength(name);
         }
-        
-        // Encrypted files: calculate variable footer length
+
+        // Fast path: check cache first
+        String filePath = dirPathString + "/" + name;
+        EncryptionCache cache = EncryptionCache.getInstance();
+        EncryptionFooter cachedFooter = cache.getFooter(filePath).orElse(null);
+
         long fileSize = super.fileLength(name);
-        // Handle files that might be in process of being written
+
+        if (cachedFooter != null) {
+            return fileSize - cachedFooter.getFooterLength();
+        }
+
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             return fileSize;
         }
-        
-        Path path = getDirectory().resolve(name);
+
+        // Slow path: read footer from disk
+        Path path = dirPath.resolve(name);
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
-            // Read minimum footer to get actual length
             ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            
+
             int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
-            long logicalFileSize =  fileSize - footerLength;
-            if (logicalFileSize > 0) {
-                return logicalFileSize;
-            }else {
-                return fileSize;
-            }
+            return Math.max(fileSize - footerLength, fileSize);
         }
     }
 
@@ -135,14 +140,13 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public synchronized void close() throws IOException {
         isOpen = false;
         deletePendingFiles();
-        EncryptionCache.getInstance().invalidateDirectory(this.dirPath.toAbsolutePath().toString());
+        EncryptionCache.getInstance().invalidateDirectory(dirPathString);
     }
 
     @Override
     public void deleteFile(String name) throws IOException {
         super.deleteFile(name);
-        Path path = this.dirPath.resolve(name);
-        EncryptionCache.getInstance().invalidateFile(path.toAbsolutePath().toString());
+        EncryptionCache.getInstance().invalidateFile(dirPathString + "/" + name);
     }
 
 }
