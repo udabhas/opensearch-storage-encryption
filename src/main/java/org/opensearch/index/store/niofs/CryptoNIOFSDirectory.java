@@ -109,28 +109,27 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         if (name.contains("segments_") || name.endsWith(".si")) {
             return super.fileLength(name);
         }
-
+        
         // Fast path: check cache first
         String filePath = dirPathString + "/" + name;
-        EncryptionCache cache = EncryptionCache.getInstance();
-        EncryptionFooter cachedFooter = cache.getFooter(filePath).orElse(null);
-
+        EncryptionFooter cachedFooter = EncryptionCache.getInstance().getFooter(filePath);
+        
         long fileSize = super.fileLength(name);
-
+        
         if (cachedFooter != null) {
             return fileSize - cachedFooter.getFooterLength();
         }
-
+        
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             return fileSize;
         }
-
+        
         // Slow path: read footer from disk
         Path path = dirPath.resolve(name);
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
             ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-
+            
             int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
             return Math.max(fileSize - footerLength, fileSize);
         }

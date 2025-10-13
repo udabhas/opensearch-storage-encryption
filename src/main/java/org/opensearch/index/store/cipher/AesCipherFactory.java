@@ -149,20 +149,18 @@ public class AesCipherFactory {
         byte[] frameBaseIV;
         
         // Try to get from footer cache first
-        Optional<EncryptionFooter> footerOpt = encryptionCache.getFooter(filePath);
-        if (footerOpt.isPresent()) {
-            Optional<byte[]> cachedIV = footerOpt.get().getFrameIV(frameNumber);
+        EncryptionFooter footer = encryptionCache.getFooter(filePath);
+        if (footer != null) {
+            Optional<byte[]> cachedIV = footer.getFrameIV(frameNumber);
             if (cachedIV.isPresent()) {
                 frameBaseIV = cachedIV.get();
             } else {
-                frameBaseIV = deriveAndStoreInFooter(directoryKey, messageId, frameNumber, footerOpt.get());
+                frameBaseIV = deriveAndStoreInFooter(directoryKey, messageId, frameNumber, footer);
             }
         } else {
             // Fallback to old cache mechanism
-            Optional<byte[]> frameBaseIVOptional = encryptionCache.getFrameIv(filePath, frameNumber);
-            if (frameBaseIVOptional.isPresent()) {
-                frameBaseIV = frameBaseIVOptional.get();
-            } else {
+            frameBaseIV = encryptionCache.getFrameIv(filePath, frameNumber);
+            if (frameBaseIV == null) {
                 String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
                 frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
                 encryptionCache.putFrameIv(filePath, frameNumber, frameBaseIV);

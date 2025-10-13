@@ -6,103 +6,25 @@
  * compatible open source license.
  */
 
-//package org.opensearch.index.store.cipher;
-//
-//import org.opensearch.index.store.footer.EncryptionFooter;
-//
-//import java.util.Optional;
-//import java.util.concurrent.ConcurrentHashMap;
-//
-///**
-// * Singleton cache for encryption metadata across all directories
-// */
-//public class EncryptionCache {
-//
-//    private static final EncryptionCache INSTANCE = new EncryptionCache();
-//    private static final String SEPARATOR = ":";
-//
-//    private final ConcurrentHashMap<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
-//    private final ConcurrentHashMap<String, byte[]> frameIvCache = new ConcurrentHashMap<>();
-//
-//    private EncryptionCache() {}
-//
-//    public static EncryptionCache getInstance() {
-//        return INSTANCE;
-//    }
-//
-//    public static String getCacheKey(String filePath, int frameNumber) {
-//        return filePath + SEPARATOR + frameNumber;
-//    }
-//
-//    public Optional<EncryptionFooter> getFooter(String filePath) {
-//        return Optional.ofNullable(footerCache.get(filePath));
-//    }
-//
-//    public void putFooter(String filePath, EncryptionFooter footer) {
-//        footerCache.putIfAbsent(filePath, footer);
-//    }
-//
-//    public Optional<byte[]> getFrameIv(String filePath, int frameNumber) {
-//        return Optional.ofNullable(frameIvCache.get(getCacheKey(filePath, frameNumber)));
-//    }
-//
-//    public void putFrameIv(String filePath, int frameNumber, byte[] iv) {
-//        frameIvCache.putIfAbsent(getCacheKey(filePath, frameNumber), iv);
-//    }
-//
-//    public void invalidateFile(String filePath) {
-//        footerCache.remove(filePath);
-//        frameIvCache.keySet().removeIf(key -> key.startsWith(filePath + SEPARATOR));
-//    }
-//
-//    public void invalidateDirectory(String directoryPath) {
-//        String dirPrefix = directoryPath.endsWith("/") ? directoryPath : directoryPath + "/";
-//        footerCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
-//        frameIvCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
-//    }
-//
-//    public void clear() {
-//        footerCache.clear();
-//        frameIvCache.clear();
-//    }
-//}
-
-
-
 package org.opensearch.index.store.cipher;
 
-import org.opensearch.common.cache.Cache;
-import org.opensearch.common.cache.CacheBuilder;
-import org.opensearch.common.unit.TimeValue;
 import org.opensearch.index.store.footer.EncryptionFooter;
 
-import java.util.Optional;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Singleton cache for encryption metadata across all directories
+ * Singleton cache for encryption metadata across all directories.
+ * Lucene segment merging provides natural cleanup via deleteFile() calls.
  */
 public class EncryptionCache {
 
     private static final EncryptionCache INSTANCE = new EncryptionCache();
-    private static final String SEPARATOR = ":";
-    private static final int MAX_FOOTER_ENTRIES = 1000;
-    private static final int MAX_IV_ENTRIES = 10000;
+    private static final char SEPARATOR = ':';
 
-    private final Cache<String, EncryptionFooter> footerCache;
-    private final Cache<String, byte[]> frameIvCache;
+    private final ConcurrentHashMap<String, EncryptionFooter> footerCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, byte[]> frameIvCache = new ConcurrentHashMap<>();
 
-    private EncryptionCache() {
-        this.footerCache = CacheBuilder.<String, EncryptionFooter>builder()
-                .setMaximumWeight(MAX_FOOTER_ENTRIES)
-                .setExpireAfterAccess(TimeValue.timeValueNanos(TimeUnit.HOURS.toNanos(1)))
-                .build();
-
-        this.frameIvCache = CacheBuilder.<String, byte[]>builder()
-                .setMaximumWeight(MAX_IV_ENTRIES)
-                .setExpireAfterAccess(TimeValue.timeValueNanos(TimeUnit.MINUTES.toNanos(30)))
-                .build();
-    }
+    private EncryptionCache() {}
 
     public static EncryptionCache getInstance() {
         return INSTANCE;
@@ -112,42 +34,36 @@ public class EncryptionCache {
         return filePath + SEPARATOR + frameNumber;
     }
 
-    public Optional<EncryptionFooter> getFooter(String filePath) {
-        return Optional.ofNullable(footerCache.get(filePath));
+    public EncryptionFooter getFooter(String filePath) {
+        return footerCache.get(filePath);
     }
 
     public void putFooter(String filePath, EncryptionFooter footer) {
-        footerCache.put(filePath, footer);
+        footerCache.putIfAbsent(filePath, footer);
     }
 
-    public Optional<byte[]> getFrameIv(String filePath, int frameNumber) {
-        return Optional.ofNullable(frameIvCache.get(getCacheKey(filePath, frameNumber)));
+    public byte[] getFrameIv(String filePath, int frameNumber) {
+        return frameIvCache.get(getCacheKey(filePath, frameNumber));
     }
 
     public void putFrameIv(String filePath, int frameNumber, byte[] iv) {
-        frameIvCache.put(getCacheKey(filePath, frameNumber), iv);
+        frameIvCache.putIfAbsent(getCacheKey(filePath, frameNumber), iv);
     }
 
     public void invalidateFile(String filePath) {
-        footerCache.invalidate(filePath);
-        frameIvCache.keys().forEach(key -> {
-            if (key.startsWith(filePath + SEPARATOR)) {
-                frameIvCache.invalidate(key);
-            }
-        });
+        footerCache.remove(filePath);
+        String prefix = filePath + SEPARATOR;
+        frameIvCache.keySet().removeIf(key -> key.startsWith(prefix));
     }
 
     public void invalidateDirectory(String directoryPath) {
         String dirPrefix = directoryPath.endsWith("/") ? directoryPath : directoryPath + "/";
-        footerCache.keys().forEach(key -> {
-            if (key.startsWith(dirPrefix)) {
-                footerCache.invalidate(key);
-            }
-        });
-        frameIvCache.keys().forEach(key -> {
-            if (key.startsWith(dirPrefix)) {
-                frameIvCache.invalidate(key);
-            }
-        });
+        footerCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
+        frameIvCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
+    }
+
+    public void clear() {
+        footerCache.clear();
+        frameIvCache.clear();
     }
 }
