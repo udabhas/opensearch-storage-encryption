@@ -4,6 +4,8 @@
  */
 package org.opensearch.index.store.cipher;
 
+import org.opensearch.index.store.footer.EncryptionFooter;
+
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.security.Key;
@@ -154,6 +156,76 @@ public class AesGcmCipherFactory {
             return cipher.doFinal(ciphertext);
         } catch (Exception e) {
             throw new JavaCryptoException("GCM decryption with tag verification failed", e);
+        }
+    }
+
+    /**
+     * Initializes a frame cipher for encryption with frame-specific IV.
+     *
+     * @param algorithm The encryption algorithm
+     * @param provider The JCE provider
+     * @param fileKey The file-specific encryption key
+     * @param directoryKey The directory key for IV derivation
+     * @param messageId The message ID from the footer
+     * @param frameNumber The frame number
+     * @param offsetWithinFrame The offset within the frame
+     * @param filePathString The absolute file path as string
+     * @return Initialized cipher ready for encryption
+     */
+    public static Cipher initializeFrameCipher(
+        EncryptionAlgorithm algorithm,
+        Provider provider,
+        Key fileKey,
+        byte[] directoryKey,
+        byte[] messageId,
+        int frameNumber,
+        long offsetWithinFrame,
+        String filePathString
+    ) {
+        byte[] frameIV = AesCipherFactory.computeFrameIV(
+            directoryKey,
+            messageId,
+            frameNumber,
+            offsetWithinFrame,
+            filePathString
+        );
+
+        Cipher cipher = algorithm.getEncryptionCipher(provider);
+        initCipher(cipher, fileKey, frameIV, Cipher.ENCRYPT_MODE, offsetWithinFrame);
+        return cipher;
+    }
+
+    /**
+     * Finalizes the current frame and extracts the GCM tag.
+     *
+     * @param cipher The cipher to finalize
+     * @param footer The encryption footer to store the tag
+     * @param outputStream The output stream to write remaining encrypted data
+     * @param frameNumber The current frame number (for error messages)
+     * @throws java.io.IOException If finalization or writing fails
+     */
+    public static void finalizeFrameAndWriteTag(
+        Cipher cipher,
+        EncryptionFooter footer,
+        java.io.OutputStream outputStream,
+        int frameNumber
+    ) throws java.io.IOException {
+        if (cipher == null) return;
+
+        try {
+            byte[] finalData = finalizeAndGetTag(cipher);
+
+            if (finalData.length >= GCM_TAG_LENGTH) {
+                int encryptedLength = finalData.length - GCM_TAG_LENGTH;
+                if (encryptedLength > 0) {
+                    outputStream.write(finalData, 0, encryptedLength);
+                }
+
+                byte[] gcmTag = java.util.Arrays.copyOfRange(finalData, encryptedLength, finalData.length);
+                footer.addGcmTag(gcmTag);
+            }
+        } catch (Throwable t) {
+            throw new java.io.IOException("Failed to finalize frame " + frameNumber, t);
         }
     }
 

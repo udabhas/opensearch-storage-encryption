@@ -225,40 +225,17 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private void initializeFrameCipher(int frameNumber, long offsetWithinFrame) {
             this.currentFrameNumber = frameNumber;
             this.currentFrameOffset = offsetWithinFrame;
-
-            // Derive frame-specific IV
-            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(),
-                                                           frameNumber, offsetWithinFrame, filePathString);
-
-            this.currentCipher = algorithm.getEncryptionCipher(provider);
-            AesGcmCipherFactory.initCipher(this.currentCipher, this.fileKey, frameIV,
-                                            Cipher.ENCRYPT_MODE, offsetWithinFrame);
+            this.currentCipher = AesGcmCipherFactory.initializeFrameCipher(
+                algorithm, provider, fileKey, directoryKey, footer.getMessageId(),
+                frameNumber, offsetWithinFrame, filePathString
+            );
         }
 
         /**
          * Finalize current frame and collect GCM tag
          */
         private void finalizeCurrentFrame() throws IOException {
-            if (currentCipher != null) {
-                try {
-                    byte[] finalData = AesGcmCipherFactory.finalizeAndGetTag(currentCipher);
-                    // finalData contains [remaining_encrypted_bytes][16_byte_tag]
-
-                    if (finalData.length >= AesGcmCipherFactory.GCM_TAG_LENGTH) {
-                        // Write encrypted data (excluding tag)
-                        int encryptedLength = finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH;
-                        if (encryptedLength > 0) {
-                            out.write(finalData, 0, encryptedLength);
-                        }
-
-                        // Extract and store GCM tag
-                        byte[] gcmTag = Arrays.copyOfRange(finalData, encryptedLength, finalData.length);
-                        footer.addGcmTag(gcmTag);
-                    }
-                } catch (Throwable t) {
-                    throw new IOException("Failed to finalize frame " + currentFrameNumber, t);
-                }
-            }
+            AesGcmCipherFactory.finalizeFrameAndWriteTag(currentCipher, footer, out, currentFrameNumber);
         }
     }
 }

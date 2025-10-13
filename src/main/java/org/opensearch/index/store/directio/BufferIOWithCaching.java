@@ -353,33 +353,14 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         private void initializeFrameCipher(int frameNumber, long offsetWithinFrame, Path filePath) {
             this.currentFrameNumber = frameNumber;
             this.currentFrameOffset = offsetWithinFrame;
-
-            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, footer.getMessageId(),
-                                                           frameNumber, offsetWithinFrame, filePath.toAbsolutePath().toString());
-
-            this.currentCipher = algorithm.getEncryptionCipher(provider);
-            AesGcmCipherFactory.initCipher(this.currentCipher, this.fileKey, frameIV,
-                                            Cipher.ENCRYPT_MODE, offsetWithinFrame);
+            this.currentCipher = AesGcmCipherFactory.initializeFrameCipher(
+                algorithm, provider, fileKey, directoryKey, footer.getMessageId(),
+                frameNumber, offsetWithinFrame, filePath.toAbsolutePath().toString()
+            );
         }
 
         private void finalizeCurrentFrame() throws IOException {
-            if (currentCipher != null) {
-                try {
-                    byte[] finalData = AesGcmCipherFactory.finalizeAndGetTag(currentCipher);
-
-                    if (finalData.length >= AesGcmCipherFactory.GCM_TAG_LENGTH) {
-                        int encryptedLength = finalData.length - AesGcmCipherFactory.GCM_TAG_LENGTH;
-                        if (encryptedLength > 0) {
-                            out.write(finalData, 0, encryptedLength);
-                        }
-
-                        byte[] gcmTag = Arrays.copyOfRange(finalData, encryptedLength, finalData.length);
-                        footer.addGcmTag(gcmTag);
-                    }
-                } catch (Throwable t) {
-                    throw new IOException("Failed to finalize frame " + currentFrameNumber, t);
-                }
-            }
+            AesGcmCipherFactory.finalizeFrameAndWriteTag(currentCipher, footer, out, currentFrameNumber);
         }
     }
 }
