@@ -58,6 +58,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private final EncryptionFooter footer;
         private final java.security.Provider provider;
         private final long frameSize;
+        private final int frameSizePower;
         private final EncryptionAlgorithm algorithm;
 
         // Frame tracking
@@ -75,6 +76,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             super(os);
 
             this.frameSize = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE;
+            this.frameSizePower = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER;
 
             // Generate MessageId and derive file-specific key
             this.footer = EncryptionFooter.generateNew(frameSize, (short)algorithmId);
@@ -138,16 +140,17 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             int dataOffset = offset;
 
             while (remaining > 0) {
-                // Check if we need to start a new frame
-                int frameNumber = (int)(streamOffset / frameSize);
+                // Check if we need to start a new frame (using bit operations)
+                int frameNumber = (int)(streamOffset >>> frameSizePower);
                 if (frameNumber != currentFrameNumber) {
                     finalizeCurrentFrame();
                     totalFrames = Math.max(totalFrames, frameNumber + 1);
-                    initializeFrameCipher(frameNumber, streamOffset % frameSize);
+                    long offsetWithinFrame = streamOffset & ((1L << frameSizePower) - 1);
+                    initializeFrameCipher(frameNumber, offsetWithinFrame);
                 }
 
                 // Calculate how much we can write in current frame
-                long frameEnd = (frameNumber + 1) * frameSize;
+                long frameEnd = (streamOffset & ~((1L << frameSizePower) - 1)) + (1L << frameSizePower);
                 int chunkSize = (int) Math.min(remaining, frameEnd - streamOffset);
 
                 try {

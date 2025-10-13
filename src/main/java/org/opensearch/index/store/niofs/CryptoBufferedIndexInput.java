@@ -52,6 +52,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private final byte[] messageId;
     private final int footerLength;
     private final long frameSize;
+    private final int frameSizePower;
     private final EncryptionAlgorithm algorithm;
 
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
@@ -75,6 +76,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath, channel,directoryKey);
         this.messageId = footer.getMessageId();
         this.frameSize = footer.getFrameSize();
+        this.frameSizePower = footer.getFrameSizePower();
         this.algorithm = EncryptionAlgorithm.fromId(footer.getAlgorithmId());
         
         // Derive file-specific key using messageId from footer
@@ -85,7 +87,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.footerLength = footer.getFooterLength();
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, short algorithmId, byte[] directoryKey, byte[] messageId, Path filePath)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, int frameSizePower, short algorithmId, byte[] directoryKey, byte[] messageId, Path filePath)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -96,6 +98,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.keySpec = keySpec;  // Reuse keySpec from main file
         this.footerLength = footerLength;
         this.frameSize = frameSize;
+        this.frameSizePower = frameSizePower;
         this.algorithm = EncryptionAlgorithm.fromId(algorithmId);
         this.directoryKey = directoryKey;  // Passed from parent
         this.messageId = messageId;  // Passed from parent
@@ -133,6 +136,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
                 keySpec,  // Pass the already-derived keySpec
                 footerLength,
                 frameSize,
+                frameSizePower,
                 algorithm.getAlgorithmId(),
                 directoryKey,  // Pass directory key
                 messageId,      // Pass message ID
@@ -159,10 +163,10 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
         }
 
-        // Calculate frame boundaries to avoid reading across frames
-        int frameNumber = (int)(position / frameSize);
-        long offsetWithinFrame = position % frameSize;
-        long frameEnd = (frameNumber + 1) * frameSize;
+        // Calculate frame boundaries using bit operations (frameSize is power of 2)
+        int frameNumber = (int)(position >>> frameSizePower);
+        long offsetWithinFrame = position & ((1L << frameSizePower) - 1);
+        long frameEnd = offsetWithinFrame + (1L << frameSizePower);
         
         // Limit read to not cross frame boundary
         int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);

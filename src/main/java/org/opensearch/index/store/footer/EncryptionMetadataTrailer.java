@@ -46,7 +46,8 @@ public class EncryptionMetadataTrailer {
     public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + TAG_COUNT_SIZE + FRAME_SIZE_SIZE + FRAME_COUNT_SIZE + FOOTER_AUTH_TAG_SIZE;
     
     // Frame constants for large file support
-    public static final long DEFAULT_FRAME_SIZE = 32L * 1024 * 1024 * 1024; // 32GB per frame
+    public static final int DEFAULT_FRAME_SIZE_POWER = 35; // 2^35 = 32GB per frame
+    public static final long DEFAULT_FRAME_SIZE = 1L << DEFAULT_FRAME_SIZE_POWER;
     public static final int MAX_FRAMES_PER_FILE = Integer.MAX_VALUE;
     public static final String FRAME_CONTEXT_PREFIX = "frame-";
     

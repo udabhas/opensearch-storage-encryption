@@ -47,6 +47,7 @@ public class EncryptionFooter {
     private final byte[] messageId;
     private final List<byte[]> gcmTags;
     private final long frameSize;
+    private final int frameSizePower;
     private final short algorithmId;
     private final byte[] keyMetadata; // Currently empty - key data retrieved from keyfile
     private byte[] footerAuthTag; // 16-byte GCM auth tag for footer authentication
@@ -58,9 +59,13 @@ public class EncryptionFooter {
         if (messageId.length != EncryptionMetadataTrailer.MESSAGE_ID_SIZE) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }
+        if ((frameSize & (frameSize - 1)) != 0 || frameSize <= 0) {
+            throw new IllegalArgumentException("frameSize must be a power of 2");
+        }
         this.messageId = Arrays.copyOf(messageId, EncryptionMetadataTrailer.MESSAGE_ID_SIZE);
         this.gcmTags = new ArrayList<>();
         this.frameSize = frameSize;
+        this.frameSizePower = Long.numberOfTrailingZeros(frameSize);
         this.algorithmId = algorithmId;
         this.keyMetadata = new byte[0]; // Empty - currently using keyfile for key data
         this.frameCount = 0;
@@ -247,6 +252,10 @@ public class EncryptionFooter {
 
     public long getFrameSize() {
         return frameSize;
+    }
+
+    public int getFrameSizePower() {
+        return frameSizePower;
     }
 
     public int getFrameCount() {
