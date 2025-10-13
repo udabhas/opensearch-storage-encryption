@@ -9,7 +9,6 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SI
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -51,6 +50,9 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final KeyResolver keyResolver;
     private final Provider provider;
     private final Path dirPath;
+    private final String dirPathString;
+    private final byte[] dataKeyBytes;
+    private final byte[] ivBytes;
 
     public CryptoDirectIODirectory(
             Path path,
@@ -70,6 +72,9 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         this.readAheadworker = worker;
         this.provider = provider;
         this.dirPath = getDirectory();
+        this.dirPathString = dirPath.toAbsolutePath().toString();
+        this.dataKeyBytes = keyResolver.getDataKey().getEncoded();
+        this.ivBytes = keyResolver.getIvBytes();
     }
 
     @Override
@@ -77,7 +82,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         ensureOpen();
         ensureCanRead(name);
 
-        Path file = getDirectory().resolve(name);
+        Path file = dirPath.resolve(name);
         long rawFileSize = Files.size(file);
         if (rawFileSize == 0) {
             throw new IOException("Cannot open empty file with DirectIO: " + file);
@@ -116,8 +121,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 name,
                 path,
                 fos,
-                this.keyResolver.getDataKey().getEncoded(),
-                keyResolver.getIvBytes(),
+                dataKeyBytes,
+                ivBytes,
                 this.memorySegmentPool,
                 this.blockCache,
                 this.provider
@@ -140,8 +145,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 name,
                 path,
                 fos,
-                this.keyResolver.getDataKey().getEncoded(),
-                keyResolver.getIvBytes(),
+                dataKeyBytes,
+                ivBytes,
                 this.memorySegmentPool,
                 this.blockCache,
                 this.provider
@@ -154,12 +159,13 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
         readAheadworker.close();
-        EncryptionCache.getInstance().invalidateDirectory(this.dirPath.toAbsolutePath().toString());
+        EncryptionCache.getInstance().invalidateDirectory(dirPathString);
     }
 
     @Override
     public void deleteFile(String name) throws IOException {
-        Path file = getDirectory().resolve(name);
+        Path file = dirPath.resolve(name);
+        String filePath = dirPathString + "/" + name;
 
         if (blockCache != null) {
             try {
@@ -177,50 +183,35 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 LOGGER.warn("Failed to get file size", e);
             }
         }
-        EncryptionCache.getInstance().invalidateFile(file.toAbsolutePath().toString());
+        EncryptionCache.getInstance().invalidateFile(filePath);
         super.deleteFile(name);
     }
 
     /**
-     * Calculate content length with OSEF validation
+     * Calculate content length with OSEF validation.
+     * Fast path: check cache first to avoid FileChannel open.
      */
     private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
         if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            return rawFileSize; // Too small for footer
+            return rawFileSize;
         }
 
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            // magic bytes check before expensive footer reading
-//            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//            channel.read(minBuffer, rawFileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-//
-//            byte[] minFooterBytes = minBuffer.array();
-//            if (!isValidOSEFFile(minFooterBytes)) {
-//                return rawFileSize; // Not OSEF
-//            }
+        // Fast path: check cache first - avoids FileChannel open
+        String filePath = file.toAbsolutePath().toString();
+        EncryptionFooter cachedFooter = EncryptionCache.getInstance().getFooter(filePath);
+        if (cachedFooter != null) {
+            return rawFileSize - cachedFooter.getFooterLength();
+        }
 
-            // Read footer and authentication
+        // Slow path: read footer from disk
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             try {
-                EncryptionFooter footer = EncryptionFooter.readFromChannel(file, channel, keyResolver.getDataKey().getEncoded());
+                EncryptionFooter footer = EncryptionFooter.readFromChannel(file, channel, dataKeyBytes);
                 return rawFileSize - footer.getFooterLength();
             } catch (EncryptionFooter.NotOSEFFileException e) {
-                // throw new IOException("Invalid OSEF footer authentication: " + file, e);
-                LOGGER.error("Encountered error while reading footer of file - {}, returning rawfileSize - {}", file.toString(), rawFileSize, e);
+                LOGGER.debug("Not an OSEF file: {}", file);
                 return rawFileSize;
             }
         }
     }
-
-//    /**
-//     * Check if file has valid OSEF magic bytes
-//     */
-//    private boolean isValidOSEFFile(byte[] minFooterBytes) {
-//        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
-//        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
-//            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
-//                return false;
-//            }
-//        }
-//        return true;
-//    }
 }
