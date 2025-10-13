@@ -118,7 +118,10 @@ public class DefaultKeyResolver implements KeyResolver {
 
     private void initNewKey() throws IOException {
         DataKeyPair pair = keyProvider.generateDataPair();
-        dataKey = new SecretKeySpec(pair.getRawKey(), "AES");
+        byte[] masterKey = pair.getRawKey();
+        byte[] indexKey = HkdfKeyDerivation.deriveIndexKey(masterKey, indexUuid);
+        byte[] directoryKey = HkdfKeyDerivation.deriveDirectoryKey(indexKey, 0);
+        dataKey = new SecretKeySpec(directoryKey, "AES");
         writeByteArrayFile(KEY_FILE, pair.getEncryptedKey());
     }
 
@@ -150,12 +153,11 @@ public class DefaultKeyResolver implements KeyResolver {
      * Exceptions are allowed to bubble up - the cache will handle fallback to old value.
      */
     Key loadKeyFromMasterKeyProvider() throws Exception {
-        // Attempt decryption
         byte[] encryptedKey = readByteArrayFile(KEY_FILE);
-        byte[] decryptedKey = keyProvider.decryptKey(encryptedKey);
-        Key newKey = new SecretKeySpec(decryptedKey, "AES");
-
-        return newKey;
+        byte[] masterKey = keyProvider.decryptKey(encryptedKey);
+        byte[] indexKey = HkdfKeyDerivation.deriveIndexKey(masterKey, indexUuid);
+        byte[] directoryKey = HkdfKeyDerivation.deriveDirectoryKey(indexKey, 0);
+        return new SecretKeySpec(directoryKey, "AES");
     }
 
     /**

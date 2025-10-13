@@ -82,7 +82,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             // Generate MessageId and derive file-specific key
             this.footer = EncryptionFooter.generateNew(1L << frameSizePower, (short)algorithmId);
             this.directoryKey = keyResolver.getDataKey().getEncoded();
-            byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
+            byte[] derivedKey = HkdfKeyDerivation.deriveFileKey(directoryKey, footer.getMessageId());
             this.fileKey = new javax.crypto.spec.SecretKeySpec(derivedKey, "AES");
 
             this.provider = provider;

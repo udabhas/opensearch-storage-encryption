@@ -90,4 +90,24 @@ public class HkdfKeyDerivation {
         
         return okm;
     }
+
+    public static byte[] deriveIndexKey(byte[] masterKey, String indexUuid) {
+        byte[] indexUuidBytes = indexUuid.getBytes(StandardCharsets.UTF_8);
+        byte[] paddedUuid = new byte[16];
+        System.arraycopy(indexUuidBytes, 0, paddedUuid, 0, Math.min(indexUuidBytes.length, 16));
+        return deriveKey(masterKey, paddedUuid, "index-key", 32);
+    }
+
+    public static byte[] deriveDirectoryKey(byte[] indexKey, int shardId) {
+        byte[] shardIdBytes = new byte[16];
+        shardIdBytes[0] = (byte) (shardId >>> 24);
+        shardIdBytes[1] = (byte) (shardId >>> 16);
+        shardIdBytes[2] = (byte) (shardId >>> 8);
+        shardIdBytes[3] = (byte) shardId;
+        return deriveKey(indexKey, shardIdBytes, "directory-key", 32);
+    }
+
+    public static byte[] deriveFileKey(byte[] directoryKey, byte[] messageId) {
+        return deriveKey(directoryKey, messageId, "file-encryption", 32);
+    }
 }

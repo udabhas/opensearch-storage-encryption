@@ -130,7 +130,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.footer = EncryptionFooter.generateNew(frameSize, (short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
             
             // Derive file-specific key
-            byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, footer.getMessageId(), "file-encryption");
+            byte[] derivedKey = HkdfKeyDerivation.deriveFileKey(directoryKey, footer.getMessageId());
             this.fileKey = new javax.crypto.spec.SecretKeySpec(derivedKey, "AES");
             
             // Initialize first frame cipher
