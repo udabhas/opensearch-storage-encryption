@@ -28,7 +28,6 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
 import org.opensearch.index.store.footer.EncryptionFooter;
-import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
 
@@ -87,7 +86,9 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.footerLength = footer.getFooterLength();
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize, int frameSizePower, short algorithmId, byte[] directoryKey, byte[] messageId, Path filePath)
+    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize,
+                                    KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize,
+                                    int frameSizePower, short algorithmId, byte[] directoryKey, byte[] messageId, Path filePath)
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -227,32 +228,5 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         if (pos > length()) {
             throw new EOFException("seek past EOF: pos=" + pos + ", length=" + length());
         }
-    }
-    
-    /**
-     * Read encryption footer from end of file
-     */
-    private EncryptionFooter readFooterFromFile() throws IOException {
-        long fileSize = channel.size();
-        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            throw new IOException("File too small to contain encryption footer");
-        }
-        
-        // First read minimum footer to get actual length
-        ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        
-        int footerLength = EncryptionFooter.calculateFooterLength(minBuffer.array());
-        
-        // Read complete footer
-        ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
-        int bytesRead = channel.read(footerBuffer, fileSize - footerLength);
-        
-        if (bytesRead != footerLength) {
-            throw new IOException("Failed to read complete footer");
-        }
-        
-        // Use directory key for footer authentication (before file key derivation)
-        return EncryptionFooter.deserialize(footerBuffer.array(), directoryKey);
     }
 }
