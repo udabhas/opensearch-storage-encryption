@@ -159,31 +159,6 @@ public class TranslogChunkManager {
     }
 
     /**
-     * Checks if we can read a chunk at the given disk position.
-     * Returns false for write-only channels or if chunk doesn't exist.
-     */
-    public boolean canReadChunk(long diskPosition) {
-        try {
-            // Check if position is beyond current file size (new chunk)
-            if (diskPosition >= delegate.size()) {
-                return false;
-            }
-
-            // Test if channel is readable by attempting a zero-byte read
-            ByteBuffer testBuffer = ByteBuffer.allocate(0);
-            delegate.read(testBuffer, diskPosition);
-            return true;
-
-        } catch (NonReadableChannelException e) {
-            // Channel is write-only
-            return false;
-        } catch (IOException e) {
-            // Other read errors - assume can't read
-            return false;
-        }
-    }
-
-    /**
      * Reads and decrypts a complete chunk from disk.
      * Returns empty array if chunk doesn't exist or channel is write-only.
      */
@@ -193,16 +168,15 @@ public class TranslogChunkManager {
             // Calculate disk position for this chunk
             long diskPosition = determineHeaderSize() + ((long) chunkIndex * CHUNK_WITH_TAG_SIZE);
 
-            // Check if chunk exists and we can read it
-            if (!canReadChunk(diskPosition)) {
-//                System.out.println("[DEBUG] Cannot read chunk at position " + diskPosition);
-                return new byte[0]; // New chunk or write-only channel
+            // Check if position is beyond current file size (new chunk)
+            if (diskPosition >= delegate.size()) {
+                return new byte[0];
             }
 
             // Read encrypted chunk + tag from disk using pooled buffer
             ByteBuffer buffer = CHUNK_BUFFER_POOL.get();
             buffer.clear();
-            int bytesRead = delegate.read(buffer, diskPosition);
+            int bytesRead = delegate.read(buffer, diskPosition)
 //            System.out.println("[DEBUG] Read " + bytesRead + " bytes from disk at position " + diskPosition);
             if (bytesRead <= GCM_TAG_SIZE) {
                 return new byte[0]; // Empty or invalid chunk
@@ -226,6 +200,9 @@ public class TranslogChunkManager {
 //            System.out.println("[DEBUG] Decrypted " + decrypted.length + " bytes from chunk " + chunkIndex);
             return decrypted;
 
+        } catch (NonReadableChannelException e) {
+            // Channel is write-only
+            return new byte[0];
         } catch (Exception e) {
             throw new IOException("Failed to decrypt chunk " + chunkIndex, e);
         }
