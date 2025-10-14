@@ -49,6 +49,7 @@ public class DefaultKeyResolver implements KeyResolver {
     private static final String IV_FILE = "ivFile";
     private static final String KEY_FILE = "keyfile";
     private final byte[] baseIV;
+    private volatile byte[] cachedIV;
 
     /**
      * Constructs a new {@link DefaultKeyResolver} and ensures the key is initialized.
@@ -169,40 +170,41 @@ public class DefaultKeyResolver implements KeyResolver {
     public Key getDataKey() {
         try {
             return NodeLevelKeyCache.getInstance().get(indexUuid);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to get encryption key", e);
+        } catch (Exception ex) {
+            throw new RuntimeException("No Node Level Key Cache available for {}");
         }
+
     }
 
     // TODO: Remove this IV bytes and update translog to generate the IV bytes deterministically
     @Override
-    public synchronized byte[] getIvBytes() {
-        try {
-            return readByteArrayFile(IV_FILE);
-        } catch (java.nio.file.NoSuchFileException e) {
-            initNewIV();
-            return this.baseIV.clone();
-        } catch (IOException ex) {
-            LOGGER.info("Encountered exception during getIV -> ", ex);
-            return this.baseIV.clone();
+    public byte[] getIvBytes() {
+        byte[] iv = cachedIV;
+        if (iv == null) {
+            iv = loadOrInitIV();
         }
+        return iv;
     }
 
-    private synchronized void initNewIV() {
-        try {
-            // Double-check if file was created by another thread
-            try {
-                byte[] existingIV = readByteArrayFile(IV_FILE);
-                System.arraycopy(existingIV, 0, this.baseIV, 0, existingIV.length);
-                return;
-            } catch (java.nio.file.NoSuchFileException e) {
-                // File doesn't exist, proceed with creation
-            }
-
-            new SecureRandom().nextBytes(this.baseIV);
-            writeByteArrayFile(IV_FILE, this.baseIV);
-        } catch (IOException ex) {
-            LOGGER.info("Encountered exception during initNewIV -> ", ex);
+    private synchronized byte[] loadOrInitIV() {
+        if (cachedIV != null) {
+            return cachedIV;
         }
+
+        try {
+            cachedIV = readByteArrayFile(IV_FILE);
+        } catch (java.nio.file.NoSuchFileException e) {
+            new SecureRandom().nextBytes(baseIV);
+            try {
+                writeByteArrayFile(IV_FILE, baseIV);
+            } catch (IOException ex) {
+                LOGGER.warn("Failed to write IV file", ex);
+            }
+            cachedIV = baseIV;
+        } catch (IOException ex) {
+            LOGGER.warn("Failed to read IV file, using in-memory fallback", ex);
+            cachedIV = baseIV;
+        }
+        return cachedIV;
     }
 }
