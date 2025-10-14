@@ -7,6 +7,7 @@ package org.opensearch.index.translog;
 import static org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted;
 
 import java.io.IOException;
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.NonReadableChannelException;
@@ -23,6 +24,7 @@ import org.apache.logging.log4j.Logger;
 import org.apache.lucene.codecs.CodecUtil;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
+import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -64,7 +66,8 @@ public class TranslogChunkManager {
     private final int actualHeaderSize;
 
     // Streaming cipher state for write operations
-    private Cipher currentCipher;
+//    private Cipher currentCipher;
+    private MemorySegment currentCipher;
     private int currentBlockNumber = 0;
     private int currentBlockBytesWritten = 0;
     private static final int BLOCK_SIZE = 8192; // 8KB blocks
@@ -313,12 +316,18 @@ public class TranslogChunkManager {
             src.get(plainData, 0, toWrite);
 
             // Stream encrypt using current cipher (no tag yet)
-            byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(
-                    position + totalWritten,
-                    currentCipher,
-                    plainData,
-                    toWrite
-            );
+            byte[] encrypted;
+            try {
+                encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, java.util.Arrays.copyOf(plainData, toWrite));
+            } catch (Throwable e) {
+                throw new IOException("Failed to encrypt data", e);
+            }
+//            byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(
+//                    position + totalWritten,
+//                    currentCipher,
+//                    plainData,
+//                    toWrite
+//            );
 //            System.out.println("[DEBUG] Encrypted " + encrypted.length + " bytes");
 
             // Write encrypted data immediately at tracked position
@@ -421,7 +430,13 @@ public class TranslogChunkManager {
         byte[] baseIV = keyResolver.getIvBytes();
         long offset = (long) blockNumber * BLOCK_SIZE;
 
-        this.currentCipher = AesGcmCipherFactory.initializeGCMCipher(key, baseIV, offset);
+        try {
+            this.currentCipher = OpenSslNativeCipher.initGCMCipher(key.getEncoded(), baseIV, offset);
+        } catch (Throwable e) {
+            throw new IOException("Failed to initialize cipher", e);
+        }
+//        this.currentCipher = AesGcmCipherFactory.initializeGCMCipher(key, baseIV, offset);
+
         this.currentBlockNumber = blockNumber;
         this.currentBlockBytesWritten = 0;
 //        System.out.println("[DEBUG] Cipher initialized for block " + blockNumber + ", offset=" + offset);
@@ -436,7 +451,15 @@ public class TranslogChunkManager {
             return;
         }
 //        System.out.println("[DEBUG] Finalizing block " + currentBlockNumber + " with " + currentBlockBytesWritten + " bytes written");
-        byte[] tag = AesGcmCipherFactory.finalizeAndGetTag(currentCipher);
+        byte[] tag;
+        try {
+            tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher);
+        } catch (Throwable e) {
+            throw new IOException("Failed to finalize cipher", e);
+        } finally {
+            currentCipher = null;
+        }
+//        byte[] tag = AesGcmCipherFactory.finalizeAndGetTag(currentCipher);
         int written = delegate.write(ByteBuffer.wrap(tag), fileWritePosition);
         fileWritePosition += written;
 //        System.out.println("[DEBUG] Block " + currentBlockNumber + " finalized and tag written at position " + (fileWritePosition - written));
