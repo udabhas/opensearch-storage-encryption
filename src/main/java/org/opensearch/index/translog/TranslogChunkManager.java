@@ -61,7 +61,7 @@ public class TranslogChunkManager {
     private final String translogUUID;
 
     // Header size - calculated exactly using TranslogHeader.headerSizeInBytes()
-    private volatile int actualHeaderSize = -1;
+    private final int actualHeaderSize;
 
     // Streaming cipher state for write operations
     private Cipher currentCipher;
@@ -101,27 +101,15 @@ public class TranslogChunkManager {
         this.keyResolver = keyResolver;
         this.filePath = filePath;
         this.translogUUID = translogUUID;
+        this.actualHeaderSize = filePath.getFileName().toString().endsWith(".tlog") 
+            ? calculateTranslogHeaderSize(translogUUID) 
+            : 0;
     }
 
     /**
-     * Determines the exact header size using local calculation to avoid cross-classloader access.
-     * This replicates the exact same logic as TranslogHeader.headerSizeInBytes() method.
+     * Returns the header size calculated at construction time.
      */
     public int determineHeaderSize() {
-        if (actualHeaderSize > 0) {
-            return actualHeaderSize;
-        }
-
-        String fileName = filePath.getFileName().toString();
-        if (fileName.endsWith(".tlog")) {
-            actualHeaderSize = calculateTranslogHeaderSize(translogUUID);
-//            logger.debug("Calculated exact header size: {} bytes for {} with UUID: {}", actualHeaderSize, filePath, translogUUID);
-        } else {
-            // Non-translog files (.ckp) don't need encryption anyway
-            actualHeaderSize = 0;
-//            logger.debug("Non-translog file {}, header size: 0", filePath);
-        }
-
         return actualHeaderSize;
     }
 
@@ -176,7 +164,7 @@ public class TranslogChunkManager {
             // Read encrypted chunk + tag from disk using pooled buffer
             ByteBuffer buffer = CHUNK_BUFFER_POOL.get();
             buffer.clear();
-            int bytesRead = delegate.read(buffer, diskPosition)
+            int bytesRead = delegate.read(buffer, diskPosition);
 //            System.out.println("[DEBUG] Read " + bytesRead + " bytes from disk at position " + diskPosition);
             if (bytesRead <= GCM_TAG_SIZE) {
                 return new byte[0]; // Empty or invalid chunk
