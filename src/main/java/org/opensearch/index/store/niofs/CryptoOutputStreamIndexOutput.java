@@ -215,10 +215,6 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 exception = e;
             } finally {
                 isClosed = true;
-                if (currentArena != null) {
-                    currentArena.close();
-                    currentArena = null;
-                }
             }
 
             if (exception != null)
@@ -272,6 +268,11 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 byte[] tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher, currentArena);
                 footer.addGcmTag(tag);
                 currentCipher = null;
+                
+                if (currentArena != null) {
+                    currentArena.close();
+                    currentArena = null;
+                }
             } catch (Throwable t) {
                 throw new RuntimeException("Failed to finalize frame " + currentFrameNumber, t);
             }
