@@ -44,6 +44,17 @@ public class TranslogChunkManager {
     public static final int GCM_TAG_SIZE = AesGcmCipherFactory.GCM_TAG_LENGTH;       // 16 bytes auth tag
     public static final int CHUNK_WITH_TAG_SIZE = GCM_CHUNK_SIZE + GCM_TAG_SIZE;     // 8208 bytes max
 
+    // Thread-local buffer pool for reducing allocations
+    private static final ThreadLocal<ByteBuffer> CHUNK_BUFFER_POOL = ThreadLocal.withInitial(
+        () -> ByteBuffer.allocate(CHUNK_WITH_TAG_SIZE)
+    );
+    private static final ThreadLocal<ByteBuffer> TRANSFER_BUFFER_POOL = ThreadLocal.withInitial(
+        () -> ByteBuffer.allocate(GCM_CHUNK_SIZE)
+    );
+    private static final ThreadLocal<byte[]> TEMP_ARRAY_POOL = ThreadLocal.withInitial(
+        () -> new byte[GCM_CHUNK_SIZE]
+    );
+
     private final FileChannel delegate;
     private final KeyResolver keyResolver;
     private final Path filePath;
@@ -188,8 +199,9 @@ public class TranslogChunkManager {
                 return new byte[0]; // New chunk or write-only channel
             }
 
-            // Read encrypted chunk + tag from disk
-            ByteBuffer buffer = ByteBuffer.allocate(CHUNK_WITH_TAG_SIZE);
+            // Read encrypted chunk + tag from disk using pooled buffer
+            ByteBuffer buffer = CHUNK_BUFFER_POOL.get();
+            buffer.clear();
             int bytesRead = delegate.read(buffer, diskPosition);
 //            System.out.println("[DEBUG] Read " + bytesRead + " bytes from disk at position " + diskPosition);
             if (bytesRead <= GCM_TAG_SIZE) {
@@ -331,8 +343,9 @@ public class TranslogChunkManager {
             int toWrite = Math.min(src.remaining(), BLOCK_SIZE - currentBlockBytesWritten);
 //            System.out.println("[DEBUG] Writing " + toWrite + " bytes to current block");
 
-            byte[] plainData = new byte[toWrite];
-            src.get(plainData);
+            // Use pooled array to avoid allocation
+            byte[] plainData = TEMP_ARRAY_POOL.get();
+            src.get(plainData, 0, toWrite);
 
             // Stream encrypt using current cipher (no tag yet)
             byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(
@@ -369,7 +382,8 @@ public class TranslogChunkManager {
     public long transferFromChunks(long position, long count, WritableByteChannel target) throws IOException {
         long transferred = 0;
         long remaining = count;
-        ByteBuffer buffer = ByteBuffer.allocate(GCM_CHUNK_SIZE);
+        ByteBuffer buffer = TRANSFER_BUFFER_POOL.get();
+        buffer.clear();
 
         while (remaining > 0 && transferred < count) {
             buffer.clear();
@@ -407,7 +421,8 @@ public class TranslogChunkManager {
     public long transferToChunks(ReadableByteChannel src, long position, long count) throws IOException {
         long transferred = 0;
         long remaining = count;
-        ByteBuffer buffer = ByteBuffer.allocate(GCM_CHUNK_SIZE);
+        ByteBuffer buffer = TRANSFER_BUFFER_POOL.get();
+        buffer.clear();
 
         while (remaining > 0 && transferred < count) {
             buffer.clear();
