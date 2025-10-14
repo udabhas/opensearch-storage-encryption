@@ -83,7 +83,7 @@ public class CryptoTranslog extends LocalTranslog {
         this.keyResolver = keyResolver;
         this.translogUUID = translogUUID;
 
-        logger.info("CryptoTranslog initialized for translog: {}", translogUUID);
+//        logger.info("CryptoTranslog initialized for translog: {}", translogUUID);
     }
 
     /**
@@ -148,7 +148,7 @@ public class CryptoTranslog extends LocalTranslog {
     private static ChannelFactory createCryptoChannelFactory(KeyResolver keyResolver, String translogUUID) throws IOException {
         try {
             CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyResolver, translogUUID);
-            logger.debug("CryptoChannelFactory initialized for translog: {}", translogUUID);
+//            logger.debug("CryptoChannelFactory initialized for translog: {}", translogUUID);
             return channelFactory;
         } catch (Exception e) {
             logger.error("Failed to initialize CryptoChannelFactory: {}", e.getMessage(), e);

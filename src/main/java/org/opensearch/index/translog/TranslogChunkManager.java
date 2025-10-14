@@ -104,11 +104,11 @@ public class TranslogChunkManager {
         String fileName = filePath.getFileName().toString();
         if (fileName.endsWith(".tlog")) {
             actualHeaderSize = calculateTranslogHeaderSize(translogUUID);
-            logger.debug("Calculated exact header size: {} bytes for {} with UUID: {}", actualHeaderSize, filePath, translogUUID);
+//            logger.debug("Calculated exact header size: {} bytes for {} with UUID: {}", actualHeaderSize, filePath, translogUUID);
         } else {
             // Non-translog files (.ckp) don't need encryption anyway
             actualHeaderSize = 0;
-            logger.debug("Non-translog file {}, header size: 0", filePath);
+//            logger.debug("Non-translog file {}, header size: 0", filePath);
         }
 
         return actualHeaderSize;
@@ -177,21 +177,21 @@ public class TranslogChunkManager {
      * Returns empty array if chunk doesn't exist or channel is write-only.
      */
     public byte[] readAndDecryptChunk(int chunkIndex) throws IOException {
-        System.out.println("[DEBUG] readAndDecryptChunk: chunkIndex=" + chunkIndex);
+//        System.out.println("[DEBUG] readAndDecryptChunk: chunkIndex=" + chunkIndex);
         try {
             // Calculate disk position for this chunk
             long diskPosition = determineHeaderSize() + ((long) chunkIndex * CHUNK_WITH_TAG_SIZE);
 
             // Check if chunk exists and we can read it
             if (!canReadChunk(diskPosition)) {
-                System.out.println("[DEBUG] Cannot read chunk at position " + diskPosition);
+//                System.out.println("[DEBUG] Cannot read chunk at position " + diskPosition);
                 return new byte[0]; // New chunk or write-only channel
             }
 
             // Read encrypted chunk + tag from disk
             ByteBuffer buffer = ByteBuffer.allocate(CHUNK_WITH_TAG_SIZE);
             int bytesRead = delegate.read(buffer, diskPosition);
-            System.out.println("[DEBUG] Read " + bytesRead + " bytes from disk at position " + diskPosition);
+//            System.out.println("[DEBUG] Read " + bytesRead + " bytes from disk at position " + diskPosition);
             if (bytesRead <= GCM_TAG_SIZE) {
                 return new byte[0]; // Empty or invalid chunk
             }
@@ -211,7 +211,7 @@ public class TranslogChunkManager {
 
             // Use existing GCM decryption with authentication
             byte[] decrypted = AesGcmCipherFactory.decryptWithTag(key, chunkIV, encryptedWithTag);
-            System.out.println("[DEBUG] Decrypted " + decrypted.length + " bytes from chunk " + chunkIndex);
+//            System.out.println("[DEBUG] Decrypted " + decrypted.length + " bytes from chunk " + chunkIndex);
             return decrypted;
 
         } catch (Exception e) {
@@ -293,7 +293,7 @@ public class TranslogChunkManager {
      * @throws IOException if writing fails
      */
     public int writeToChunks(ByteBuffer src, long position) throws IOException {
-        System.out.println("[DEBUG] writeToChunks: src.remaining=" + src.remaining() + ", position=" + position);
+//        System.out.println("[DEBUG] writeToChunks: src.remaining=" + src.remaining() + ", position=" + position);
         if (src.remaining() == 0) {
             return 0;
         }
@@ -303,7 +303,7 @@ public class TranslogChunkManager {
         // Header writes remain unencrypted - write at exact position
         if (position < headerSize) {
             int written = delegate.write(src, position);
-            System.out.println("[DEBUG] Header write: " + written + " bytes at position " + position);
+//            System.out.println("[DEBUG] Header write: " + written + " bytes at position " + position);
             return written;
         }
 
@@ -314,13 +314,13 @@ public class TranslogChunkManager {
         int totalWritten = 0;
 
         while (src.hasRemaining()) {
-            System.out.println("[DEBUG] Loop: currentCipher=" + (currentCipher != null ? "active" : "null") + 
-                ", currentBlockBytesWritten=" + currentBlockBytesWritten + ", BLOCK_SIZE=" + BLOCK_SIZE);
+//            System.out.println("[DEBUG] Loop: currentCipher=" + (currentCipher != null ? "active" : "null") +
+//                ", currentBlockBytesWritten=" + currentBlockBytesWritten + ", BLOCK_SIZE=" + BLOCK_SIZE);
             // Initialize cipher on first write or when block is full
             if (currentCipher == null || currentBlockBytesWritten >= BLOCK_SIZE) {
                 if (currentCipher != null) {
                     // Block is full - finalize and write tag
-                    System.out.println("[DEBUG] Block full, finalizing...");
+//                    System.out.println("[DEBUG] Block full, finalizing...");
                     finalizeCurrentBlock();
                 }
                 // Start new block
@@ -329,7 +329,7 @@ public class TranslogChunkManager {
 
             // Write what fits in current block
             int toWrite = Math.min(src.remaining(), BLOCK_SIZE - currentBlockBytesWritten);
-            System.out.println("[DEBUG] Writing " + toWrite + " bytes to current block");
+//            System.out.println("[DEBUG] Writing " + toWrite + " bytes to current block");
 
             byte[] plainData = new byte[toWrite];
             src.get(plainData);
@@ -341,7 +341,7 @@ public class TranslogChunkManager {
                     plainData,
                     toWrite
             );
-            System.out.println("[DEBUG] Encrypted " + encrypted.length + " bytes");
+//            System.out.println("[DEBUG] Encrypted " + encrypted.length + " bytes");
 
             // Write encrypted data immediately at tracked position
             int written = delegate.write(ByteBuffer.wrap(encrypted), fileWritePosition);
@@ -349,10 +349,10 @@ public class TranslogChunkManager {
 
             currentBlockBytesWritten += toWrite;
             totalWritten += toWrite;
-            System.out.println("[DEBUG] Total written so far: " + totalWritten + ", currentBlockBytesWritten=" + currentBlockBytesWritten);
+//            System.out.println("[DEBUG] Total written so far: " + totalWritten + ", currentBlockBytesWritten=" + currentBlockBytesWritten);
         }
 
-        System.out.println("[DEBUG] writeToChunks completed: totalWritten=" + totalWritten);
+//        System.out.println("[DEBUG] writeToChunks completed: totalWritten=" + totalWritten);
         return totalWritten;
     }
 
@@ -436,7 +436,7 @@ public class TranslogChunkManager {
      * Initialize GCM cipher for a new block
      */
     private void initializeBlockCipher(int blockNumber) throws IOException {
-        System.out.println("[DEBUG] Initializing cipher for block " + blockNumber + " at file " + filePath);
+//        System.out.println("[DEBUG] Initializing cipher for block " + blockNumber + " at file " + filePath);
         Key key = keyResolver.getDataKey();
         byte[] baseIV = keyResolver.getIvBytes();
         long offset = (long) blockNumber * BLOCK_SIZE;
@@ -444,7 +444,7 @@ public class TranslogChunkManager {
         this.currentCipher = AesGcmCipherFactory.initializeGCMCipher(key, baseIV, offset);
         this.currentBlockNumber = blockNumber;
         this.currentBlockBytesWritten = 0;
-        System.out.println("[DEBUG] Cipher initialized for block " + blockNumber + ", offset=" + offset);
+//        System.out.println("[DEBUG] Cipher initialized for block " + blockNumber + ", offset=" + offset);
     }
 
     /**
@@ -452,29 +452,29 @@ public class TranslogChunkManager {
      */
     private void finalizeCurrentBlock() throws IOException {
         if (currentCipher == null) {
-            System.out.println("[DEBUG] finalizeCurrentBlock called but currentCipher is null");
+//            System.out.println("[DEBUG] finalizeCurrentBlock called but currentCipher is null");
             return;
         }
-        System.out.println("[DEBUG] Finalizing block " + currentBlockNumber + " with " + currentBlockBytesWritten + " bytes written");
+//        System.out.println("[DEBUG] Finalizing block " + currentBlockNumber + " with " + currentBlockBytesWritten + " bytes written");
         byte[] tag = AesGcmCipherFactory.finalizeAndGetTag(currentCipher);
         int written = delegate.write(ByteBuffer.wrap(tag), fileWritePosition);
         fileWritePosition += written;
-        System.out.println("[DEBUG] Block " + currentBlockNumber + " finalized and tag written at position " + (fileWritePosition - written));
+//        System.out.println("[DEBUG] Block " + currentBlockNumber + " finalized and tag written at position " + (fileWritePosition - written));
     }
 
     /**
      * Close and finalize last block
      */
     public void close() throws IOException {
-        System.out.println("[DEBUG] Closing TranslogChunkManager for file " + filePath + 
-            ", currentCipher=" + (currentCipher != null ? "active" : "null") + 
-            ", bytesWritten=" + currentBlockBytesWritten);
+//        System.out.println("[DEBUG] Closing TranslogChunkManager for file " + filePath +
+//            ", currentCipher=" + (currentCipher != null ? "active" : "null") +
+//            ", bytesWritten=" + currentBlockBytesWritten);
         if (currentCipher != null) {
             finalizeCurrentBlock();
             currentCipher = null;
-            System.out.println("[DEBUG] Last block finalized on close");
+//            System.out.println("[DEBUG] Last block finalized on close");
         } else {
-            System.out.println("[DEBUG] No active cipher to finalize on close");
+//            System.out.println("[DEBUG] No active cipher to finalize on close");
         }
     }
 }
