@@ -67,7 +67,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         // Frame tracking
         // OpenSSL native cipher context
         private MemorySegment currentCipher;
-        private Arena currentArena;
+//        private Arena currentArena;
         // Java Cipher fallback (commented out)
         // private Cipher currentCipher;
         private int currentFrameNumber = 0;
@@ -161,7 +161,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 int chunkSize = (int) Math.min(remaining, (frameSizeMask + 1) - (streamOffset & frameSizeMask));
 
                 try {
-                    byte[] encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, slice(data, dataOffset, chunkSize), currentArena);
+                    byte[] encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, slice(data, dataOffset, chunkSize));
                     // Java Cipher fallback (commented out)
                     // byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
                     //                                                     slice(data, dataOffset, chunkSize), chunkSize);
@@ -238,14 +238,14 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 directoryKey, footer.getMessageId(), frameNumber, offsetWithinFrame, filePathString
             );
             
-            if (currentArena != null) {
-                currentArena.close();
-            }
-            currentArena = Arena.ofConfined();
+//            if (currentArena != null) {
+//                currentArena.close();
+//            }
+//            currentArena = Arena.ofConfined();
             
             try {
                 this.currentCipher = OpenSslNativeCipher.initGCMCipher(
-                    fileKey.getEncoded(), frameIV, offsetWithinFrame, currentArena
+                    fileKey.getEncoded(), frameIV, offsetWithinFrame
                 );
             } catch (Throwable t) {
                 throw new RuntimeException("Failed to initialize OpenSSL GCM cipher", t);
@@ -265,14 +265,14 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             if (currentCipher == null) return;
             
             try {
-                byte[] tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher, currentArena);
+                byte[] tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher);
                 footer.addGcmTag(tag);
                 currentCipher = null;
                 
-                if (currentArena != null) {
-                    currentArena.close();
-                    currentArena = null;
-                }
+//                if (currentArena != null) {
+//                    currentArena.close();
+//                    currentArena = null;
+//                }
             } catch (Throwable t) {
                 throw new RuntimeException("Failed to finalize frame " + currentFrameNumber, t);
             }
