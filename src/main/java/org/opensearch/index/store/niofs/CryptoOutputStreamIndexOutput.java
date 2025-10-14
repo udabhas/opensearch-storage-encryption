@@ -62,6 +62,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private final EncryptionAlgorithm algorithm;
 
         // Frame tracking
+        // TODO: CurrentCipher to be MemorySegment type for supporting openssl native cipher. Comment out current Cipher
         private Cipher currentCipher;
         private int currentFrameNumber = 0;
         private long currentFrameOffset = 0;
@@ -156,6 +157,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 try {
                     byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
                                                                         slice(data, dataOffset, chunkSize), chunkSize);
+                    // TODO: comment out this the above line and replace with OpensslNativeCipher.encryptUpdate. Both must be equivalent in fucntion
                     out.write(encrypted);
 
                     streamOffset += chunkSize;
@@ -229,6 +231,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 algorithm, provider, fileKey, directoryKey, footer.getMessageId(),
                 frameNumber, offsetWithinFrame, filePathString
             );
+            // todo; make this to use OpensslNativeCipher.initGCMCipher()  and comment out AesGcmCipherFactory.initializeFrameCipher line here
         }
 
         /**
@@ -236,6 +239,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
          */
         private void finalizeCurrentFrame() throws IOException {
             AesGcmCipherFactory.finalizeFrameAndWriteTag(currentCipher, footer, out, currentFrameNumber);
+            // todo: use OpenSSLNativeCipher.finalizeAndGetTag() method and comment out above line. Both methods should be quivalent
         }
     }
 }
