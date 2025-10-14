@@ -328,24 +328,28 @@ public final class OpenSslNativeCipher {
     }
 
     /**
-     * Finalizes GCM encryption and returns the authentication tag.
+     * Finalizes GCM encryption, returns the authentication tag, and frees the context.
      */
     public static byte[] finalizeAndGetTag(MemorySegment ctx, Arena arena) throws Throwable {
-        MemorySegment finalOut = arena.allocate(AES_BLOCK_SIZE);
-        MemorySegment finalLen = arena.allocate(ValueLayout.JAVA_INT);
-        
-        int rc = (int) EVP_EncryptFinal_ex.invoke(ctx, finalOut, finalLen);
-        if (rc != 1) {
-            throw new OpenSslException("EVP_EncryptFinal_ex failed");
+        try {
+            MemorySegment finalOut = arena.allocate(AES_BLOCK_SIZE);
+            MemorySegment finalLen = arena.allocate(ValueLayout.JAVA_INT);
+            
+            int rc = (int) EVP_EncryptFinal_ex.invoke(ctx, finalOut, finalLen);
+            if (rc != 1) {
+                throw new OpenSslException("EVP_EncryptFinal_ex failed");
+            }
+            
+            MemorySegment tagSeg = arena.allocate(16);
+            rc = (int) EVP_CIPHER_CTX_ctrl.invoke(ctx, EVP_CTRL_GCM_GET_TAG, 16, tagSeg);
+            if (rc != 1) {
+                throw new OpenSslException("Failed to get GCM tag");
+            }
+            
+            return tagSeg.toArray(ValueLayout.JAVA_BYTE);
+        } finally {
+            EVP_CIPHER_CTX_free.invoke(ctx);
         }
-        
-        MemorySegment tagSeg = arena.allocate(16);
-        rc = (int) EVP_CIPHER_CTX_ctrl.invoke(ctx, EVP_CTRL_GCM_GET_TAG, 16, tagSeg);
-        if (rc != 1) {
-            throw new OpenSslException("Failed to get GCM tag");
-        }
-        
-        return tagSeg.toArray(ValueLayout.JAVA_BYTE);
     }
 
     /**

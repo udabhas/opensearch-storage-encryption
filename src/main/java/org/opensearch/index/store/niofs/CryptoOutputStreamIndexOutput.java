@@ -15,12 +15,15 @@ import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
 import org.opensearch.index.store.cipher.EncryptionCache;
+import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
 
 import javax.crypto.Cipher;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.security.Key;
 import java.security.Provider;
 import java.util.Arrays;
@@ -62,8 +65,11 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private final EncryptionAlgorithm algorithm;
 
         // Frame tracking
-        // TODO: CurrentCipher to be MemorySegment type for supporting openssl native cipher. Comment out current Cipher
-        private Cipher currentCipher;
+        // OpenSSL native cipher context
+        private MemorySegment currentCipher;
+        private Arena currentArena;
+        // Java Cipher fallback (commented out)
+        // private Cipher currentCipher;
         private int currentFrameNumber = 0;
         private long currentFrameOffset = 0;
         private int bufferPosition = 0;
@@ -155,9 +161,10 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 int chunkSize = (int) Math.min(remaining, (frameSizeMask + 1) - (streamOffset & frameSizeMask));
 
                 try {
-                    byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
-                                                                        slice(data, dataOffset, chunkSize), chunkSize);
-                    // TODO: comment out this the above line and replace with OpensslNativeCipher.encryptUpdate. Both must be equivalent in fucntion
+                    byte[] encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, slice(data, dataOffset, chunkSize), currentArena);
+                    // Java Cipher fallback (commented out)
+                    // byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
+                    //                                                     slice(data, dataOffset, chunkSize), chunkSize);
                     out.write(encrypted);
 
                     streamOffset += chunkSize;
@@ -193,7 +200,6 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
 
                 // Set final frame count in footer
                 footer.setFrameCount(totalFrames);
-//                footer.
 
                 // Write footer with directory key for authentication
                 out.write( footer.serialize(this.filePath, this.directoryKey));
@@ -209,6 +215,10 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 exception = e;
             } finally {
                 isClosed = true;
+                if (currentArena != null) {
+                    currentArena.close();
+                    currentArena = null;
+                }
             }
 
             if (exception != null)
@@ -227,19 +237,47 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private void initializeFrameCipher(int frameNumber, long offsetWithinFrame) {
             this.currentFrameNumber = frameNumber;
             this.currentFrameOffset = offsetWithinFrame;
-            this.currentCipher = AesGcmCipherFactory.initializeFrameCipher(
-                algorithm, provider, fileKey, directoryKey, footer.getMessageId(),
-                frameNumber, offsetWithinFrame, filePathString
+            
+            byte[] frameIV = AesCipherFactory.computeFrameIV(
+                directoryKey, footer.getMessageId(), frameNumber, offsetWithinFrame, filePathString
             );
-            // todo; make this to use OpensslNativeCipher.initGCMCipher()  and comment out AesGcmCipherFactory.initializeFrameCipher line here
+            
+            if (currentArena != null) {
+                currentArena.close();
+            }
+            currentArena = Arena.ofConfined();
+            
+            try {
+                this.currentCipher = OpenSslNativeCipher.initGCMCipher(
+                    fileKey.getEncoded(), frameIV, offsetWithinFrame, currentArena
+                );
+            } catch (Throwable t) {
+                throw new RuntimeException("Failed to initialize OpenSSL GCM cipher", t);
+            }
+            
+            // Java Cipher fallback (commented out)
+            // this.currentCipher = AesGcmCipherFactory.initializeFrameCipher(
+            //     algorithm, provider, fileKey, directoryKey, footer.getMessageId(),
+            //     frameNumber, offsetWithinFrame, filePathString
+            // );
         }
 
         /**
          * Finalize current frame and collect GCM tag
          */
-        private void finalizeCurrentFrame() throws IOException {
-            AesGcmCipherFactory.finalizeFrameAndWriteTag(currentCipher, footer, out, currentFrameNumber);
-            // todo: use OpenSSLNativeCipher.finalizeAndGetTag() method and comment out above line. Both methods should be quivalent
+        private void finalizeCurrentFrame() {
+            if (currentCipher == null) return;
+            
+            try {
+                byte[] tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher, currentArena);
+                footer.addGcmTag(tag);
+                currentCipher = null;
+            } catch (Throwable t) {
+                throw new RuntimeException("Failed to finalize frame " + currentFrameNumber, t);
+            }
+            
+            // Java Cipher fallback (commented out)
+            // AesGcmCipherFactory.finalizeFrameAndWriteTag(currentCipher, footer, out, currentFrameNumber);
         }
     }
 }
