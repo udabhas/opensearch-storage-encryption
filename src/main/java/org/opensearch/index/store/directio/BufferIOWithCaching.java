@@ -15,10 +15,7 @@ import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
-import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
-
-import javax.crypto.Cipher;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -30,9 +27,9 @@ import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheKey;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.cipher.AesCipherFactory;
-import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
 import org.opensearch.index.store.cipher.EncryptionCache;
+import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
@@ -41,7 +38,7 @@ import org.opensearch.index.store.pool.Pool;
 
 /**
  * An IndexOutput implementation that encrypts data before writing using native
- * OpenSSL AES-CTR.
+ * OpenSSL AES-GCM.
  *
  * @opensearch.internal
  */
@@ -99,7 +96,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         private final Provider provider;
 
         // Frame tracking
-        private Cipher currentCipher;
+//        private Cipher currentCipher;
+        private MemorySegment currentCipher;
         private int currentFrameNumber = 0;
         private long currentFrameOffset = 0;
         private int bufferPosition = 0;
@@ -275,8 +273,13 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 int chunkSize = (int) Math.min(remaining, frameEnd - currentOffset);
 
                 try {
-                    byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
-                                                                        slice(data, dataOffset, chunkSize), chunkSize);
+                    // Use OpenSSL native cipher for encryption
+                    byte[] encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher,
+                                                                        slice(data, dataOffset, chunkSize));
+
+//                    byte[] encrypted = AesGcmCipherFactory.encryptWithoutTag(currentFrameOffset, currentCipher,
+//                            slice(data, dataOffset, chunkSize), chunkSize);
+
                     out.write(encrypted);
 
                     currentOffset += chunkSize;
@@ -324,6 +327,10 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 exception = e;
             } finally {
                 isClosed = true;
+                // Clean up any remaining native resources
+                if (currentCipher != null) {
+                    currentCipher = null;
+                }
             }
 
             if (exception != null)
@@ -353,14 +360,48 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         private void initializeFrameCipher(int frameNumber, long offsetWithinFrame, Path filePath) {
             this.currentFrameNumber = frameNumber;
             this.currentFrameOffset = offsetWithinFrame;
-            this.currentCipher = AesGcmCipherFactory.initializeFrameCipher(
-                algorithm, provider, fileKey, directoryKey, footer.getMessageId(),
-                frameNumber, offsetWithinFrame, filePath.toAbsolutePath().toString()
-            );
+            
+            try {
+                // Compute frame-specific IV
+                byte[] frameIV = AesCipherFactory.computeFrameIV(
+                    directoryKey,
+                    footer.getMessageId(),
+                    frameNumber,
+                    offsetWithinFrame,
+                    filePath.toAbsolutePath().toString()
+                );
+                
+                // Initialize new OpenSSL cipher context
+                currentCipher = OpenSslNativeCipher.initGCMCipher(
+                    fileKey.getEncoded(),
+                    frameIV,
+                    offsetWithinFrame
+                );
+
+                // this.currentCipher = AesGcmCipherFactory.initializeFrameCipher(algorithm, provider, fileKey,
+                // directoryKey, footer.getMessageId(),frameNumber, offsetWithinFrame, filePath.toAbsolutePath().toString());
+                
+            } catch (Throwable t) {
+                throw new RuntimeException("Failed to initialize frame cipher", t);
+            }
         }
 
         private void finalizeCurrentFrame() throws IOException {
-            AesGcmCipherFactory.finalizeFrameAndWriteTag(currentCipher, footer, out, currentFrameNumber);
+            if (currentCipher == null) return;
+            
+            try {
+                // Finalize cipher and get authentication tag
+                byte[] tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher);
+                // AesGcmCipherFactory.finalizeFrameAndWriteTag(currentCipher, footer, out, currentFrameNumber);
+
+                // Store tag in footer
+                footer.addGcmTag(tag);
+                
+                // Clear the context reference (already freed by finalizeAndGetTag)
+                currentCipher = null;
+            } catch (Throwable t) {
+                throw new IOException("Failed to finalize frame " + currentFrameNumber, t);
+            }
         }
     }
 }
