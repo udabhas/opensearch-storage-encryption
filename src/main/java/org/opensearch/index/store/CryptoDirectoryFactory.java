@@ -135,6 +135,14 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
 
     MasterKeyProvider getKeyProvider(IndexSettings indexSettings) {
         final String KEY_PROVIDER_TYPE = indexSettings.getValue(INDEX_KMS_TYPE_SETTING);
+
+        // Handle dummy type for testing
+        if (KeyProviderType.DUMMY.getValue().equals(KEY_PROVIDER_TYPE)) {
+            LOGGER.debug("Using dummy key provider for testing");
+            return DummyKeyProvider.create();
+        }
+
+        // Normal path for production key providers
         final Settings settings = Settings.builder().put(indexSettings.getNodeSettings(), false).build();
         CryptoMetadata cryptoMetadata = new CryptoMetadata("", KEY_PROVIDER_TYPE, settings);
         MasterKeyProvider keyProvider;
