@@ -80,7 +80,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         byte[] iv,
         Pool<RefCountedMemorySegment> memorySegmentPool,
         BlockCache<RefCountedMemorySegment> blockCache,
-        provider
+        Provider provider
     )
         throws IOException {
         super(
@@ -121,7 +121,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             byte[] iv,
             Pool<RefCountedMemorySegment> memorySegmentPool,
             BlockCache<RefCountedMemorySegment> blockCache,
-            provider
+            Provider provider
         ) {
             super(os);
             this.path = path;

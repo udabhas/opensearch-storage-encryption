@@ -274,14 +274,14 @@ public final class OpenSslNativeCipher {
 
                 int skipBytes = (int) (filePosition % AES_BLOCK_SIZE);
                 if (skipBytes > 0) {
-                    MemorySegment dummyIn = arena.allocateArray(ValueLayout.JAVA_BYTE, skipBytes);
-                    MemorySegment dummyOut = arena.allocate(skipBytes + AES_BLOCK_SIZE);
+                    MemorySegment dummyIn = arena.allocateArray(ValueLayout.JAVA_BYTE, new byte[skipBytes]);
+                    MemorySegment dummyOut = arena.allocate(skipBytes + AES_BLOCK_SIZE, 1);
                     MemorySegment dummyLen = arena.allocate(ValueLayout.JAVA_INT);
                     EVP_EncryptUpdate.invoke(ctx, dummyOut, dummyLen, dummyIn, skipBytes);
                 }
 
-                MemorySegment inSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, input);
-                MemorySegment outSeg = arena.allocate(input.length);
+                MemorySegment inSeg = arena.allocateArray(ValueLayout.JAVA_BYTE, input);
+                MemorySegment outSeg = arena.allocate(input.length, 1);
                 MemorySegment outLen = arena.allocate(ValueLayout.JAVA_INT);
 
                 rc = (int) EVP_EncryptUpdate.invoke(ctx, outSeg, outLen, inSeg, input.length);
@@ -323,8 +323,8 @@ public final class OpenSslNativeCipher {
         System.arraycopy(iv, 0, gcmIV, 0, 12);
 
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment keySeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, key);
-            MemorySegment ivSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, gcmIV);
+            MemorySegment keySeg = arena.allocateArray(ValueLayout.JAVA_BYTE, key);
+            MemorySegment ivSeg = arena.allocateArray(ValueLayout.JAVA_BYTE, gcmIV);
 
             int rc = (int) EVP_EncryptInit_ex.invoke(ctx, cipher, MemorySegment.NULL, keySeg, ivSeg);
             if (rc != 1) {
@@ -341,8 +341,8 @@ public final class OpenSslNativeCipher {
      */
     public static byte[] encryptUpdate(MemorySegment ctx, byte[] input) throws Throwable {
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment inSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, input);
-            MemorySegment outSeg = arena.allocate(input.length);
+            MemorySegment inSeg = arena.allocateArray(ValueLayout.JAVA_BYTE, input);
+            MemorySegment outSeg = arena.allocate(input.length, 1);
             MemorySegment outLen = arena.allocate(ValueLayout.JAVA_INT);
 
             int rc = (int) EVP_EncryptUpdate.invoke(ctx, outSeg, outLen, inSeg, input.length);
@@ -359,7 +359,7 @@ public final class OpenSslNativeCipher {
      */
     public static byte[] finalizeAndGetTag(MemorySegment ctx) throws Throwable {
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment finalOut = arena.allocate(AES_BLOCK_SIZE);
+            MemorySegment finalOut = arena.allocate(AES_BLOCK_SIZE, 1);
             MemorySegment finalLen = arena.allocate(ValueLayout.JAVA_INT);
 
             int rc = (int) EVP_EncryptFinal_ex.invoke(ctx, finalOut, finalLen);
@@ -367,7 +367,7 @@ public final class OpenSslNativeCipher {
                 throw new OpenSslException("EVP_EncryptFinal_ex failed");
             }
 
-            MemorySegment tagSeg = arena.allocate(16);
+            MemorySegment tagSeg = arena.allocate(16, 1);
             rc = (int) EVP_CIPHER_CTX_ctrl.invoke(ctx, EVP_CTRL_GCM_GET_TAG, 16, tagSeg);
             if (rc != 1) {
                 throw new OpenSslException("Failed to get GCM tag");
@@ -408,8 +408,8 @@ public final class OpenSslNativeCipher {
                 byte[] gcmIV = new byte[12];
                 System.arraycopy(iv, 0, gcmIV, 0, 12);
 
-                MemorySegment keySeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, key);
-                MemorySegment ivSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, gcmIV);
+                MemorySegment keySeg = arena.allocateArray(ValueLayout.JAVA_BYTE, key);
+                MemorySegment ivSeg = arena.allocateArray(ValueLayout.JAVA_BYTE, gcmIV);
 
                 int rc = (int) EVP_DecryptInit_ex.invoke(ctx, cipher, MemorySegment.NULL, keySeg, ivSeg);
                 if (rc != 1) {
@@ -417,8 +417,8 @@ public final class OpenSslNativeCipher {
                 }
 
                 int dataLen = ciphertext.length - 16;
-                MemorySegment inSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, ciphertext);
-                MemorySegment outSeg = arena.allocate(dataLen);
+                MemorySegment inSeg = arena.allocateArray(ValueLayout.JAVA_BYTE, ciphertext);
+                MemorySegment outSeg = arena.allocate(dataLen, 1);
                 MemorySegment outLen = arena.allocate(ValueLayout.JAVA_INT);
 
                 rc = (int) EVP_DecryptUpdate.invoke(ctx, outSeg, outLen, inSeg, dataLen);
@@ -428,14 +428,14 @@ public final class OpenSslNativeCipher {
 
                 byte[] tag = new byte[16];
                 System.arraycopy(ciphertext, dataLen, tag, 0, 16);
-                MemorySegment tagSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, tag);
+                MemorySegment tagSeg = arena.allocateArray(ValueLayout.JAVA_BYTE, tag);
 
                 rc = (int) EVP_CIPHER_CTX_ctrl.invoke(ctx, EVP_CTRL_GCM_SET_TAG, 16, tagSeg);
                 if (rc != 1) {
                     throw new OpenSslException("Failed to set GCM tag");
                 }
 
-                MemorySegment finalOut = arena.allocate(AES_BLOCK_SIZE);
+                MemorySegment finalOut = arena.allocate(AES_BLOCK_SIZE, 1);
                 MemorySegment finalLen = arena.allocate(ValueLayout.JAVA_INT);
 
                 rc = (int) EVP_DecryptFinal_ex.invoke(ctx, finalOut, finalLen);
