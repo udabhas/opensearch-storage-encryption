@@ -101,6 +101,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         private final Pool<RefCountedMemorySegment> memorySegmentPool;
         private final BlockCache<RefCountedMemorySegment> blockCache;
         private final long frameSize;
+        private final long frameSizeMask;
+
         private final EncryptionAlgorithm algorithm;
         private final Provider provider;
 
@@ -131,6 +133,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.provider = provider;
 
             this.frameSize = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE;
+            this.frameSizeMask = frameSize - 1;
+
             this.algorithm = EncryptionAlgorithm.fromId((short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
 
             this.footer = EncryptionFooter.generateNew(frameSize, (short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
@@ -265,14 +269,16 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             long currentOffset = absoluteOffset;
 
             while (remaining > 0) {
-                int frameNumber = (int) (currentOffset / frameSize);
+                int frameNumber = (int) (currentOffset >>> EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER);
+                long frameEnd = (long) (frameNumber + 1) << EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER;
+
+                initializeFrameCipher(frameNumber, currentOffset & frameSizeMask, filePath);
+
                 if (frameNumber != currentFrameNumber) {
                     finalizeCurrentFrame();
-                    totalFrames = Math.max(totalFrames, frameNumber + 1);
                     initializeFrameCipher(frameNumber, currentOffset % frameSize, filePath);
                 }
 
-                long frameEnd = (frameNumber + 1) * frameSize;
                 int chunkSize = (int) Math.min(remaining, frameEnd - currentOffset);
 
                 try {
@@ -391,6 +397,9 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
                 // Store tag in footer
                 footer.addGcmTag(tag);
+
+                // Increment total frames since we just finalized one
+                totalFrames++;
 
                 // Clear the context reference (already freed by finalizeAndGetTag)
                 currentCipher = null;
