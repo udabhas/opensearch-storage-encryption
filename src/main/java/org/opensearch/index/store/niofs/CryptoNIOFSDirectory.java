@@ -122,28 +122,28 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             return super.fileLength(name);
         }
 
-        // Fast path: check cache first
-        String filePath = dirPathString + "/" + name;
-        EncryptionFooter cachedFooter = EncryptionCache.getInstance().getFooter(filePath);
-
+        Path path = dirPath.resolve(name);
         long fileSize = super.fileLength(name);
-
-        if (cachedFooter != null) {
-            return fileSize - cachedFooter.getFooterLength();
-        }
 
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             return fileSize;
         }
 
-        // Slow path: read footer from disk
-        Path path = dirPath.resolve(name);
-        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
-            ByteBuffer buffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            channel.read(buffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        // check cache first
+        String filePath = dirPathString + "/" + name;
+        EncryptionFooter cachedFooter = EncryptionCache.getInstance().getFooter(filePath);
+        if (cachedFooter != null) {
+            return fileSize - cachedFooter.getFooterLength();
+        }
 
-            int footerLength = EncryptionFooter.calculateFooterLength(buffer.array());
-            return Math.max(fileSize - footerLength, fileSize);
+        // read footer from disk with OSEF validation
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            try {
+                EncryptionFooter footer = EncryptionFooter.readFromChannel(path, channel, keyResolver.getDataKey().getEncoded());
+                return fileSize - footer.getFooterLength();
+            } catch (EncryptionFooter.NotOSEFFileException e) {
+                return fileSize;
+            }
         }
     }
 

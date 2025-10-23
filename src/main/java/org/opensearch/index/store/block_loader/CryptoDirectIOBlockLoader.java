@@ -172,15 +172,9 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
             // Check if this is an OSEF file
             if (!isValidOSEFFile(minFooterBytes)) {
-                // Not an OSEF file - fall back to legacy decryption
-                throw new IOException("Not an OSEF file, using legacy IV");
+                // Not an OSEF file
+                throw new IOException("Not an OSEF file.");
             }
-
-            int footerLength = EncryptionFooter.calculateFooterLength(minFooterBytes);
-
-            // Read complete footer
-            ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
-            channel.read(footerBuffer, fileSize - footerLength);
 
             EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath, channel, keyResolver.getDataKey().getEncoded());
             return footer.getMessageId();
