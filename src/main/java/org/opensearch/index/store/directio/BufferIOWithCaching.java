@@ -271,9 +271,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             while (remaining > 0) {
                 int frameNumber = (int) (currentOffset >>> EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER);
                 long frameEnd = (long) (frameNumber + 1) << EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER;
-
-                initializeFrameCipher(frameNumber, currentOffset & frameSizeMask, filePath);
-
+                
                 if (frameNumber != currentFrameNumber) {
                     finalizeCurrentFrame();
                     initializeFrameCipher(frameNumber, currentOffset % frameSize, filePath);
