@@ -167,7 +167,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         // Calculate frame boundaries using bit operations (frameSize is power of 2)
         int frameNumber = (int)(position >>> frameSizePower);
         long offsetWithinFrame = position & ((1L << frameSizePower) - 1);
-        long frameEnd = offsetWithinFrame + (1L << frameSizePower);
+        long frameEnd = ((long) frameNumber + 1) << frameSizePower;
 
         // Limit read to not cross frame boundary
         int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);
