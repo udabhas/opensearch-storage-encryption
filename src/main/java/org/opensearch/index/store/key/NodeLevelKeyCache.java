@@ -2,7 +2,7 @@
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
-package org.opensearch.index.store.iv;
+package org.opensearch.index.store.key;
 
 import java.security.Key;
 import java.util.Objects;
@@ -43,17 +43,9 @@ public class NodeLevelKeyCache {
      */
     static class CacheKey {
         final String indexUuid;
-        final DefaultKeyIvResolver resolver;
 
-        CacheKey(String indexUuid, DefaultKeyIvResolver resolver) {
-            this.indexUuid = Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-            this.resolver = Objects.requireNonNull(resolver, "resolver cannot be null");
-        }
-
-        // For eviction - no resolver needed
         CacheKey(String indexUuid) {
             this.indexUuid = Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-            this.resolver = null;
         }
 
         @Override
@@ -165,11 +157,12 @@ public class NodeLevelKeyCache {
                 .build(new CacheLoader<CacheKey, Key>() {
                     @Override
                     public Key load(CacheKey key) throws Exception {
-                        // Use the resolver provided in the cache key - eliminates registry lookup race condition
-                        if (key.resolver == null) {
-                            throw new IllegalStateException("Resolver not provided for index: " + key.indexUuid);
+                        // Get resolver from registry
+                        KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid);
+                        if (resolver == null) {
+                            throw new IllegalStateException("No resolver registered for index: " + key.indexUuid);
                         }
-                        return key.resolver.loadKeyFromMasterKeyProvider();
+                        return ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
                     }
                     // No reload method needed since refresh is disabled
                 });
@@ -182,28 +175,25 @@ public class NodeLevelKeyCache {
                 .build(new CacheLoader<CacheKey, Key>() {
                     @Override
                     public Key load(CacheKey key) throws Exception {
-                        // Use the resolver provided in the cache key - eliminates registry lookup race condition
-                        if (key.resolver == null) {
-                            throw new IllegalStateException("Resolver not provided for index: " + key.indexUuid);
+                        // Get resolver from registry
+                        KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid);
+                        if (resolver == null) {
+                            throw new IllegalStateException("No resolver registered for index: " + key.indexUuid);
                         }
-                        return key.resolver.loadKeyFromMasterKeyProvider();
+                        return ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
                     }
 
                     @Override
                     public Key reload(CacheKey key, Key oldValue) throws Exception {
                         try {
-                            // Use the resolver provided in the cache key for refresh
-                            if (key.resolver == null) {
-                                // Fallback: try to get from registry if not provided (shouldn't happen)
-                                KeyIvResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid);
-                                if (resolver == null) {
-                                    // Index might have been deleted, keep using old key
-                                    return oldValue;
-                                }
-                                return ((DefaultKeyIvResolver) resolver).loadKeyFromMasterKeyProvider();
+                            // Get resolver from registry
+                            KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid);
+                            if (resolver == null) {
+                                // Index might have been deleted, keep using old key
+                                return oldValue;
                             }
 
-                            Key newKey = key.resolver.loadKeyFromMasterKeyProvider();
+                            Key newKey = ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
                             return newKey;
                         } catch (Exception e) {
                             // If reload fails, keep using the old key
@@ -218,16 +208,14 @@ public class NodeLevelKeyCache {
      * Gets a key from the cache, loading it if necessary.
      * 
      * @param indexUuid the index UUID
-     * @param resolver the resolver to use for loading the key (eliminates registry lookup race condition)
      * @return the encryption key
      * @throws Exception if key loading fails
      */
-    public Key get(String indexUuid, DefaultKeyIvResolver resolver) throws Exception {
+    public Key get(String indexUuid) throws Exception {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-        Objects.requireNonNull(resolver, "resolver cannot be null");
 
         try {
-            return keyCache.get(new CacheKey(indexUuid, resolver));
+            return keyCache.get(new CacheKey(indexUuid));
         } catch (CompletionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) {
