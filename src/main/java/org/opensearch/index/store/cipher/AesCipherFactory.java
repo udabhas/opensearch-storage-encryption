@@ -146,7 +146,7 @@ public class AesCipherFactory {
      * @param filePath
      * @return frame-specific IV for encryption/decryption
      */
-    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, int frameNumber, long offsetWithinFrame, String filePath) {
+    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, long frameNumber, long offsetWithinFrame, String filePath) {
         if (messageId.length != 16) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }
@@ -193,7 +193,7 @@ public class AesCipherFactory {
         return frameIV;
     }
 
-    private static byte[] deriveAndStoreInFooter(byte[] directoryKey, byte[] messageId, int frameNumber,
+    private static byte[] deriveAndStoreInFooter(byte[] directoryKey, byte[] messageId, long frameNumber,
                                                   org.opensearch.index.store.footer.EncryptionFooter footer) {
         String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
         byte[] frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);

@@ -30,7 +30,7 @@ public class EncryptionCache {
         return INSTANCE;
     }
 
-    public static String getCacheKey(String filePath, int frameNumber) {
+    public static String getCacheKey(String filePath, long frameNumber) {
         return filePath + SEPARATOR + frameNumber;
     }
 
@@ -42,11 +42,11 @@ public class EncryptionCache {
         footerCache.putIfAbsent(filePath, footer);
     }
 
-    public byte[] getFrameIv(String filePath, int frameNumber) {
+    public byte[] getFrameIv(String filePath, long frameNumber) {
         return frameIvCache.get(getCacheKey(filePath, frameNumber));
     }
 
-    public void putFrameIv(String filePath, int frameNumber, byte[] iv) {
+    public void putFrameIv(String filePath, long frameNumber, byte[] iv) {
         frameIvCache.putIfAbsent(getCacheKey(filePath, frameNumber), iv);
     }
 
