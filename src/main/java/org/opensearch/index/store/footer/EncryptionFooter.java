@@ -53,7 +53,7 @@ public class EncryptionFooter {
     private byte[] footerAuthTag; // 16-byte GCM auth tag for footer authentication
     private int frameCount;
     private int footerLength;
-    private final Map<Integer, byte[]> frameIVs; // In-memory only, not serialized
+    private final Map<Long, byte[]> frameIVs; // In-memory only, not serialized
 
     public EncryptionFooter(byte[] messageId, long frameSize, short algorithmId) {
         if (messageId.length != EncryptionMetadataTrailer.MESSAGE_ID_SIZE) {
@@ -231,11 +231,11 @@ public class EncryptionFooter {
         return ByteBuffer.wrap(footerBytes, pos, EncryptionMetadataTrailer.FOOTER_LENGTH_SIZE).getInt();
     }
 
-    public Optional<byte[]> getFrameIV(int frameNumber) {
+    public Optional<byte[]> getFrameIV(long frameNumber) {
         return Optional.ofNullable(frameIVs.get(frameNumber));
     }
 
-    public void putFrameIV(int frameNumber, byte[] iv) {
+    public void putFrameIV(long frameNumber, byte[] iv) {
         frameIVs.put(frameNumber, Arrays.copyOf(iv, iv.length));
     }
 
