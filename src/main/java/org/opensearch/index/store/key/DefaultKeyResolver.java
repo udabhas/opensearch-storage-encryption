@@ -7,8 +7,7 @@ package org.opensearch.index.store.key;
 import java.io.IOException;
 import java.security.Key;
 import java.security.Provider;
-import java.security.SecureRandom;
-import java.util.Base64;
+
 
 import javax.crypto.spec.SecretKeySpec;
 
@@ -18,10 +17,10 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
-import org.opensearch.common.Randomness;
+
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
-import org.opensearch.index.store.cipher.AesCipherFactory;
+
 
 /**
  * Default implementation of {@link KeyResolver} responsible for managing
@@ -44,12 +43,8 @@ public class DefaultKeyResolver implements KeyResolver {
     private final MasterKeyProvider keyProvider;
 
     private Key dataKey;
-    private String iv;
 
-    private static final String IV_FILE = "ivFile";
     private static final String KEY_FILE = "keyfile";
-    private final byte[] baseIV;
-    private volatile byte[] cachedIV;
 
     /**
      * Constructs a new {@link DefaultKeyResolver} and ensures the key is initialized.
@@ -65,7 +60,6 @@ public class DefaultKeyResolver implements KeyResolver {
         this.indexUuid = indexUuid;
         this.directory = directory;
         this.keyProvider = keyProvider;
-        this.baseIV = new byte[16];
         initialize();
     }
 
@@ -81,41 +75,9 @@ public class DefaultKeyResolver implements KeyResolver {
         }
     }
 
-    /**
-     * Generates a new AES data key and writes it to metadata file.
-     */
-    private void initNewKeyAndIv() throws IOException {
-        try {
-            DataKeyPair pair = keyProvider.generateDataPair();
-            writeByteArrayFile(KEY_FILE, pair.getEncryptedKey());
 
-            byte[] ivBytes = new byte[AesCipherFactory.IV_ARRAY_LENGTH];
-            SecureRandom random = Randomness.createSecure();
-            random.nextBytes(ivBytes);
-            iv = Base64.getEncoder().encodeToString(ivBytes);
-            writeStringFile(IV_FILE, iv);
-        } catch (Exception e) {
-            throw new IOException("Failed to initialize new key and IV", e);
-        }
-    }
 
-    /**
-     * Reads a string value from the specified file in the directory.
-     */
-    private String readStringFile(String fileName) throws IOException {
-        try (IndexInput in = directory.openInput(fileName, IOContext.READONCE)) {
-            return in.readString();
-        }
-    }
 
-    /**
-     * Writes a string value to the specified file in the directory.
-     */
-    private void writeStringFile(String fileName, String value) throws IOException {
-        try (IndexOutput out = directory.createOutput(fileName, IOContext.DEFAULT)) {
-            out.writeString(value);
-        }
-    }
 
     private void initNewKey() throws IOException {
         DataKeyPair pair = keyProvider.generateDataPair();
@@ -178,35 +140,5 @@ public class DefaultKeyResolver implements KeyResolver {
 
     }
 
-    // TODO: Remove this IV bytes and update translog to generate the IV bytes deterministically
-    @Override
-    public byte[] getIvBytes() {
-        byte[] iv = cachedIV;
-        if (iv == null) {
-            iv = loadOrInitIV();
-        }
-        return iv;
-    }
 
-    private synchronized byte[] loadOrInitIV() {
-        if (cachedIV != null) {
-            return cachedIV;
-        }
-
-        try {
-            cachedIV = readByteArrayFile(IV_FILE);
-        } catch (java.nio.file.NoSuchFileException e) {
-            new SecureRandom().nextBytes(baseIV);
-            try {
-                writeByteArrayFile(IV_FILE, baseIV);
-            } catch (IOException ex) {
-                LOGGER.warn("Failed to write IV file", ex);
-            }
-            cachedIV = baseIV;
-        } catch (IOException ex) {
-            LOGGER.warn("Failed to read IV file, using in-memory fallback", ex);
-            cachedIV = baseIV;
-        }
-        return cachedIV;
-    }
 }
