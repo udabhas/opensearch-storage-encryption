@@ -16,7 +16,7 @@ import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
 import java.security.Security;
-import java.util.Base64;
+
 
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSLockFactory;
@@ -96,8 +96,6 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
 
         assertNotNull(resolver);
         assertNotNull(resolver.getDataKey());
-        assertNotNull(resolver.getIvBytes());
-        assertEquals(16, resolver.getIvBytes().length);
     }
 
     public void testInitializationWithExistingKey() throws Exception {
@@ -116,17 +114,12 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         DefaultKeyResolver resolver1 = new DefaultKeyResolver(TEST_INDEX_UUID, directory, provider, mockKeyProvider);
         registerResolver(TEST_INDEX_UUID, resolver1);
 
-        byte[] iv1 = resolver1.getIvBytes();
         Key key1 = resolver1.getDataKey();
 
         // Second resolver should read existing key
         DefaultKeyResolver resolver2 = new DefaultKeyResolver(TEST_INDEX_UUID, directory, provider, mockKeyProvider);
 
-        byte[] iv2 = resolver2.getIvBytes();
         Key key2 = resolver2.getDataKey();
-
-        // IV should be the same
-        assertArrayEquals(iv1, iv2);
 
         // Keys should be the same
         assertArrayEquals(key1.getEncoded(), key2.getEncoded());
@@ -153,28 +146,7 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         assertEquals(32, key.getEncoded().length);
     }
 
-    public void testGetIvBytes() throws Exception {
-        byte[] dataKey = new byte[32];
-        byte[] encryptedKey = new byte[32];
-        for (int i = 0; i < 32; i++) {
-            dataKey[i] = (byte) i;
-            encryptedKey[i] = (byte) (i + 1);
-        }
 
-        DataKeyPair keyPair = new DataKeyPair(dataKey, encryptedKey);
-        when(mockKeyProvider.generateDataPair()).thenReturn(keyPair);
-        when(mockKeyProvider.decryptKey(any())).thenReturn(dataKey);
-
-        DefaultKeyResolver resolver = new DefaultKeyResolver(TEST_INDEX_UUID, directory, provider, mockKeyProvider);
-
-        byte[] iv = resolver.getIvBytes();
-        assertNotNull(iv);
-        assertEquals(16, iv.length);
-
-        // IV should be valid base64 decodable
-        String ivString = Base64.getEncoder().encodeToString(iv);
-        assertNotNull(ivString);
-    }
 
     public void testLoadKeyFromMasterKeyProvider() throws Exception {
         byte[] dataKey = new byte[32];
@@ -217,11 +189,9 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         DefaultKeyResolver resolver3 = new DefaultKeyResolver(TEST_INDEX_UUID, directory, provider, mockKeyProvider);
         registerResolver(TEST_INDEX_UUID, resolver3);
 
-        // All should have same key and IV
+        // All should have same key
         assertArrayEquals(resolver1.getDataKey().getEncoded(), resolver2.getDataKey().getEncoded());
         assertArrayEquals(resolver1.getDataKey().getEncoded(), resolver3.getDataKey().getEncoded());
-        assertArrayEquals(resolver1.getIvBytes(), resolver2.getIvBytes());
-        assertArrayEquals(resolver1.getIvBytes(), resolver3.getIvBytes());
     }
 
     public void testKeyFileCreation() throws Exception {
@@ -241,42 +211,17 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         // Verify key file exists
         String[] files = directory.listAll();
         boolean keyFileExists = false;
-        boolean ivFileExists = false;
 
         for (String file : files) {
             if (file.equals("keyfile")) {
                 keyFileExists = true;
             }
-            if (file.equals("ivFile")) {
-                ivFileExists = true;
-            }
         }
 
         assertTrue("keyfile should exist", keyFileExists);
-        assertTrue("ivFile should exist", ivFileExists);
     }
 
-    public void testIvIsConsistentAcrossReads() throws Exception {
-        byte[] dataKey = new byte[32];
-        byte[] encryptedKey = new byte[32];
-        for (int i = 0; i < 32; i++) {
-            dataKey[i] = (byte) i;
-            encryptedKey[i] = (byte) (i + 1);
-        }
 
-        DataKeyPair keyPair = new DataKeyPair(dataKey, encryptedKey);
-        when(mockKeyProvider.generateDataPair()).thenReturn(keyPair);
-        when(mockKeyProvider.decryptKey(any())).thenReturn(dataKey);
-
-        DefaultKeyResolver resolver = new DefaultKeyResolver(TEST_INDEX_UUID, directory, provider, mockKeyProvider);
-
-        byte[] iv1 = resolver.getIvBytes();
-        byte[] iv2 = resolver.getIvBytes();
-        byte[] iv3 = resolver.getIvBytes();
-
-        assertArrayEquals(iv1, iv2);
-        assertArrayEquals(iv1, iv3);
-    }
 
     public void testKeyIsConsistentAcrossReads() throws Exception {
         byte[] dataKey = new byte[32];
