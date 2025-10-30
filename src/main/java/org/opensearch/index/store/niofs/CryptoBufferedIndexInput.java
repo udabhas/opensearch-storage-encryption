@@ -170,12 +170,39 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
         }
 
-        // Calculate frame boundaries using bit operations (frameSize is power of 2)
+        // File size less than frameSize
+        if (position + dst.remaining() <= frameSize) {
+            tmpBuffer.clear().limit(dst.remaining());
+            int bytesRead = channel.read(tmpBuffer, position);
+            if (bytesRead == -1) {
+                return -1;
+            }
+
+            tmpBuffer.flip();
+
+            try {
+                Cipher cipher = algorithm.getDecryptionCipher();
+                byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, 0, position,
+                        this.filePath, encryptionMetadataCache);
+
+                cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
+
+                if (position % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
+                    cipher.update(ZERO_SKIP, 0, (int) (position % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+                }
+
+                return (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
+            } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException
+                | InvalidKeyException ex) {
+                throw new IOException("Failed to decrypt block at position " + position, ex);
+            }
+        }
+
+        // multi-frame
         long frameNumber = position >>> frameSizePower;
         long offsetWithinFrame = position & ((1L << frameSizePower) - 1);
         long frameEnd = (frameNumber + 1) << frameSizePower;
 
-        // Limit read to not cross frame boundary
         int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);
 
         tmpBuffer.clear().limit(maxReadInFrame);
@@ -187,10 +214,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         tmpBuffer.flip();
 
         try {
-            // Use frame-based decryption with algorithm-based cipher
             Cipher cipher = algorithm.getDecryptionCipher();
-
-            // Derive frame-specific IV
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame,
                     this.filePath, encryptionMetadataCache);
 
