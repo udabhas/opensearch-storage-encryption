@@ -336,17 +336,17 @@ public class TranslogChunkManager {
 
         int totalWritten = 0;
 
+        // Initialize new cipher
+        if (currentCipher == null) {
+            // Start new block
+            initializeBlockCipher(currentBlockNumber++);
+        }
+
         while (src.hasRemaining()) {
             // Finalize cipher when block is full and initialize new cipher
             if (currentCipher != null && currentBlockBytesWritten >= BLOCK_SIZE) {
                 // Block is full - finalize and write tag
                 finalizeCurrentBlock();
-                // Start new block
-                initializeBlockCipher(currentBlockNumber++);
-            }
-
-            // Initialize new cipher
-            if (currentCipher == null) {
                 // Start new block
                 initializeBlockCipher(currentBlockNumber++);
             }
