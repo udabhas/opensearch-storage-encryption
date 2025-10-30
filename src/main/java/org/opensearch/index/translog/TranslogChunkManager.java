@@ -67,6 +67,7 @@ public class TranslogChunkManager {
     private long currentBlockNumber = 0;
     private int currentBlockBytesWritten = 0;
     private static final int BLOCK_SIZE = 8192; // 8KB blocks
+    private static final int BLOCK_SIZE_SHIFT = 13;
     private long fileWritePosition = 0;
 
     /**
@@ -460,7 +461,7 @@ public class TranslogChunkManager {
      */
     private void initializeBlockCipher(long blockNumber) throws IOException {
         Key key = keyIvResolver.getDataKey();
-        long offset = (long) blockNumber * BLOCK_SIZE;
+        long offset = blockNumber << BLOCK_SIZE_SHIFT;
 
         try {
             this.currentCipher = OpenSslNativeCipher.initGCMCipher(key.getEncoded(), baseIV, offset);
