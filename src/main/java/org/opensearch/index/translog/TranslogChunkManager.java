@@ -63,8 +63,6 @@ public class TranslogChunkManager {
     private final byte[] baseIV;
 
     // Streaming cipher state for write operations
-    // Java Cipher fallback
-    // private Cipher currentCipher;
     private MemorySegment currentCipher;
     private long currentBlockNumber = 0;
     private int currentBlockBytesWritten = 0;
@@ -338,12 +336,16 @@ public class TranslogChunkManager {
         int totalWritten = 0;
 
         while (src.hasRemaining()) {
-            // Initialize cipher on first write or when block is full
-            if (currentCipher == null || currentBlockBytesWritten >= BLOCK_SIZE) {
-                if (currentCipher != null) {
-                    // Block is full - finalize and write tag
-                    finalizeCurrentBlock();
-                }
+            // Finalize cipher when block is full and initialize new cipher
+            if (currentCipher != null && currentBlockBytesWritten >= BLOCK_SIZE) {
+                // Block is full - finalize and write tag
+                finalizeCurrentBlock();
+                // Start new block
+                initializeBlockCipher(currentBlockNumber++);
+            }
+
+            // Initialize new cipher
+            if (currentCipher == null) {
                 // Start new block
                 initializeBlockCipher(currentBlockNumber++);
             }
@@ -486,17 +488,5 @@ public class TranslogChunkManager {
         }
         int written = delegate.write(ByteBuffer.wrap(tag), fileWritePosition);
         fileWritePosition += written;
-    }
-
-    /**
-     * Close and finalize last block
-     *
-     * @throws IOException if closing or finalizing fails
-     */
-    public void close() throws IOException {
-        if (currentCipher != null) {
-            finalizeCurrentBlock();
-            currentCipher = null;
-        }
     }
 }
