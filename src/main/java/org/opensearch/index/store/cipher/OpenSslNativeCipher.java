@@ -17,7 +17,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.common.SuppressForbidden;
+import org.opensearch.index.store.PanamaNativeAccess;
 
 /**
  * Provides native bindings to OpenSSL EVP_aes_256_ctr using the Java Panama FFI.
@@ -28,6 +31,9 @@ import org.opensearch.common.SuppressForbidden;
 @SuppressForbidden(reason = "Uses Panama FFI for OpenSSL native function access")
 @SuppressWarnings("preview")
 public final class OpenSslNativeCipher {
+
+    private static final Logger LOGGER = LogManager.getLogger(OpenSslNativeCipher.class);
+
     static final int AES_BLOCK_SIZE = 16;
     static final int AES_256_KEY_SIZE = 32;
 
@@ -317,7 +323,6 @@ public final class OpenSslNativeCipher {
                 throw new OpenSslException("EVP_EncryptInit_ex failed");
             }
             return ctx;
-
         }
     }
 
@@ -433,6 +438,15 @@ public final class OpenSslNativeCipher {
             } finally {
                 EVP_CIPHER_CTX_free.invoke(ctx);
             }
+        }
+    }
+
+    public static void freeCipherContext(MemorySegment ctx) {
+        try {
+            EVP_CIPHER_CTX_free.invoke(ctx);
+        } catch (Throwable ex) {
+            // Log but don't throw - this is cleanup code
+            LOGGER.warn("Failed to free OpenSSL cipher context", ex);
         }
     }
 

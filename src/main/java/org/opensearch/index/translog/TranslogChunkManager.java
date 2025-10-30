@@ -362,6 +362,7 @@ public class TranslogChunkManager {
             try {
                 encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, java.util.Arrays.copyOf(plainData, toWrite));
             } catch (Throwable e) {
+                OpenSslNativeCipher.freeCipherContext(currentCipher);
                 throw new IOException("Failed to encrypt data", e);
             }
 
