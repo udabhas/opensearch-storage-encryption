@@ -492,4 +492,14 @@ public class TranslogChunkManager {
         int written = delegate.write(ByteBuffer.wrap(tag), fileWritePosition);
         fileWritePosition += written;
     }
+
+    /**
+     * Close and finalize last block
+     */
+    public void close() throws IOException {
+        if (currentCipher != null) {
+            finalizeCurrentBlock();
+            currentCipher = null;
+        }
+    }
 }

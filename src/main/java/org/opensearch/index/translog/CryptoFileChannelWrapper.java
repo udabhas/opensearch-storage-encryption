@@ -271,6 +271,7 @@ public class CryptoFileChannelWrapper extends FileChannel {
     protected void implCloseChannel() throws IOException {
         if (!closed) {
             closed = true;
+            chunkManager.close();
             delegate.close();
         }
     }
