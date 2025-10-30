@@ -7,6 +7,7 @@ package org.opensearch.index.translog;
 import static org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted;
 
 import java.io.IOException;
+import org.opensearch.index.store.key.HkdfKeyDerivation;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -68,6 +69,9 @@ public class TranslogChunkManager {
     // Header size - calculated exactly using TranslogHeader.headerSizeInBytes()
     private final int actualHeaderSize;
 
+    // Base IV derived using HKDF for deterministic translog encryption
+    private final byte[] baseIV;
+
     // Streaming cipher state for write operations
     // Java Cipher fallback
     // private Cipher currentCipher;
@@ -123,6 +127,12 @@ public class TranslogChunkManager {
         this.actualHeaderSize = filePath.getFileName().toString().endsWith(".tlog")
             ? calculateTranslogHeaderSize(translogUUID)
             : 0;
+
+        // Derive base IV using HKDF instead of random IV from KeyResolver
+        this.baseIV = HkdfKeyDerivation.deriveTranslogBaseIV(
+            keyResolver.getDataKey().getEncoded(),
+            translogUUID
+        );
     }
 
     /**
@@ -233,9 +243,8 @@ public class TranslogChunkManager {
 
             // Use existing key management
             Key key = keyResolver.getDataKey();
-            byte[] baseIV = keyResolver.getIvBytes();
 
-            // Use existing IV computation for this chunk
+            // Use HKDF-derived base IV for this chunk
             long chunkOffset = (long) chunkIndex * GCM_CHUNK_SIZE;
             byte[] chunkIV = computeOffsetIVForAesGcmEncrypted(baseIV, chunkOffset);
 
@@ -262,9 +271,8 @@ public class TranslogChunkManager {
         try {
             // Use existing key management
             Key key = keyResolver.getDataKey();
-            byte[] baseIV = keyResolver.getIvBytes();
 
-            // Use existing IV computation for this chunk
+            // Use HKDF-derived base IV for this chunk
             long chunkOffset = (long) chunkIndex * GCM_CHUNK_SIZE;
             byte[] chunkIV = computeOffsetIVForAesGcmEncrypted(baseIV, chunkOffset);
 
@@ -467,7 +475,6 @@ public class TranslogChunkManager {
      */
     private void initializeBlockCipher(int blockNumber) throws IOException {
         Key key = keyResolver.getDataKey();
-        byte[] baseIV = keyResolver.getIvBytes();
         long offset = (long) blockNumber * BLOCK_SIZE;
 
         try {
