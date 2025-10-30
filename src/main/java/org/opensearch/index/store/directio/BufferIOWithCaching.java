@@ -59,24 +59,18 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
      * @param path The path to write to
      * @param os The output stream
      * @param key The AES key (must be 32 bytes for AES-256)
-     * @param iv The initialization vector (must be 16 bytes)
      * @param memorySegmentPool the pool for acquiring memory segments for caching
      * @param blockCache the cache for storing decrypted block data
+     * @param provider the security provider
+     * @param encryptionMetadataCache the encryption metadata cache
      * @throws IOException If there is an I/O error
-     * @param name     The name of the output
-     * @param path     The path to write to
-     * @param os       The output stream
-     * @param key      The AES key (must be 32 bytes for AES-256)
-     * @param iv       The initialization vector (must be 16 bytes)
-     * @throws IOException              If there is an I/O error
-     * @throws IllegalArgumentException If key or iv lengths are invalid
+     * @throws IllegalArgumentException If key length is invalid
      */
     public BufferIOWithCaching(
         String name,
         Path path,
         OutputStream os,
         byte[] key,
-        byte[] iv,
         Pool<RefCountedMemorySegment> memorySegmentPool,
         BlockCache<RefCountedMemorySegment> blockCache,
         Provider provider,
@@ -86,7 +80,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         super(
             "FSIndexOutput(path=\"" + path + "\")",
             name,
-            new EncryptedOutputStream(os, path, key, iv, memorySegmentPool, blockCache, provider, encryptionMetadataCache),
+            new EncryptedOutputStream(os, path, key, memorySegmentPool, blockCache, provider, encryptionMetadataCache),
             CHUNK_SIZE
         );
     }
@@ -120,7 +114,6 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             OutputStream os,
             Path path,
             byte[] key,
-            byte[] iv,
             Pool<RefCountedMemorySegment> memorySegmentPool,
             BlockCache<RefCountedMemorySegment> blockCache,
             Provider provider,

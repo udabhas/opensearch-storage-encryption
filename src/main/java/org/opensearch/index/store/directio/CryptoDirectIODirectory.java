@@ -72,7 +72,6 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final Provider provider;
     private final Path dirPath;
     private final byte[] dataKeyBytes;
-    private final byte[] ivBytes;
     private final EncryptionMetadataCache encryptionMetadataCache;
 
     /**
@@ -108,7 +107,6 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         this.provider = provider;
         this.dirPath = getDirectory();
         this.dataKeyBytes = keyResolver.getDataKey().getEncoded();
-        this.ivBytes = keyResolver.getIvBytes();
         this.encryptionMetadataCache = encryptionMetadataCache;
     }
 
@@ -157,7 +155,6 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 path,
                 fos,
                 dataKeyBytes,
-                ivBytes,
                 this.memorySegmentPool,
                 this.blockCache,
                 this.provider,
@@ -182,7 +179,6 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 path,
                 fos,
                 dataKeyBytes,
-                ivBytes,
                 this.memorySegmentPool,
                 this.blockCache,
                 this.provider,
