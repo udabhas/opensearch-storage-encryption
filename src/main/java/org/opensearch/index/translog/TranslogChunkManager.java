@@ -364,7 +364,8 @@ public class TranslogChunkManager {
                 encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, java.util.Arrays.copyOf(plainData, toWrite));
             } catch (Throwable e) {
                 OpenSslNativeCipher.freeCipherContext(currentCipher);
-                throw new IOException("Failed to encrypt data", e);
+                throw new IOException(
+                        "Failed to encrypt translog data at offset:" + fileWritePosition + " file:" + filePath, e);
             }
 
             // Write encrypted data immediately at tracked position
@@ -466,7 +467,7 @@ public class TranslogChunkManager {
         try {
             this.currentCipher = OpenSslNativeCipher.initGCMCipher(key.getEncoded(), baseIV, offset);
         } catch (Throwable e) {
-            throw new IOException("Failed to initialize cipher", e);
+            throw new IOException("Failed to initialize cipher for blockNumber:" + blockNumber + " for file:" + filePath, e);
         }
 
         this.currentBlockNumber = blockNumber;
@@ -484,7 +485,7 @@ public class TranslogChunkManager {
         try {
             tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher);
         } catch (Throwable e) {
-            throw new IOException("Failed to finalize cipher", e);
+            throw new IOException("Failed to finalize cipher for file:" + filePath, e);
         } finally {
             currentCipher = null;
         }
