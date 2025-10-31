@@ -28,12 +28,11 @@ import org.opensearch.index.store.block_cache.BlockCacheKey;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
-import org.opensearch.index.store.cipher.EncryptionCache;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
-import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
 
 /**
@@ -80,13 +79,14 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         byte[] iv,
         Pool<RefCountedMemorySegment> memorySegmentPool,
         BlockCache<RefCountedMemorySegment> blockCache,
-        Provider provider
+        Provider provider,
+        EncryptionMetadataCache encryptionMetadataCache
     )
         throws IOException {
         super(
             "FSIndexOutput(path=\"" + path + "\")",
             name,
-            new EncryptedOutputStream(os, path, key, iv, memorySegmentPool, blockCache, provider),
+            new EncryptedOutputStream(os, path, key, iv, memorySegmentPool, blockCache, provider, encryptionMetadataCache),
             CHUNK_SIZE
         );
     }
@@ -105,6 +105,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
         private final EncryptionAlgorithm algorithm;
         private final Provider provider;
+        private final EncryptionMetadataCache encryptionMetadataCache;
 
         // Frame tracking
         private MemorySegment currentCipher;
@@ -122,7 +123,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             byte[] iv,
             Pool<RefCountedMemorySegment> memorySegmentPool,
             BlockCache<RefCountedMemorySegment> blockCache,
-            Provider provider
+            Provider provider,
+            EncryptionMetadataCache encryptionMetadataCache
         ) {
             super(os);
             this.path = path;
@@ -131,6 +133,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.memorySegmentPool = memorySegmentPool;
             this.blockCache = blockCache;
             this.provider = provider;
+            this.encryptionMetadataCache = encryptionMetadataCache;
 
             this.frameSize = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE;
             this.frameSizeMask = frameSize - 1;
@@ -316,7 +319,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 footer.setFrameCount(totalFrames);
                 out.write(footer.serialize(null, this.directoryKey));
 
-                EncryptionCache.getInstance().putFooter(path.toAbsolutePath().toString(), footer);
+                encryptionMetadataCache.putFooter(path, footer);
 
                 super.close();
                 loadFinalBlocksIntoCache();
@@ -371,7 +374,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                     footer.getMessageId(),
                     frameNumber,
                     offsetWithinFrame,
-                    filePath.toAbsolutePath().toString()
+                    filePath,
+                    encryptionMetadataCache
                 );
 
                 // Initialize new OpenSSL cipher context

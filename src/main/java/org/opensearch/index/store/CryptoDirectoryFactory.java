@@ -31,6 +31,8 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
+import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
 import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
@@ -227,6 +229,9 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // Use shared resolver registry to prevent race conditions
         String indexUuid = indexSettings.getIndex().getUUID();
         KeyResolver keyResolver = IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);
+        
+        // Get or create per-index encryption metadata cache
+        EncryptionMetadataCache encryptionMetadataCache = EncryptionMetadataCacheRegistry.getOrCreateCache(indexUuid);
 
         IndexModule.Type type = IndexModule.defaultStoreType(IndexModule.NODE_STORE_ALLOW_MMAP.get(indexSettings.getNodeSettings()));
 
@@ -238,16 +243,17 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                         location,
                         lockFactory,
                         provider,
-                        keyResolver
+                        keyResolver,
+                        encryptionMetadataCache
                 );
-                return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyResolver);
+                return new HybridCryptoDirectory(lockFactory, cryptoDirectIODirectory, provider, keyResolver, encryptionMetadataCache);
             }
             case MMAPFS -> {
                 throw new AssertionError("MMAPFS not supported with index level encryption");
             }
             case SIMPLEFS, NIOFS -> {
                 LOGGER.debug("Using NIOFS directory for encrypted storage");
-                return new CryptoNIOFSDirectory(lockFactory, location, provider, keyResolver);
+                return new CryptoNIOFSDirectory(lockFactory, location, provider, keyResolver, encryptionMetadataCache);
             }
             default -> throw new AssertionError("unexpected built-in store type [" + type + "]");
         }
@@ -258,7 +264,8 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         Path location,
         LockFactory lockFactory,
         Provider provider,
-        KeyResolver keyResolver
+        KeyResolver keyResolver,
+        EncryptionMetadataCache encryptionMetadataCache
     ) throws IOException {
         /*
         * ================================
@@ -295,7 +302,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         */
 
         // Create a per-directory loader that uses this directory's keyIvResolver for decryption
-        BlockLoader<RefCountedMemorySegment> loader = new CryptoDirectIOBlockLoader(poolResources.getSegmentPool(), keyResolver);
+        BlockLoader<RefCountedMemorySegment> loader = new CryptoDirectIOBlockLoader(poolResources.getSegmentPool(), keyResolver, encryptionMetadataCache);
 
         // Cache architecture: One shared Caffeine cache storage, multiple wrapper instances
         // - sharedBlockCache: Created once in initializeSharedPool(), holds the actual cache storage
@@ -325,7 +332,8 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             poolResources.getSegmentPool(),
             directoryCache,
             loader,
-            readaheadWorker
+            readaheadWorker,
+            encryptionMetadataCache
         );
     }
 

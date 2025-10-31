@@ -220,12 +220,12 @@ public class MemorySegmentDecryptor {
     /**
      * Frame-based decryption for large files
      */
-    public static void decryptInPlaceFrameBased(long addr, long length, byte[] fileKey, byte[] directoryKey, byte[] messageId, long frameSize, long fileOffset, Path filePath) throws Exception {
+    public static void decryptInPlaceFrameBased(long addr, long length, byte[] fileKey, byte[] directoryKey, byte[] messageId, long frameSize, long fileOffset, Path filePath, EncryptionMetadataCache encryptionMetadataCache) throws Exception {
         Cipher cipher = CIPHER_POOL.get();
         SecretKeySpec keySpec = new SecretKeySpec(fileKey, AesCipherFactory.ALGORITHM);
 
         // Calculate frame-based IV
-        byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, (int)(fileOffset / frameSize), fileOffset % frameSize, filePath.toAbsolutePath().toString());
+        byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, (int)(fileOffset / frameSize), fileOffset % frameSize, filePath, encryptionMetadataCache);
 
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 
