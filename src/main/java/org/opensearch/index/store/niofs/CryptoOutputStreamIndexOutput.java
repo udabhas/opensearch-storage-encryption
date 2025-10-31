@@ -12,21 +12,17 @@ import java.nio.file.Path;
 import org.apache.lucene.store.OutputStreamIndexOutput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
-import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
-import org.opensearch.index.store.cipher.EncryptionCache;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
 
-import javax.crypto.Cipher;
-import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.security.Key;
 import java.security.Provider;
-import java.util.Arrays;
 
 /**
  * An IndexOutput implementation that encrypts data before writing using native
@@ -49,8 +45,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
      * @param keyResolver The key resolver for directory keys
      * @param provider    The JCE provider to use
      */
-    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath) {
-        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider, algorithmId, filePath), CHUNK_SIZE);
+    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath, EncryptionMetadataCache encryptionMetadataCache) {
+        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider, algorithmId, filePath, encryptionMetadataCache), CHUNK_SIZE);
     }
 
     private static class EncryptedOutputStream extends FilterOutputStream {
@@ -74,9 +70,9 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private boolean isClosed = false;
 
         private final Path filePath;
-        private final String filePathString;
+        private final EncryptionMetadataCache encryptionMetadataCache;
 
-        EncryptedOutputStream(OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath) {
+        EncryptedOutputStream(OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath, EncryptionMetadataCache encryptionMetadataCache) {
             super(os);
 
             this.frameSizePower = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER;
@@ -93,7 +89,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             this.buffer = new byte[BUFFER_SIZE];
 
             this.filePath = filePath;
-            this.filePathString = filePath.toAbsolutePath().toString();
+            this.encryptionMetadataCache = encryptionMetadataCache;
 
             // Initialize first frame cipher
             initializeFrameCipher(0, 0);
@@ -200,8 +196,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 super.close();
 
                 if (filePath != null) {
-                    EncryptionCache encryptionCache = EncryptionCache.getInstance();
-                    encryptionCache.putFooter(filePath.toAbsolutePath().toString(), footer);
+                    encryptionMetadataCache.putFooter(filePath, footer);
                 }
 
             } catch (IOException e) {
@@ -228,7 +223,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             this.currentFrameOffset = offsetWithinFrame;
 
             byte[] frameIV = AesCipherFactory.computeFrameIV(
-                    directoryKey, footer.getMessageId(), frameNumber, offsetWithinFrame, filePathString
+                    directoryKey, footer.getMessageId(), frameNumber, offsetWithinFrame, filePath, encryptionMetadataCache
             );
 
             try {
