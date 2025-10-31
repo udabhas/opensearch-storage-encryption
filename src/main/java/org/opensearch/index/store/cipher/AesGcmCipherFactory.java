@@ -212,7 +212,7 @@ public class AesGcmCipherFactory {
         byte[] messageId,
         int frameNumber,
         long offsetWithinFrame,
-        Path filePath
+        String filePath
     ) {
         // Note: This method needs EncryptionMetadataCache parameter added to its signature
         // For now, using null as placeholder - caller must provide cache instance
