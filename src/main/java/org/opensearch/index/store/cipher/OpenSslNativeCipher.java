@@ -20,7 +20,6 @@ import java.util.Locale;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.common.SuppressForbidden;
-import org.opensearch.index.store.PanamaNativeAccess;
 
 /**
  * Provides native bindings to OpenSSL EVP_aes_256_ctr using the Java Panama FFI.
