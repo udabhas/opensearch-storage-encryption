@@ -7,6 +7,7 @@ package org.opensearch.index.translog;
 import static org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted;
 
 import java.io.IOException;
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.NonReadableChannelException;
@@ -16,17 +17,16 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.Key;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.apache.lucene.codecs.CodecUtil;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
+import org.opensearch.index.store.cipher.OpenSslNativeCipher;
 import org.opensearch.index.store.iv.KeyIvResolver;
 
 /**
  * Manages 8KB encrypted chunks for translog files using AES-GCM authentication.
  * Handles chunk positioning, encryption, decryption, and I/O operations.
- * 
+ *
  * This class separates chunking logic from FileChannel delegation, making the code
  * more maintainable and testable.
  *
@@ -34,8 +34,6 @@ import org.opensearch.index.store.iv.KeyIvResolver;
  */
 @SuppressForbidden(reason = "Channel operations required for chunk-based encryption")
 public class TranslogChunkManager {
-
-    private static final Logger logger = LogManager.getLogger(TranslogChunkManager.class);
 
     // GCM chunk constants
     /** Size of each data chunk in bytes (8KB). */
@@ -47,13 +45,30 @@ public class TranslogChunkManager {
     /** Total size of chunk plus authentication tag in bytes (8208 bytes maximum). */
     public static final int CHUNK_WITH_TAG_SIZE = GCM_CHUNK_SIZE + GCM_TAG_SIZE;
 
+    // Thread-local buffer pool for reducing allocations
+    private static final ThreadLocal<ByteBuffer> CHUNK_BUFFER_POOL = ThreadLocal
+        .withInitial(() -> ByteBuffer.allocate(CHUNK_WITH_TAG_SIZE));
+    private static final ThreadLocal<ByteBuffer> TRANSFER_BUFFER_POOL = ThreadLocal.withInitial(() -> ByteBuffer.allocate(GCM_CHUNK_SIZE));
+    private static final ThreadLocal<byte[]> TEMP_ARRAY_POOL = ThreadLocal.withInitial(() -> new byte[GCM_CHUNK_SIZE]);
+
     private final FileChannel delegate;
     private final KeyIvResolver keyIvResolver;
     private final Path filePath;
     private final String translogUUID;
 
     // Header size - calculated exactly using TranslogHeader.headerSizeInBytes()
-    private volatile int actualHeaderSize = -1;
+    private final int actualHeaderSize;
+
+    // Base IV
+    private final byte[] baseIV;
+
+    // Streaming cipher state for write operations
+    private MemorySegment currentCipher;
+    private long currentBlockNumber = 0;
+    private int currentBlockBytesWritten = 0;
+    private static final int BLOCK_SIZE_SHIFT = 13;
+    private static final int BLOCK_SIZE = 1 << BLOCK_SIZE_SHIFT; // 8KB blocks
+    private long fileWritePosition = 0;
 
     /**
      * Helper class for chunk position mapping
@@ -98,29 +113,20 @@ public class TranslogChunkManager {
         this.keyIvResolver = keyIvResolver;
         this.filePath = filePath;
         this.translogUUID = translogUUID;
+        // Non-translog files (.ckp) don't need encryption anyway
+        this.actualHeaderSize = filePath.getFileName().toString().endsWith(".tlog") ? calculateTranslogHeaderSize(translogUUID) : 0;
+
+        // base IV
+        this.baseIV = keyIvResolver.getIvBytes();
     }
 
     /**
      * Determines the exact header size using local calculation to avoid cross-classloader access.
      * This replicates the exact same logic as TranslogHeader.headerSizeInBytes() method.
-     * 
+     *
      * @return the calculated header size in bytes
      */
     public int determineHeaderSize() {
-        if (actualHeaderSize > 0) {
-            return actualHeaderSize;
-        }
-
-        String fileName = filePath.getFileName().toString();
-        if (fileName.endsWith(".tlog")) {
-            actualHeaderSize = calculateTranslogHeaderSize(translogUUID);
-            logger.debug("Calculated exact header size: {} bytes for {} with UUID: {}", actualHeaderSize, filePath, translogUUID);
-        } else {
-            // Non-translog files (.ckp) don't need encryption anyway
-            actualHeaderSize = 0;
-            logger.debug("Non-translog file {}, header size: 0", filePath);
-        }
-
         return actualHeaderSize;
     }
 
@@ -148,7 +154,7 @@ public class TranslogChunkManager {
 
     /**
      * Maps a file position to chunk information including chunk index and offset within chunk.
-     * 
+     *
      * @param filePosition the logical file position to map to chunk coordinates
      * @return chunk information containing index, offset, and disk position
      */
@@ -163,7 +169,7 @@ public class TranslogChunkManager {
     /**
      * Checks if we can read a chunk at the given disk position.
      * Returns false for write-only channels or if chunk doesn't exist.
-     * 
+     *
      * @param diskPosition the disk position where the chunk should be located
      * @return true if the chunk exists and can be read, false otherwise
      */
@@ -191,23 +197,25 @@ public class TranslogChunkManager {
     /**
      * Reads and decrypts a complete chunk from disk.
      * Returns empty array if chunk doesn't exist or channel is write-only.
-     * 
+     *
      * @param chunkIndex the index of the chunk to read and decrypt
      * @return the decrypted chunk data, or empty array if chunk doesn't exist
      * @throws IOException if reading or decryption fails
      */
     public byte[] readAndDecryptChunk(int chunkIndex) throws IOException {
+        // System.out.println("[DEBUG] readAndDecryptChunk: chunkIndex=" + chunkIndex);
         try {
             // Calculate disk position for this chunk
             long diskPosition = determineHeaderSize() + ((long) chunkIndex * CHUNK_WITH_TAG_SIZE);
 
-            // Check if chunk exists and we can read it
-            if (!canReadChunk(diskPosition)) {
-                return new byte[0]; // New chunk or write-only channel
+            // Check if position is beyond current file size (new chunk)
+            if (diskPosition >= delegate.size()) {
+                return new byte[0];
             }
 
-            // Read encrypted chunk + tag from disk
-            ByteBuffer buffer = ByteBuffer.allocate(CHUNK_WITH_TAG_SIZE);
+            // Read encrypted chunk + tag from disk using pooled buffer
+            ByteBuffer buffer = CHUNK_BUFFER_POOL.get();
+            buffer.clear();
             int bytesRead = delegate.read(buffer, diskPosition);
             if (bytesRead <= GCM_TAG_SIZE) {
                 return new byte[0]; // Empty or invalid chunk
@@ -220,15 +228,17 @@ public class TranslogChunkManager {
 
             // Use existing key management
             Key key = keyIvResolver.getDataKey();
-            byte[] baseIV = keyIvResolver.getIvBytes();
 
-            // Use existing IV computation for this chunk
             long chunkOffset = (long) chunkIndex * GCM_CHUNK_SIZE;
             byte[] chunkIV = computeOffsetIVForAesGcmEncrypted(baseIV, chunkOffset);
 
             // Use existing GCM decryption with authentication
-            return AesGcmCipherFactory.decryptWithTag(key, chunkIV, encryptedWithTag);
+            byte[] decrypted = AesGcmCipherFactory.decryptWithTag(key, chunkIV, encryptedWithTag);
+            return decrypted;
 
+        } catch (NonReadableChannelException e) {
+            // Channel is write-only
+            return new byte[0];
         } catch (Exception e) {
             throw new IOException("Failed to decrypt chunk " + chunkIndex, e);
         }
@@ -236,7 +246,7 @@ public class TranslogChunkManager {
 
     /**
      * Encrypts and writes a complete chunk to disk.
-     * 
+     *
      * @param chunkIndex the index of the chunk to encrypt and write
      * @param plainData the plain data to encrypt and write to the chunk
      * @throws IOException if encryption or writing fails
@@ -245,9 +255,7 @@ public class TranslogChunkManager {
         try {
             // Use existing key management
             Key key = keyIvResolver.getDataKey();
-            byte[] baseIV = keyIvResolver.getIvBytes();
 
-            // Use existing IV computation for this chunk
             long chunkOffset = (long) chunkIndex * GCM_CHUNK_SIZE;
             byte[] chunkIV = computeOffsetIVForAesGcmEncrypted(baseIV, chunkOffset);
 
@@ -303,8 +311,8 @@ public class TranslogChunkManager {
     }
 
     /**
-     * Writes data to encrypted chunks at the specified position.
-     * This method handles chunk boundary crossing and encryption using read-modify-write pattern.
+     * Writes data using streaming cipher with auto block management.
+     * Handles block boundaries by finalizing cipher and writing tag inline.
      *
      * @param src the buffer containing data to write
      * @param position the file position to write to
@@ -323,28 +331,52 @@ public class TranslogChunkManager {
             return delegate.write(src, position);
         }
 
-        // Chunk-based encrypted writes
-        ChunkInfo chunkInfo = getChunkInfo(position);
-
-        // Read-modify-write chunk pattern
-        byte[] existingChunk = readAndDecryptChunk(chunkInfo.chunkIndex);
-
-        // Expand chunk buffer if needed
-        int requiredSize = chunkInfo.offsetInChunk + src.remaining();
-        byte[] modifiedChunk = existingChunk;
-        if (existingChunk.length < requiredSize) {
-            modifiedChunk = new byte[Math.min(requiredSize, GCM_CHUNK_SIZE)];
-            System.arraycopy(existingChunk, 0, modifiedChunk, 0, existingChunk.length);
+        if (fileWritePosition == 0) {
+            fileWritePosition = headerSize;
         }
 
-        // Apply modifications
-        int bytesToWrite = Math.min(src.remaining(), GCM_CHUNK_SIZE - chunkInfo.offsetInChunk);
-        src.get(modifiedChunk, chunkInfo.offsetInChunk, bytesToWrite);
+        int totalWritten = 0;
 
-        // Encrypt and write back
-        encryptAndWriteChunk(chunkInfo.chunkIndex, modifiedChunk);
+        // Initialize new cipher
+        if (currentCipher == null) {
+            // Start new block
+            initializeBlockCipher(currentBlockNumber++);
+        }
 
-        return bytesToWrite;
+        while (src.hasRemaining()) {
+            // Finalize cipher when block is full and initialize new cipher
+            if (currentCipher != null && currentBlockBytesWritten >= BLOCK_SIZE) {
+                // Block is full - finalize and write tag
+                finalizeCurrentBlock();
+                // Start new block
+                initializeBlockCipher(currentBlockNumber++);
+            }
+
+            // Write what fits in current block
+            int toWrite = Math.min(src.remaining(), BLOCK_SIZE - currentBlockBytesWritten);
+
+            // Use pooled array to avoid allocation
+            byte[] plainData = TEMP_ARRAY_POOL.get();
+            src.get(plainData, 0, toWrite);
+
+            // Stream encrypt using current cipher (no tag yet)
+            byte[] encrypted;
+            try {
+                encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, java.util.Arrays.copyOf(plainData, toWrite));
+            } catch (Throwable e) {
+                OpenSslNativeCipher.freeCipherContext(currentCipher);
+                throw new IOException("Failed to encrypt translog data at offset:" + fileWritePosition + " file:" + filePath, e);
+            }
+
+            // Write encrypted data immediately at tracked position
+            int written = delegate.write(ByteBuffer.wrap(encrypted), fileWritePosition);
+            fileWritePosition += written;
+
+            currentBlockBytesWritten += toWrite;
+            totalWritten += toWrite;
+        }
+
+        return totalWritten;
     }
 
     /**
@@ -360,7 +392,8 @@ public class TranslogChunkManager {
     public long transferFromChunks(long position, long count, WritableByteChannel target) throws IOException {
         long transferred = 0;
         long remaining = count;
-        ByteBuffer buffer = ByteBuffer.allocate(GCM_CHUNK_SIZE);
+        ByteBuffer buffer = TRANSFER_BUFFER_POOL.get();
+        buffer.clear();
 
         while (remaining > 0 && transferred < count) {
             buffer.clear();
@@ -398,7 +431,8 @@ public class TranslogChunkManager {
     public long transferToChunks(ReadableByteChannel src, long position, long count) throws IOException {
         long transferred = 0;
         long remaining = count;
-        ByteBuffer buffer = ByteBuffer.allocate(GCM_CHUNK_SIZE);
+        ByteBuffer buffer = TRANSFER_BUFFER_POOL.get();
+        buffer.clear();
 
         while (remaining > 0 && transferred < count) {
             buffer.clear();
@@ -421,5 +455,51 @@ public class TranslogChunkManager {
         }
 
         return transferred;
+    }
+
+    /**
+     * Initialize GCM cipher for a new block
+     */
+    private void initializeBlockCipher(long blockNumber) throws IOException {
+        Key key = keyIvResolver.getDataKey();
+        long offset = blockNumber << BLOCK_SIZE_SHIFT;
+
+        try {
+            this.currentCipher = OpenSslNativeCipher.initGCMCipher(key.getEncoded(), baseIV, offset);
+        } catch (Throwable e) {
+            throw new IOException("Failed to initialize cipher for blockNumber:" + blockNumber + " for file:" + filePath, e);
+        }
+
+        this.currentBlockNumber = blockNumber;
+        this.currentBlockBytesWritten = 0;
+    }
+
+    /**
+     * Finalize current block and write tag inline
+     */
+    private void finalizeCurrentBlock() throws IOException {
+        if (currentCipher == null) {
+            return;
+        }
+        byte[] tag;
+        try {
+            tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher);
+        } catch (Throwable e) {
+            throw new IOException("Failed to finalize cipher for file:" + filePath, e);
+        } finally {
+            currentCipher = null;
+        }
+        int written = delegate.write(ByteBuffer.wrap(tag), fileWritePosition);
+        fileWritePosition += written;
+    }
+
+    /**
+     * Close and finalize last block
+     */
+    public void close() throws IOException {
+        if (currentCipher != null) {
+            finalizeCurrentBlock();
+            currentCipher = null;
+        }
     }
 }
