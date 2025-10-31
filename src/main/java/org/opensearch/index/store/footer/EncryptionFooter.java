@@ -315,7 +315,7 @@ public class EncryptionFooter {
      * @throws IOException If reading or deserialization fails
      * @throws NotOSEFFileException If file is not a valid OSEF format
      */
-    public static EncryptionFooter readFromChannel(String normalizedFilePath, java.nio.channels.FileChannel channel, byte[] fileKey, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
+    public static EncryptionFooter readViaFileChannel(String normalizedFilePath, java.nio.channels.FileChannel channel, byte[] fileKey, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
 
         EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedFilePath);
         if (cachedFooter != null) {

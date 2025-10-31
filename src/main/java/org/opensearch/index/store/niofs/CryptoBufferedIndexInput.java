@@ -75,7 +75,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.directoryKey = keyResolver.getDataKey().getEncoded();
 
         // Read footer with temporary key for authentication
-        EncryptionFooter footer = EncryptionFooter.readFromChannel(normalizedFilePath, channel, directoryKey, encryptionMetadataCache);
+        EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedFilePath, channel, directoryKey, encryptionMetadataCache);
         this.messageId = footer.getMessageId();
         this.frameSize = footer.getFrameSize();
         this.frameSizePower = footer.getFrameSizePower();
