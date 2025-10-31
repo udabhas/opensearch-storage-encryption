@@ -15,6 +15,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.directio.CryptoDirectIODirectory;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
@@ -66,9 +67,9 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
      * @param keyIvResolver resolver for encryption keys and initialization vectors (shared across both directories)
      * @throws IOException if either directory cannot be initialized
      */
-    public HybridCryptoDirectory(LockFactory lockFactory, CryptoDirectIODirectory delegate, Provider provider, KeyResolver keyResolver)
+    public HybridCryptoDirectory(LockFactory lockFactory, CryptoDirectIODirectory delegate, Provider provider, KeyResolver keyResolver, EncryptionMetadataCache encryptionMetadataCache)
         throws IOException {
-        super(lockFactory, delegate.getDirectory(), provider, keyResolver);
+        super(lockFactory, delegate.getDirectory(), provider, keyResolver, encryptionMetadataCache);
         this.cryptoDirectIODirectory = delegate;
         // todo can be moved to buffer-io with caching
         // "kdm", "tip", "tmd", "psm", "fdm", "kdi");
