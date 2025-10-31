@@ -28,9 +28,8 @@ import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.block_loader.BlockLoader;
-import org.opensearch.index.store.cipher.EncryptionCache;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
-import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
@@ -72,9 +71,9 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     private final KeyResolver keyResolver;
     private final Provider provider;
     private final Path dirPath;
-    private final String dirPathString;
     private final byte[] dataKeyBytes;
     private final byte[] ivBytes;
+    private final EncryptionMetadataCache encryptionMetadataCache;
 
     /**
      * Creates a new CryptoDirectIODirectory with the specified components.
@@ -97,7 +96,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         Pool<RefCountedMemorySegment> memorySegmentPool,
         BlockCache<RefCountedMemorySegment> blockCache,
         BlockLoader<RefCountedMemorySegment> blockLoader,
-        Worker worker
+        Worker worker,
+        EncryptionMetadataCache encryptionMetadataCache
     )
             throws IOException {
         super(path, lockFactory);
@@ -107,9 +107,9 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         this.readAheadworker = worker;
         this.provider = provider;
         this.dirPath = getDirectory();
-        this.dirPathString = dirPath.toAbsolutePath().toString();
         this.dataKeyBytes = keyResolver.getDataKey().getEncoded();
         this.ivBytes = keyResolver.getIvBytes();
+        this.encryptionMetadataCache = encryptionMetadataCache;
     }
 
     @Override
@@ -160,7 +160,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 ivBytes,
                 this.memorySegmentPool,
                 this.blockCache,
-                this.provider
+                this.provider,
+                this.encryptionMetadataCache
         );
 
     }
@@ -184,7 +185,8 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 ivBytes,
                 this.memorySegmentPool,
                 this.blockCache,
-                this.provider
+                this.provider,
+                this.encryptionMetadataCache
         );
     }
 
@@ -194,13 +196,12 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
         readAheadworker.close();
-        EncryptionCache.getInstance().invalidateDirectory(dirPathString);
+        encryptionMetadataCache.invalidateDirectory(dirPath);
     }
 
     @Override
     public void deleteFile(String name) throws IOException {
         Path file = dirPath.resolve(name);
-        String filePath = dirPathString + "/" + name;
 
         if (blockCache != null) {
             try {
@@ -218,7 +219,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 LOGGER.warn("Failed to get file size", e);
             }
         }
-        EncryptionCache.getInstance().invalidateFile(filePath);
+        encryptionMetadataCache.invalidateFile(file);
         super.deleteFile(name);
     }
 
@@ -232,8 +233,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         }
 
         // Fast path: check cache first - avoids FileChannel open
-        String filePath = file.toAbsolutePath().toString();
-        EncryptionFooter cachedFooter = EncryptionCache.getInstance().getFooter(filePath);
+        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(file);
         if (cachedFooter != null) {
             return rawFileSize - cachedFooter.getFooterLength();
         }
@@ -241,7 +241,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         // Slow path: read footer from disk
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             try {
-                EncryptionFooter footer = EncryptionFooter.readFromChannel(file, channel, dataKeyBytes);
+                EncryptionFooter footer = EncryptionFooter.readFromChannel(file, channel, dataKeyBytes, encryptionMetadataCache);
                 return rawFileSize - footer.getFooterLength();
             } catch (EncryptionFooter.NotOSEFFileException e) {
                 LOGGER.debug("Not an OSEF file: {}", file);

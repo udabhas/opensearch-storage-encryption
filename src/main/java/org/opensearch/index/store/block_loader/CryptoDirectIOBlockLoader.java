@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
@@ -53,6 +54,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
     private final KeyResolver keyResolver;
     private final Pool<RefCountedMemorySegment> segmentPool;
+    private final EncryptionMetadataCache encryptionMetadataCache;
 
     /**
      * Constructs a new CryptoDirectIOBlockLoader with the specified memory pool and key resolver.
@@ -60,9 +62,10 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
      * @param segmentPool the memory segment pool for acquiring buffer space
      * @param keyResolver the resolver for obtaining encryption keys and initialization vectors
      */
-    public CryptoDirectIOBlockLoader(Pool<RefCountedMemorySegment> segmentPool, KeyResolver keyResolver) {
+    public CryptoDirectIOBlockLoader(Pool<RefCountedMemorySegment> segmentPool, KeyResolver keyResolver, EncryptionMetadataCache encryptionMetadataCache) {
         this.segmentPool = segmentPool;
         this.keyResolver = keyResolver;
+        this.encryptionMetadataCache = encryptionMetadataCache;
     }
 
     @Override
@@ -104,7 +107,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                     messageId,                                  // Message ID from footer
                     org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
                     startOffset,                                 // File offset
-                    filePath
+                    filePath,
+                    encryptionMetadataCache
             );
 
             if (bytesRead == 0) {
@@ -176,7 +180,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                 throw new IOException("Not an OSEF file.");
             }
 
-            EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath, channel, keyResolver.getDataKey().getEncoded());
+            EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
             return footer.getMessageId();
         }
     }

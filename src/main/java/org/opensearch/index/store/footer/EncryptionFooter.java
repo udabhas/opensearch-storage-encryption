@@ -8,7 +8,7 @@
 package org.opensearch.index.store.footer;
 
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
-import org.opensearch.index.store.cipher.EncryptionCache;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -313,9 +313,9 @@ public class EncryptionFooter {
      * @throws IOException If reading or deserialization fails
      * @throws NotOSEFFileException If file is not a valid OSEF format
      */
-    public static EncryptionFooter readFromChannel(Path filePath , java.nio.channels.FileChannel channel, byte[] fileKey) throws IOException {
+    public static EncryptionFooter readFromChannel(Path filePath , java.nio.channels.FileChannel channel, byte[] fileKey, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
 
-        EncryptionFooter cachedFooter = EncryptionCache.getInstance().getFooter(filePath.toAbsolutePath().toString());
+        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(filePath);
         if (cachedFooter != null) {
             return cachedFooter;
         }
@@ -347,7 +347,7 @@ public class EncryptionFooter {
         }
 
         EncryptionFooter footer = deserialize(footerBuffer.array(), fileKey);
-        EncryptionCache.getInstance().putFooter(filePath.toAbsolutePath().toString(), footer);
+        encryptionMetadataCache.putFooter(filePath, footer);
         return footer;
     }
 

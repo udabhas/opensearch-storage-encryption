@@ -28,6 +28,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.tests.mockfile.ExtrasFS;
 import org.opensearch.common.Randomness;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 
@@ -58,7 +59,8 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
         Provider provider = Security.getProvider("SunJCE");
         assertNotNull("Provider should not be null", provider);
 
-        return new CryptoNIOFSDirectory(FSLockFactory.getDefault(), file, provider, keyResolver);
+        EncryptionMetadataCache cache = new EncryptionMetadataCache();
+        return new CryptoNIOFSDirectory(FSLockFactory.getDefault(), file, provider, keyResolver, cache);
     }
 
     @Override

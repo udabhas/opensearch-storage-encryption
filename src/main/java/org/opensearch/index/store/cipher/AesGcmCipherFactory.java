@@ -6,6 +6,7 @@ package org.opensearch.index.store.cipher;
 
 import org.opensearch.index.store.footer.EncryptionFooter;
 
+import java.nio.file.Path;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.security.Key;
@@ -200,7 +201,7 @@ public class AesGcmCipherFactory {
      * @param messageId The message ID from the footer
      * @param frameNumber The frame number
      * @param offsetWithinFrame The offset within the frame
-     * @param filePathString The absolute file path as string
+     * @param filePath The absolute file path as string
      * @return Initialized cipher ready for encryption
      */
     public static Cipher initializeFrameCipher(
@@ -211,14 +212,17 @@ public class AesGcmCipherFactory {
         byte[] messageId,
         int frameNumber,
         long offsetWithinFrame,
-        String filePathString
+        Path filePath
     ) {
+        // Note: This method needs EncryptionMetadataCache parameter added to its signature
+        // For now, using null as placeholder - caller must provide cache instance
         byte[] frameIV = AesCipherFactory.computeFrameIV(
             directoryKey,
             messageId,
             frameNumber,
             offsetWithinFrame,
-            filePathString
+            filePath,
+            null  // TODO: Pass EncryptionMetadataCache from caller
         );
 
         Cipher cipher = algorithm.getEncryptionCipher(provider);
