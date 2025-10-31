@@ -17,9 +17,6 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
@@ -53,7 +50,6 @@ public class EncryptionFooter {
     private byte[] footerAuthTag; // 16-byte GCM auth tag for footer authentication
     private int frameCount;
     private int footerLength;
-    private final Map<Long, byte[]> frameIVs; // In-memory only, not serialized
 
     public EncryptionFooter(byte[] messageId, long frameSize, short algorithmId) {
         if (messageId.length != EncryptionMetadataTrailer.MESSAGE_ID_SIZE) {
@@ -70,7 +66,6 @@ public class EncryptionFooter {
         this.keyMetadata = new byte[0]; // Empty - currently using keyfile for key data
         this.frameCount = 0;
         this.footerLength = 0;
-        this.frameIVs = new ConcurrentHashMap<>();
     }
 
     public static EncryptionFooter generateNew(long frameSize, short algorithmId) {
@@ -229,14 +224,6 @@ public class EncryptionFooter {
         // Read footer length from end: [FooterLength(4)][Magic(4)]
         int pos = footerBytes.length - EncryptionMetadataTrailer.MAGIC.length - EncryptionMetadataTrailer.FOOTER_LENGTH_SIZE;
         return ByteBuffer.wrap(footerBytes, pos, EncryptionMetadataTrailer.FOOTER_LENGTH_SIZE).getInt();
-    }
-
-    public Optional<byte[]> getFrameIV(long frameNumber) {
-        return Optional.ofNullable(frameIVs.get(frameNumber));
-    }
-
-    public void putFrameIV(long frameNumber, byte[] iv) {
-        frameIVs.put(frameNumber, Arrays.copyOf(iv, iv.length));
     }
 
     public byte[] getMessageId() {
