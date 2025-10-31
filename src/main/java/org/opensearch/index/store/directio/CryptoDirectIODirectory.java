@@ -239,7 +239,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         // Slow path: read footer from disk
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             try {
-                EncryptionFooter footer = EncryptionFooter.readFromChannel(normalizedPath, channel, dataKeyBytes, encryptionMetadataCache);
+                EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedPath, channel, dataKeyBytes, encryptionMetadataCache);
                 return rawFileSize - footer.getFooterLength();
             } catch (EncryptionFooter.NotOSEFFileException e) {
                 LOGGER.debug("Not an OSEF file: {}", file);

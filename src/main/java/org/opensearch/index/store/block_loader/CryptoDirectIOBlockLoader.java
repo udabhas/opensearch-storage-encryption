@@ -28,7 +28,6 @@ import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
-import org.opensearch.index.store.pool.MemorySegmentPool;
 import org.opensearch.index.store.pool.Pool;
 
 /**
@@ -180,7 +179,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                 throw new IOException("Not an OSEF file.");
             }
 
-            EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath.toAbsolutePath().normalize().toString(), channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
+            EncryptionFooter footer = EncryptionFooter.readViaFileChannel(filePath.toAbsolutePath().normalize().toString(), channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
             return footer.getMessageId();
         }
     }

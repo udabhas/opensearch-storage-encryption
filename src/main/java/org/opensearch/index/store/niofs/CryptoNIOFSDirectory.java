@@ -140,7 +140,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         // read footer from disk with OSEF validation
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
             try {
-                EncryptionFooter footer = EncryptionFooter.readFromChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
+                EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
                 return fileSize - footer.getFooterLength();
             } catch (EncryptionFooter.NotOSEFFileException e) {
                 return fileSize;
