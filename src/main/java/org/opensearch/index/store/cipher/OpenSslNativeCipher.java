@@ -213,6 +213,7 @@ public final class OpenSslNativeCipher {
                     );
 
         } catch (Throwable t) {
+            LOGGER.error("Failed to initialize OpenSSL method handles via Panama", t);
             throw new OpenSslException("Failed to initialize OpenSSL method handles via Panama", t);
         }
     }
@@ -244,12 +245,14 @@ public final class OpenSslNativeCipher {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment ctx = (MemorySegment) EVP_CIPHER_CTX_new.invoke();
             if (ctx.address() == 0) {
+                LOGGER.error("EVP_CIPHER_CTX_new failed to create cipher context");
                 throw new OpenSslException("EVP_CIPHER_CTX_new failed");
             }
 
             try {
                 MemorySegment cipher = (MemorySegment) EVP_aes_256_ctr.invoke();
                 if (cipher.address() == 0) {
+                    LOGGER.error("EVP_aes_256_ctr failed to get cipher");
                     throw new OpenSslException("EVP_aes_256_ctr failed");
                 }
 
@@ -259,6 +262,7 @@ public final class OpenSslNativeCipher {
 
                 int rc = (int) EVP_EncryptInit_ex.invoke(ctx, cipher, MemorySegment.NULL, keySeg, ivSeg);
                 if (rc != 1) {
+                    LOGGER.error("EVP_EncryptInit_ex failed with return code: {}", rc);
                     throw new OpenSslException("EVP_EncryptInit_ex failed");
                 }
 
@@ -276,6 +280,7 @@ public final class OpenSslNativeCipher {
 
                 rc = (int) EVP_EncryptUpdate.invoke(ctx, outSeg, outLen, inSeg, input.length);
                 if (rc != 1) {
+                    LOGGER.error("EVP_EncryptUpdate failed with return code: {}", rc);
                     throw new OpenSslException("EVP_EncryptUpdate failed");
                 }
 
@@ -300,12 +305,14 @@ public final class OpenSslNativeCipher {
 
         MemorySegment ctx = (MemorySegment) EVP_CIPHER_CTX_new.invoke();
         if (ctx.address() == 0) {
+            LOGGER.error("EVP_CIPHER_CTX_new failed to create GCM cipher context");
             throw new OpenSslException("EVP_CIPHER_CTX_new failed");
         }
 
         MemorySegment cipher = (MemorySegment) EVP_aes_256_gcm.invoke();
         if (cipher.address() == 0) {
             EVP_CIPHER_CTX_free.invoke(ctx);
+            LOGGER.error("EVP_aes_256_gcm failed to initialize GCM cipher");
             throw new OpenSslException("EVP_aes_256_gcm failed");
         }
 
@@ -319,6 +326,7 @@ public final class OpenSslNativeCipher {
             int rc = (int) EVP_EncryptInit_ex.invoke(ctx, cipher, MemorySegment.NULL, keySeg, ivSeg);
             if (rc != 1) {
                 EVP_CIPHER_CTX_free.invoke(ctx);
+                LOGGER.error("EVP_EncryptInit_ex failed for GCM with return code: {}", rc);
                 throw new OpenSslException("EVP_EncryptInit_ex failed");
             }
             return ctx;
@@ -336,6 +344,7 @@ public final class OpenSslNativeCipher {
 
             int rc = (int) EVP_EncryptUpdate.invoke(ctx, outSeg, outLen, inSeg, input.length);
             if (rc != 1) {
+                LOGGER.error("EVP_EncryptUpdate failed in streaming mode with return code: {}", rc);
                 throw new OpenSslException("EVP_EncryptUpdate failed");
             }
             int bytesWritten = outLen.get(ValueLayout.JAVA_INT, 0);
@@ -353,12 +362,14 @@ public final class OpenSslNativeCipher {
 
             int rc = (int) EVP_EncryptFinal_ex.invoke(ctx, finalOut, finalLen);
             if (rc != 1) {
+                LOGGER.error("EVP_EncryptFinal_ex failed with return code: {}", rc);
                 throw new OpenSslException("EVP_EncryptFinal_ex failed");
             }
 
             MemorySegment tagSeg = arena.allocate(16, 1);
             rc = (int) EVP_CIPHER_CTX_ctrl.invoke(ctx, EVP_CTRL_GCM_GET_TAG, 16, tagSeg);
             if (rc != 1) {
+                LOGGER.error("Failed to get GCM tag with return code: {}", rc);
                 throw new OpenSslException("Failed to get GCM tag");
             }
 
@@ -385,12 +396,14 @@ public final class OpenSslNativeCipher {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment ctx = (MemorySegment) EVP_CIPHER_CTX_new.invoke();
             if (ctx.address() == 0) {
+                LOGGER.error("EVP_CIPHER_CTX_new failed to create decryption context");
                 throw new OpenSslException("EVP_CIPHER_CTX_new failed");
             }
 
             try {
                 MemorySegment cipher = (MemorySegment) EVP_aes_256_gcm.invoke();
                 if (cipher.address() == 0) {
+                    LOGGER.error("EVP_aes_256_gcm failed to get GCM cipher for decryption");
                     throw new OpenSslException("EVP_aes_256_gcm failed");
                 }
 
@@ -402,6 +415,7 @@ public final class OpenSslNativeCipher {
 
                 int rc = (int) EVP_DecryptInit_ex.invoke(ctx, cipher, MemorySegment.NULL, keySeg, ivSeg);
                 if (rc != 1) {
+                    LOGGER.error("EVP_DecryptInit_ex failed with return code: {}", rc);
                     throw new OpenSslException("EVP_DecryptInit_ex failed");
                 }
 
@@ -412,6 +426,7 @@ public final class OpenSslNativeCipher {
 
                 rc = (int) EVP_DecryptUpdate.invoke(ctx, outSeg, outLen, inSeg, dataLen);
                 if (rc != 1) {
+                    LOGGER.error("EVP_DecryptUpdate failed with return code: {}", rc);
                     throw new OpenSslException("EVP_DecryptUpdate failed");
                 }
 
@@ -421,6 +436,7 @@ public final class OpenSslNativeCipher {
 
                 rc = (int) EVP_CIPHER_CTX_ctrl.invoke(ctx, EVP_CTRL_GCM_SET_TAG, 16, tagSeg);
                 if (rc != 1) {
+                    LOGGER.error("Failed to set GCM tag with return code: {}", rc);
                     throw new OpenSslException("Failed to set GCM tag");
                 }
 
@@ -429,6 +445,7 @@ public final class OpenSslNativeCipher {
 
                 rc = (int) EVP_DecryptFinal_ex.invoke(ctx, finalOut, finalLen);
                 if (rc != 1) {
+                    LOGGER.error("GCM tag verification failed with return code: {}", rc);
                     throw new OpenSslException("GCM tag verification failed");
                 }
 
