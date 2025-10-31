@@ -192,7 +192,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
         readAheadworker.close();
-        encryptionMetadataCache.invalidateDirectory(dirPath);
+        encryptionMetadataCache.invalidateDirectory(EncryptionMetadataCache.normalizePath(dirPath));
     }
 
     @Override
@@ -215,7 +215,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
                 LOGGER.warn("Failed to get file size", e);
             }
         }
-        encryptionMetadataCache.invalidateFile(file);
+        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(file));
         super.deleteFile(name);
     }
 
@@ -228,8 +228,10 @@ public final class CryptoDirectIODirectory extends FSDirectory {
             return rawFileSize;
         }
 
+        String normalizedPath = EncryptionMetadataCache.normalizePath(file);
+
         // Fast path: check cache first - avoids FileChannel open
-        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(file);
+        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
         if (cachedFooter != null) {
             return rawFileSize - cachedFooter.getFooterLength();
         }
@@ -237,7 +239,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         // Slow path: read footer from disk
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             try {
-                EncryptionFooter footer = EncryptionFooter.readFromChannel(file, channel, dataKeyBytes, encryptionMetadataCache);
+                EncryptionFooter footer = EncryptionFooter.readFromChannel(normalizedPath, channel, dataKeyBytes, encryptionMetadataCache);
                 return rawFileSize - footer.getFooterLength();
             } catch (EncryptionFooter.NotOSEFFileException e) {
                 LOGGER.debug("Not an OSEF file: {}", file);

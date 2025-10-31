@@ -307,22 +307,24 @@ public class EncryptionFooter {
     /**
      * Read and deserialize footer from a FileChannel
      *
+     * @param normalizedFilePath normalized file path string
      * @param channel FileChannel to read from
      * @param fileKey Key for footer authentication
+     * @param encryptionMetadataCache cache for encryption metadata
      * @return Deserialized EncryptionFooter
      * @throws IOException If reading or deserialization fails
      * @throws NotOSEFFileException If file is not a valid OSEF format
      */
-    public static EncryptionFooter readFromChannel(Path filePath , java.nio.channels.FileChannel channel, byte[] fileKey, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
+    public static EncryptionFooter readFromChannel(String normalizedFilePath, java.nio.channels.FileChannel channel, byte[] fileKey, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
 
-        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(filePath);
+        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedFilePath);
         if (cachedFooter != null) {
             return cachedFooter;
         }
 
         long fileSize = channel.size();
         if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            throw new NotOSEFFileException("File too small to contain encryption footer: " + filePath);
+            throw new NotOSEFFileException("File too small to contain encryption footer: " + normalizedFilePath);
         }
 
         // Read minimum footer to get actual length and validate magic bytes
@@ -333,7 +335,7 @@ public class EncryptionFooter {
 
         // Validate OSEF magic bytes
         if (!isValidOSEFFile(minFooterBytes)) {
-            throw new NotOSEFFileException("File does not contain valid OSEF magic bytes: " + filePath);
+            throw new NotOSEFFileException("File does not contain valid OSEF magic bytes: " + normalizedFilePath);
         }
 
         int footerLength = calculateFooterLength(minFooterBytes);
@@ -347,7 +349,7 @@ public class EncryptionFooter {
         }
 
         EncryptionFooter footer = deserialize(footerBuffer.array(), fileKey);
-        encryptionMetadataCache.putFooter(filePath, footer);
+        encryptionMetadataCache.putFooter(normalizedFilePath, footer);
         return footer;
     }
 

@@ -129,8 +129,10 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             return fileSize;
         }
 
+        String normalizedPath = EncryptionMetadataCache.normalizePath(path);
+
         // check cache first
-        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(path);
+        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
         if (cachedFooter != null) {
             return fileSize - cachedFooter.getFooterLength();
         }
@@ -138,7 +140,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         // read footer from disk with OSEF validation
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
             try {
-                EncryptionFooter footer = EncryptionFooter.readFromChannel(path, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
+                EncryptionFooter footer = EncryptionFooter.readFromChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
                 return fileSize - footer.getFooterLength();
             } catch (EncryptionFooter.NotOSEFFileException e) {
                 return fileSize;
@@ -150,12 +152,12 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public synchronized void close() throws IOException {
         isOpen = false;
         deletePendingFiles();
-        encryptionMetadataCache.invalidateDirectory(dirPath);
+        encryptionMetadataCache.invalidateDirectory(EncryptionMetadataCache.normalizePath(dirPath));
     }
 
     @Override
     public void deleteFile(String name) throws IOException {
         super.deleteFile(name);
-        encryptionMetadataCache.invalidateFile(dirPath.resolve(name));
+        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(name)));
     }
 }

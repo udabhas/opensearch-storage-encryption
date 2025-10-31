@@ -58,7 +58,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
 
-    private final Path filePath;
+    private final String normalizedFilePath;
 
 
     public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver, Path filePath, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
@@ -68,14 +68,14 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.end = fc.size();
         this.keyResolver = keyResolver;
         this.isClone = false;
-        this.filePath = filePath;
+        this.normalizedFilePath = EncryptionMetadataCache.normalizePath(filePath);
         this.encryptionMetadataCache = encryptionMetadataCache;
 
         // Get directory key first
         this.directoryKey = keyResolver.getDataKey().getEncoded();
 
         // Read footer with temporary key for authentication
-        EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath, channel, directoryKey, encryptionMetadataCache);
+        EncryptionFooter footer = EncryptionFooter.readFromChannel(normalizedFilePath, channel, directoryKey, encryptionMetadataCache);
         this.messageId = footer.getMessageId();
         this.frameSize = footer.getFrameSize();
         this.frameSizePower = footer.getFrameSizePower();
@@ -91,7 +91,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize,
                                     KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize,
-                                    int frameSizePower, short algorithmId, byte[] directoryKey, byte[] messageId, Path filePath,
+                                    int frameSizePower, short algorithmId, byte[] directoryKey, byte[] messageId, String normalizedFilePath,
                                     EncryptionMetadataCache encryptionMetadataCache)
         throws IOException {
         super(resourceDesc, bufferSize);
@@ -107,7 +107,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.algorithm = EncryptionAlgorithm.fromId(algorithmId);
         this.directoryKey = directoryKey;  // Passed from parent
         this.messageId = messageId;  // Passed from parent
-        this.filePath = filePath;
+        this.normalizedFilePath = normalizedFilePath;
         this.encryptionMetadataCache = encryptionMetadataCache;
     }
 
@@ -146,7 +146,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
                 algorithm.getAlgorithmId(),
                 directoryKey,  // Pass directory key
                 messageId,      // Pass message ID
-                filePath,
+                normalizedFilePath,
                 encryptionMetadataCache
         );
     }
@@ -183,7 +183,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             try {
                 Cipher cipher = algorithm.getDecryptionCipher();
                 byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, 0, position,
-                        this.filePath, encryptionMetadataCache);
+                        this.normalizedFilePath, encryptionMetadataCache);
 
                 cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 
@@ -216,7 +216,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         try {
             Cipher cipher = algorithm.getDecryptionCipher();
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame,
-                    this.filePath, encryptionMetadataCache);
+                    this.normalizedFilePath, encryptionMetadataCache);
 
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 

@@ -220,7 +220,7 @@ public class MemorySegmentDecryptor {
     /**
      * Frame-based decryption for large files with frame boundary handling
      */
-    public static void decryptInPlaceFrameBased(long addr, long length, byte[] fileKey, byte[] directoryKey, byte[] messageId, long frameSize, long fileOffset, Path filePath, EncryptionMetadataCache encryptionMetadataCache) throws Exception {
+    public static void decryptInPlaceFrameBased(long addr, long length, byte[] fileKey, byte[] directoryKey, byte[] messageId, long frameSize, long fileOffset, String filePath, EncryptionMetadataCache encryptionMetadataCache) throws Exception {
         // Fast path: single frame (99% of cases)
         if (fileOffset + length <= frameSize) {
             Cipher cipher = CIPHER_POOL.get();
