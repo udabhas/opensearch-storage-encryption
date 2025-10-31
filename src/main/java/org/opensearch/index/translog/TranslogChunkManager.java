@@ -66,8 +66,8 @@ public class TranslogChunkManager {
     private MemorySegment currentCipher;
     private long currentBlockNumber = 0;
     private int currentBlockBytesWritten = 0;
-    private static final int BLOCK_SIZE = 8192; // 8KB blocks
     private static final int BLOCK_SIZE_SHIFT = 13;
+    private static final int BLOCK_SIZE = 1 << BLOCK_SIZE_SHIFT; // 8KB blocks
     private long fileWritePosition = 0;
 
     /**
@@ -113,6 +113,7 @@ public class TranslogChunkManager {
         this.keyIvResolver = keyIvResolver;
         this.filePath = filePath;
         this.translogUUID = translogUUID;
+        // Non-translog files (.ckp) don't need encryption anyway
         this.actualHeaderSize = filePath.getFileName().toString().endsWith(".tlog") ? calculateTranslogHeaderSize(translogUUID) : 0;
 
         // base IV
@@ -364,8 +365,7 @@ public class TranslogChunkManager {
                 encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, java.util.Arrays.copyOf(plainData, toWrite));
             } catch (Throwable e) {
                 OpenSslNativeCipher.freeCipherContext(currentCipher);
-                throw new IOException(
-                        "Failed to encrypt translog data at offset:" + fileWritePosition + " file:" + filePath, e);
+                throw new IOException("Failed to encrypt translog data at offset:" + fileWritePosition + " file:" + filePath, e);
             }
 
             // Write encrypted data immediately at tracked position
