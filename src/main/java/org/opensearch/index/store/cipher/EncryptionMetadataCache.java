@@ -20,44 +20,13 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class EncryptionMetadataCache {
 
-    private static final class FooterKey {
-        private final Path filePath;
-        private final String pathString;
-        private int hash;
-
-        FooterKey(Path filePath) {
-            this.filePath = filePath.toAbsolutePath().normalize();
-            this.pathString = this.filePath.toString();
-        }
-
-        @Override
-        public int hashCode() {
-            int h = hash;
-            if (h == 0) {
-                h = pathString.hashCode();
-                if (h == 0) h = 1;
-                hash = h;
-            }
-            return h;
-        }
-
-        @Override
-        public boolean equals(Object obj) {
-            if (this == obj) return true;
-            if (!(obj instanceof FooterKey other)) return false;
-            return pathString.equals(other.pathString);
-        }
-    }
-
     private static final class FrameKey {
-        private final Path filePath;
         private final String pathString;
         private final long frameNumber;
         private int hash;
 
-        FrameKey(Path filePath, long frameNumber) {
-            this.filePath = filePath.toAbsolutePath().normalize();
-            this.pathString = this.filePath.toString();
+        FrameKey(String pathString, long frameNumber) {
+            this.pathString = pathString;
             this.frameNumber = frameNumber;
         }
 
@@ -80,7 +49,7 @@ public class EncryptionMetadataCache {
         }
     }
 
-    private final ConcurrentHashMap<FooterKey, EncryptionFooter> footerCache;
+    private final ConcurrentHashMap<String, EncryptionFooter> footerCache;
     private final ConcurrentHashMap<FrameKey, byte[]> frameIvCache;
 
     public EncryptionMetadataCache() {
@@ -88,34 +57,35 @@ public class EncryptionMetadataCache {
         this.frameIvCache = new ConcurrentHashMap<>(1024, 0.75f, 4);
     }
 
-    public EncryptionFooter getFooter(Path filePath) {
-        return footerCache.get(new FooterKey(filePath));
+    public static String normalizePath(Path filePath) {
+        return filePath.toAbsolutePath().normalize().toString();
     }
 
-    public void putFooter(Path filePath, EncryptionFooter footer) {
-        footerCache.putIfAbsent(new FooterKey(filePath), footer);
+    public EncryptionFooter getFooter(String normalizedPath) {
+        return footerCache.get(normalizedPath);
     }
 
-    public byte[] getFrameIv(Path filePath, long frameNumber) {
-        return frameIvCache.get(new FrameKey(filePath, frameNumber));
+    public void putFooter(String normalizedPath, EncryptionFooter footer) {
+        footerCache.putIfAbsent(normalizedPath, footer);
     }
 
-    public void putFrameIv(Path filePath, long frameNumber, byte[] iv) {
-        frameIvCache.putIfAbsent(new FrameKey(filePath, frameNumber), iv);
+    public byte[] getFrameIv(String normalizedPath, long frameNumber) {
+        return frameIvCache.get(new FrameKey(normalizedPath, frameNumber));
     }
 
-    public void invalidateFile(Path filePath) {
-        String pathStr = filePath.toAbsolutePath().normalize().toString();
-        footerCache.keySet().removeIf(key -> key.pathString.equals(pathStr));
-        frameIvCache.keySet().removeIf(key -> key.pathString.equals(pathStr));
+    public void putFrameIv(String normalizedPath, long frameNumber, byte[] iv) {
+        frameIvCache.putIfAbsent(new FrameKey(normalizedPath, frameNumber), iv);
     }
 
-    public void invalidateDirectory(Path directoryPath) {
-        String dirPrefix = directoryPath.toAbsolutePath().normalize().toString();
-        if (!dirPrefix.endsWith("/")) dirPrefix += "/";
-        String finalPrefix = dirPrefix;
-        footerCache.keySet().removeIf(key -> key.pathString.startsWith(finalPrefix));
-        frameIvCache.keySet().removeIf(key -> key.pathString.startsWith(finalPrefix));
+    public void invalidateFile(String normalizedPath) {
+        footerCache.remove(normalizedPath);
+        frameIvCache.keySet().removeIf(key -> key.pathString.equals(normalizedPath));
+    }
+
+    public void invalidateDirectory(String normalizedDirPath) {
+        String dirPrefix = normalizedDirPath.endsWith("/") ? normalizedDirPath : normalizedDirPath + "/";
+        footerCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
+        frameIvCache.keySet().removeIf(key -> key.pathString.startsWith(dirPrefix));
     }
 
     public void clear() {

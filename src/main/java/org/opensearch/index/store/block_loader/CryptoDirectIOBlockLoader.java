@@ -107,7 +107,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                     messageId,                                  // Message ID from footer
                     org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
                     startOffset,                                 // File offset
-                    filePath,
+                    filePath.toAbsolutePath().normalize().toString(),
                     encryptionMetadataCache
             );
 
@@ -180,7 +180,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                 throw new IOException("Not an OSEF file.");
             }
 
-            EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
+            EncryptionFooter footer = EncryptionFooter.readFromChannel(filePath.toAbsolutePath().normalize().toString(), channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
             return footer.getMessageId();
         }
     }

@@ -69,7 +69,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private int totalFrames = 0;
         private boolean isClosed = false;
 
-        private final Path filePath;
+        private final String normalizedFilePath;
         private final EncryptionMetadataCache encryptionMetadataCache;
 
         EncryptedOutputStream(OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath, EncryptionMetadataCache encryptionMetadataCache) {
@@ -88,7 +88,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             this.algorithm = EncryptionAlgorithm.fromId((short) algorithmId);
             this.buffer = new byte[BUFFER_SIZE];
 
-            this.filePath = filePath;
+            this.normalizedFilePath = EncryptionMetadataCache.normalizePath(filePath);
             this.encryptionMetadataCache = encryptionMetadataCache;
 
             // Initialize first frame cipher
@@ -191,12 +191,12 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 footer.setFrameCount(totalFrames);
 
                 // Write footer with directory key for authentication
-                out.write(footer.serialize(this.filePath, this.directoryKey));
+                out.write(footer.serialize(java.nio.file.Paths.get(normalizedFilePath), this.directoryKey));
 
                 super.close();
 
-                if (filePath != null) {
-                    encryptionMetadataCache.putFooter(filePath, footer);
+                if (normalizedFilePath != null) {
+                    encryptionMetadataCache.putFooter(normalizedFilePath, footer);
                 }
 
             } catch (IOException e) {
@@ -223,7 +223,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             this.currentFrameOffset = offsetWithinFrame;
 
             byte[] frameIV = AesCipherFactory.computeFrameIV(
-                    directoryKey, footer.getMessageId(), frameNumber, offsetWithinFrame, filePath, encryptionMetadataCache
+                    directoryKey, footer.getMessageId(), frameNumber, offsetWithinFrame, normalizedFilePath, encryptionMetadataCache
             );
 
             try {

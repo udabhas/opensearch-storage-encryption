@@ -92,6 +92,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         private final Key fileKey;
         private final byte[] buffer;
         private final Path path;
+        private final String normalizedPath;
         private final Pool<RefCountedMemorySegment> memorySegmentPool;
         private final BlockCache<RefCountedMemorySegment> blockCache;
         private final long frameSize;
@@ -121,6 +122,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         ) {
             super(os);
             this.path = path;
+            this.normalizedPath = EncryptionMetadataCache.normalizePath(path);
             this.directoryKey = key;
             this.buffer = new byte[BUFFER_SIZE];
             this.memorySegmentPool = memorySegmentPool;
@@ -140,7 +142,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.fileKey = new javax.crypto.spec.SecretKeySpec(derivedKey, "AES");
 
             // Initialize first frame cipher
-            initializeFrameCipher(0, 0, path);
+            initializeFrameCipher(0, 0);
         }
 
         @Override
@@ -156,7 +158,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
             if (length >= BUFFER_SIZE) {
                 flushBuffer();
-                processAndWrite(path, b, offset, length);
+                processAndWrite(b, offset, length);
                 return;
             }
 
@@ -194,7 +196,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             if (flushable == 0)
                 return;
 
-            processAndWrite(path, buffer, 0, flushable);
+            processAndWrite(buffer, 0, flushable);
 
             final int tail = bufferPosition - flushable;
             if (tail > 0) {
@@ -205,12 +207,12 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
         private void forceFlushBuffer() throws IOException {
             if (bufferPosition > 0) {
-                processAndWrite(path, buffer, 0, bufferPosition);
+                processAndWrite(buffer, 0, bufferPosition);
                 bufferPosition = 0;
             }
         }
 
-        private void processAndWrite(Path path, byte[] data, int arrayOffset, int length) throws IOException {
+        private void processAndWrite(byte[] data, int arrayOffset, int length) throws IOException {
             int offsetInBuffer = 0;
             final MemorySegment full = MemorySegment.ofArray(data);
 
@@ -220,8 +222,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 int blockOffset = (int) (absoluteOffset & CACHE_BLOCK_MASK);
                 int chunkLen = Math.min(length - offsetInBuffer, CACHE_BLOCK_SIZE - blockOffset);
 
-                cacheBlockIfEligible(path, full, arrayOffset + offsetInBuffer, blockAlignedOffset, blockOffset, chunkLen);
-                writeEncryptedChunk(data, arrayOffset + offsetInBuffer, chunkLen, absoluteOffset, path);
+                cacheBlockIfEligible(full, arrayOffset + offsetInBuffer, blockAlignedOffset, blockOffset, chunkLen);
+                writeEncryptedChunk(data, arrayOffset + offsetInBuffer, chunkLen, absoluteOffset);
                 offsetInBuffer += chunkLen;
             }
 
@@ -229,7 +231,6 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         }
 
         private void cacheBlockIfEligible(
-            Path path,
             MemorySegment sourceData,
             int sourceOffset,
             long blockAlignedOffset,
@@ -258,7 +259,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             }
         }
 
-        private void writeEncryptedChunk(byte[] data, int offset, int length, long absoluteOffset, Path filePath
+        private void writeEncryptedChunk(byte[] data, int offset, int length, long absoluteOffset
         ) throws IOException {
             int remaining = length;
             int dataOffset = offset;
@@ -270,7 +271,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 
                 if (frameNumber != currentFrameNumber) {
                     finalizeCurrentFrame();
-                    initializeFrameCipher(frameNumber, currentOffset % frameSize, filePath);
+                    initializeFrameCipher(frameNumber, currentOffset % frameSize);
                 }
 
                 int chunkSize = (int) Math.min(remaining, frameEnd - currentOffset);
@@ -312,7 +313,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 footer.setFrameCount(totalFrames);
                 out.write(footer.serialize(null, this.directoryKey));
 
-                encryptionMetadataCache.putFooter(path, footer);
+                encryptionMetadataCache.putFooter(normalizedPath, footer);
 
                 super.close();
                 loadFinalBlocksIntoCache();
@@ -356,7 +357,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             }
         }
 
-        private void initializeFrameCipher(int frameNumber, long offsetWithinFrame, Path filePath) {
+        private void initializeFrameCipher(int frameNumber, long offsetWithinFrame) {
             this.currentFrameNumber = frameNumber;
             this.currentFrameOffset = offsetWithinFrame;
 
@@ -367,7 +368,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                     footer.getMessageId(),
                     frameNumber,
                     offsetWithinFrame,
-                    filePath,
+                    normalizedPath,
                     encryptionMetadataCache
                 );
 

@@ -143,11 +143,11 @@ public class AesCipherFactory {
      * @param messageId         the file's unique MessageId (16 bytes)
      * @param frameNumber       the frame number (0-based)
      * @param offsetWithinFrame the byte offset within the frame
-     * @param filePath          the file path
+     * @param normalizedFilePath the normalized file path string
      * @param encryptionMetadataCache the encryption metadata cache
      * @return frame-specific IV for encryption/decryption
      */
-    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, long frameNumber, long offsetWithinFrame, java.nio.file.Path filePath, EncryptionMetadataCache encryptionMetadataCache) {
+    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, long frameNumber, long offsetWithinFrame, String normalizedFilePath, EncryptionMetadataCache encryptionMetadataCache) {
         if (messageId.length != 16) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }
@@ -158,7 +158,7 @@ public class AesCipherFactory {
         byte[] frameBaseIV;
 
         // Try to get from footer cache first
-        EncryptionFooter footer = encryptionMetadataCache.getFooter(filePath);
+        EncryptionFooter footer = encryptionMetadataCache.getFooter(normalizedFilePath);
         if (footer != null) {
             Optional<byte[]> cachedIV = footer.getFrameIV(frameNumber);
             if (cachedIV.isPresent()) {
@@ -168,11 +168,11 @@ public class AesCipherFactory {
             }
         } else {
             // Fallback to cache mechanism
-            frameBaseIV = encryptionMetadataCache.getFrameIv(filePath, frameNumber);
+            frameBaseIV = encryptionMetadataCache.getFrameIv(normalizedFilePath, frameNumber);
             if (frameBaseIV == null) {
                 String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
                 frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
-                encryptionMetadataCache.    putFrameIv(filePath, frameNumber, frameBaseIV);
+                encryptionMetadataCache.putFrameIv(normalizedFilePath, frameNumber, frameBaseIV);
             }
         }
 
