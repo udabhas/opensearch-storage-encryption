@@ -135,7 +135,7 @@ public class DefaultKeyResolver implements KeyResolver {
         try {
             return NodeLevelKeyCache.getInstance().get(indexUuid);
         } catch (Exception ex) {
-            throw new RuntimeException("No Node Level Key Cache available for {}");
+            throw new RuntimeException("No Node Level Key Cache available for {}", ex);
         }
 
     }
