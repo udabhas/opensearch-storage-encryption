@@ -60,8 +60,8 @@ public final class OpenSslNativeCipher {
         if (os.contains("mac")) {
             // Common Homebrew path for OpenSSL on macOS
             String[] macPaths = {
-                    "/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib",   // Apple Silicon (M1/M2)
-                    "/usr/local/opt/openssl@3/lib/libcrypto.dylib"       // Intel Macs
+                "/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib",   // Apple Silicon (M1/M2)
+                "/usr/local/opt/openssl@3/lib/libcrypto.dylib"       // Intel Macs
             };
 
             for (String path : macPaths) {
@@ -76,12 +76,12 @@ public final class OpenSslNativeCipher {
             try {
                 // Try OpenSSL 3 first
                 String[] linuxPaths = {
-                        "/lib64/libcrypto.so.3",     // OpenSSL 3
-                        "/lib64/libcrypto.so.1.1",   // OpenSSL 1.1 fallback
-                        "/lib64/libcrypto.so.10",    // Legacy systems
-                        "/lib64/libcrypto.so",       // Generic symlink
-                        "/lib/libcrypto.so.3",
-                        "/lib/libcrypto.so" };
+                    "/lib64/libcrypto.so.3",     // OpenSSL 3
+                    "/lib64/libcrypto.so.1.1",   // OpenSSL 1.1 fallback
+                    "/lib64/libcrypto.so.10",    // Legacy systems
+                    "/lib64/libcrypto.so",       // Generic symlink
+                    "/lib/libcrypto.so.3",
+                    "/lib/libcrypto.so" };
 
                 for (String path : linuxPaths) {
                     Path p = Path.of(path);
@@ -126,91 +126,91 @@ public final class OpenSslNativeCipher {
     static {
         try {
             EVP_CIPHER_CTX_new = LINKER
-                    .downcallHandle(LIBCRYPTO.find("EVP_CIPHER_CTX_new").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
+                .downcallHandle(LIBCRYPTO.find("EVP_CIPHER_CTX_new").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
 
             EVP_CIPHER_CTX_free = LINKER
-                    .downcallHandle(LIBCRYPTO.find("EVP_CIPHER_CTX_free").orElseThrow(), FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+                .downcallHandle(LIBCRYPTO.find("EVP_CIPHER_CTX_free").orElseThrow(), FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
             EVP_EncryptInit_ex = LINKER
-                    .downcallHandle(
-                            LIBCRYPTO.find("EVP_EncryptInit_ex").orElseThrow(),
-                            FunctionDescriptor
-                                    .of(
-                                            ValueLayout.JAVA_INT,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS
-                                    )
-                    );
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_EncryptInit_ex").orElseThrow(),
+                    FunctionDescriptor
+                        .of(
+                            ValueLayout.JAVA_INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
+                        )
+                );
 
             EVP_EncryptUpdate = LINKER
-                    .downcallHandle(
-                            LIBCRYPTO.find("EVP_EncryptUpdate").orElseThrow(),
-                            FunctionDescriptor
-                                    .of(
-                                            ValueLayout.JAVA_INT,
-                                            ValueLayout.ADDRESS, // ctx
-                                            ValueLayout.ADDRESS, // out
-                                            ValueLayout.ADDRESS, // outLen
-                                            ValueLayout.ADDRESS, // in
-                                            ValueLayout.JAVA_INT // inLen
-                                    )
-                    );
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_EncryptUpdate").orElseThrow(),
+                    FunctionDescriptor
+                        .of(
+                            ValueLayout.JAVA_INT,
+                            ValueLayout.ADDRESS, // ctx
+                            ValueLayout.ADDRESS, // out
+                            ValueLayout.ADDRESS, // outLen
+                            ValueLayout.ADDRESS, // in
+                            ValueLayout.JAVA_INT // inLen
+                        )
+                );
 
             EVP_aes_256_ctr = LINKER
-                    .downcallHandle(LIBCRYPTO.find("EVP_aes_256_ctr").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
+                .downcallHandle(LIBCRYPTO.find("EVP_aes_256_ctr").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
 
             EVP_aes_256_gcm = LINKER
-                    .downcallHandle(LIBCRYPTO.find("EVP_aes_256_gcm").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
+                .downcallHandle(LIBCRYPTO.find("EVP_aes_256_gcm").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
 
             EVP_EncryptFinal_ex = LINKER
-                    .downcallHandle(
-                            LIBCRYPTO.find("EVP_EncryptFinal_ex").orElseThrow(),
-                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-                    );
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_EncryptFinal_ex").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+                );
 
             EVP_CIPHER_CTX_ctrl = LINKER
-                    .downcallHandle(
-                            LIBCRYPTO.find("EVP_CIPHER_CTX_ctrl").orElseThrow(),
-                            FunctionDescriptor
-                                    .of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-                    );
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_CIPHER_CTX_ctrl").orElseThrow(),
+                    FunctionDescriptor
+                        .of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
+                );
 
             EVP_DecryptInit_ex = LINKER
-                    .downcallHandle(
-                            LIBCRYPTO.find("EVP_DecryptInit_ex").orElseThrow(),
-                            FunctionDescriptor
-                                    .of(
-                                            ValueLayout.JAVA_INT,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS
-                                    )
-                    );
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_DecryptInit_ex").orElseThrow(),
+                    FunctionDescriptor
+                        .of(
+                            ValueLayout.JAVA_INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
+                        )
+                );
 
             EVP_DecryptUpdate = LINKER
-                    .downcallHandle(
-                            LIBCRYPTO.find("EVP_DecryptUpdate").orElseThrow(),
-                            FunctionDescriptor
-                                    .of(
-                                            ValueLayout.JAVA_INT,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.ADDRESS,
-                                            ValueLayout.JAVA_INT
-                                    )
-                    );
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_DecryptUpdate").orElseThrow(),
+                    FunctionDescriptor
+                        .of(
+                            ValueLayout.JAVA_INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.JAVA_INT
+                        )
+                );
 
             EVP_DecryptFinal_ex = LINKER
-                    .downcallHandle(
-                            LIBCRYPTO.find("EVP_DecryptFinal_ex").orElseThrow(),
-                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-                    );
+                .downcallHandle(
+                    LIBCRYPTO.find("EVP_DecryptFinal_ex").orElseThrow(),
+                    FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+                );
 
         } catch (Throwable t) {
             LOGGER.error("Failed to initialize OpenSSL method handles via Panama", t);

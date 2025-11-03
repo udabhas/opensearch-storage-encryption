@@ -50,7 +50,14 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
      * @param keyResolver resolver for encryption keys and initialization vectors
      * @throws IOException if the directory cannot be created or accessed
      */
-    public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyResolver keyResolver, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
+    public CryptoNIOFSDirectory(
+        LockFactory lockFactory,
+        Path location,
+        Provider provider,
+        KeyResolver keyResolver,
+        EncryptionMetadataCache encryptionMetadataCache
+    )
+        throws IOException {
         super(location, lockFactory);
         this.provider = provider;
         this.keyResolver = keyResolver;
@@ -72,12 +79,12 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
         try {
             final IndexInput indexInput = new CryptoBufferedIndexInput(
-                    "CryptoBufferedIndexInput(path=\"" + path + "\")",
-                    fc,
-                    context,
-                    this.keyResolver,
-                    path,
-                    this.encryptionMetadataCache
+                "CryptoBufferedIndexInput(path=\"" + path + "\")",
+                fc,
+                context,
+                this.keyResolver,
+                path,
+                this.encryptionMetadataCache
             );
             success = true;
             return indexInput;
@@ -99,7 +106,16 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId, path, this.encryptionMetadataCache);
+        return new CryptoOutputStreamIndexOutput(
+            name,
+            path,
+            fos,
+            this.keyResolver,
+            provider,
+            algorithmId,
+            path,
+            this.encryptionMetadataCache
+        );
     }
 
     @Override
@@ -113,7 +129,16 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyResolver, provider, algorithmId, path, this.encryptionMetadataCache);
+        return new CryptoOutputStreamIndexOutput(
+            name,
+            path,
+            fos,
+            this.keyResolver,
+            provider,
+            algorithmId,
+            path,
+            this.encryptionMetadataCache
+        );
     }
 
     @Override
@@ -140,7 +165,8 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         // read footer from disk with OSEF validation
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
             try {
-                EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
+                EncryptionFooter footer = EncryptionFooter
+                    .readViaFileChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
                 return fileSize - footer.getFooterLength();
             } catch (EncryptionFooter.NotOSEFFileException e) {
                 return fileSize;

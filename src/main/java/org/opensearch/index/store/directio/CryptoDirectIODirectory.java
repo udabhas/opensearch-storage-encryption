@@ -9,7 +9,6 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SI
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -29,14 +28,14 @@ import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
 import org.opensearch.index.store.read_ahead.Worker;
 import org.opensearch.index.store.read_ahead.impl.ReadaheadManagerImpl;
-import org.opensearch.index.store.footer.EncryptionFooter;
-import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 
 /**
  * A high-performance FSDirectory implementation that combines Direct I/O operations with encryption.
@@ -98,7 +97,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         Worker worker,
         EncryptionMetadataCache encryptionMetadataCache
     )
-            throws IOException {
+        throws IOException {
         super(path, lockFactory);
         this.keyResolver = keyResolver;
         this.memorySegmentPool = memorySegmentPool;
@@ -129,15 +128,15 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
 
         return CachedMemorySegmentIndexInput
-                .newInstance(
-                        "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
-                        file,
-                        contentLength,
-                        blockCache,
-                        readAheadManager,
-                        readAheadContext,
-                        pinRegistry
-                );
+            .newInstance(
+                "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
+                file,
+                contentLength,
+                blockCache,
+                readAheadManager,
+                readAheadContext,
+                pinRegistry
+            );
     }
 
     @Override
@@ -151,14 +150,14 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new BufferIOWithCaching(
-                name,
-                path,
-                fos,
-                dataKeyBytes,
-                this.memorySegmentPool,
-                this.blockCache,
-                this.provider,
-                this.encryptionMetadataCache
+            name,
+            path,
+            fos,
+            dataKeyBytes,
+            this.memorySegmentPool,
+            this.blockCache,
+            this.provider,
+            this.encryptionMetadataCache
         );
 
     }
@@ -175,14 +174,14 @@ public final class CryptoDirectIODirectory extends FSDirectory {
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new BufferIOWithCaching(
-                name,
-                path,
-                fos,
-                dataKeyBytes,
-                this.memorySegmentPool,
-                this.blockCache,
-                this.provider,
-                this.encryptionMetadataCache
+            name,
+            path,
+            fos,
+            dataKeyBytes,
+            this.memorySegmentPool,
+            this.blockCache,
+            this.provider,
+            this.encryptionMetadataCache
         );
     }
 

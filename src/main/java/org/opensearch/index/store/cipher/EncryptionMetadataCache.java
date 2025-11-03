@@ -1,17 +1,13 @@
 /*
+ * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
- *
- * The OpenSearch Contributors require contributions made to
- * this file be licensed under the Apache-2.0 license or a
- * compatible open source license.
  */
-
 package org.opensearch.index.store.cipher;
-
-import org.opensearch.index.store.footer.EncryptionFooter;
 
 import java.nio.file.Path;
 import java.util.concurrent.ConcurrentHashMap;
+
+import org.opensearch.index.store.footer.EncryptionFooter;
 
 /**
  * Cache for encryption metadata (footers and frame IVs) for an index.
@@ -35,7 +31,8 @@ public class EncryptionMetadataCache {
             int h = hash;
             if (h == 0) {
                 h = 31 * pathString.hashCode() + Long.hashCode(frameNumber);
-                if (h == 0) h = 1;
+                if (h == 0)
+                    h = 1;
                 hash = h;
             }
             return h;
@@ -43,8 +40,10 @@ public class EncryptionMetadataCache {
 
         @Override
         public boolean equals(Object obj) {
-            if (this == obj) return true;
-            if (!(obj instanceof FrameKey other)) return false;
+            if (this == obj)
+                return true;
+            if (!(obj instanceof FrameKey other))
+                return false;
             return frameNumber == other.frameNumber && pathString.equals(other.pathString);
         }
     }

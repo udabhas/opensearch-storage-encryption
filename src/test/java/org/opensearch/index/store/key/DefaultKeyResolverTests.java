@@ -17,7 +17,6 @@ import java.security.Key;
 import java.security.Provider;
 import java.security.Security;
 
-
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.NIOFSDirectory;
@@ -146,8 +145,6 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         assertEquals(32, key.getEncoded().length);
     }
 
-
-
     public void testLoadKeyFromMasterKeyProvider() throws Exception {
         byte[] dataKey = new byte[32];
         byte[] encryptedKey = new byte[32];
@@ -166,7 +163,7 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         assertNotNull(loadedKey);
         assertEquals("AES", loadedKey.getAlgorithm());
         assertEquals(32, loadedKey.getEncoded().length);
-        
+
         // Verify consistency - calling twice should return the same derived key
         Key loadedKey2 = resolver.loadKeyFromMasterKeyProvider();
         assertArrayEquals(loadedKey.getEncoded(), loadedKey2.getEncoded());
@@ -225,8 +222,6 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
 
         assertTrue("keyfile should exist", keyFileExists);
     }
-
-
 
     public void testKeyIsConsistentAcrossReads() throws Exception {
         byte[] dataKey = new byte[32];

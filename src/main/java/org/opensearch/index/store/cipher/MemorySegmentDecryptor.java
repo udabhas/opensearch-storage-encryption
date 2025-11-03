@@ -9,7 +9,6 @@ import static org.opensearch.index.store.cipher.AesCipherFactory.CIPHER_POOL;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
-import java.nio.file.Path;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
@@ -220,32 +219,42 @@ public class MemorySegmentDecryptor {
     /**
      * Frame-based decryption for large files with frame boundary handling
      */
-    public static void decryptInPlaceFrameBased(long addr, long length, byte[] fileKey, byte[] directoryKey, byte[] messageId, long frameSize, long fileOffset, String filePath, EncryptionMetadataCache encryptionMetadataCache) throws Exception {
+    public static void decryptInPlaceFrameBased(
+        long addr,
+        long length,
+        byte[] fileKey,
+        byte[] directoryKey,
+        byte[] messageId,
+        long frameSize,
+        long fileOffset,
+        String filePath,
+        EncryptionMetadataCache encryptionMetadataCache
+    ) throws Exception {
         // Fast path: single frame (99% of cases)
         if (fileOffset + length <= frameSize) {
             Cipher cipher = CIPHER_POOL.get();
             SecretKeySpec keySpec = new SecretKeySpec(fileKey, AesCipherFactory.ALGORITHM);
             byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, 0, fileOffset, filePath, encryptionMetadataCache);
-            
+
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
-            
+
             if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
                 cipher.update(ZERO_SKIP, 0, (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
             }
-            
+
             MemorySegment segment = MemorySegment.ofAddress(addr).reinterpret(length);
             ByteBuffer buffer = segment.asByteBuffer();
-            
+
             final int CHUNK_SIZE = Math.min(DEFAULT_MAX_CHUNK_SIZE, (int) length);
             byte[] chunk = new byte[CHUNK_SIZE];
             byte[] decryptedChunk = new byte[CHUNK_SIZE];
-            
+
             int position = 0;
             while (position < buffer.capacity()) {
                 int size = Math.min(CHUNK_SIZE, buffer.capacity() - position);
                 buffer.position(position);
                 buffer.get(chunk, 0, size);
-                
+
                 int decryptedLength = cipher.update(chunk, 0, size, decryptedChunk, 0);
                 if (decryptedLength > 0) {
                     buffer.position(position);
@@ -253,7 +262,7 @@ public class MemorySegmentDecryptor {
                 }
                 position += size;
             }
-            
+
             int finalLength = cipher.doFinal(new byte[0], 0, 0, decryptedChunk, 0);
             if (finalLength > 0) {
                 buffer.position(position - finalLength);
@@ -261,42 +270,43 @@ public class MemorySegmentDecryptor {
             }
             return;
         }
-        
+
         // Slow path: multi-frame
         MemorySegment segment = MemorySegment.ofAddress(addr).reinterpret(length);
         long remaining = length;
         long currentOffset = fileOffset;
         long bufferOffset = 0;
-        
+
         while (remaining > 0) {
             int frameNumber = (int) (currentOffset / frameSize);
             long frameStart = frameNumber * frameSize;
             long frameEnd = frameStart + frameSize;
             long bytesInFrame = Math.min(remaining, frameEnd - currentOffset);
-            
+
             Cipher cipher = CIPHER_POOL.get();
             SecretKeySpec keySpec = new SecretKeySpec(fileKey, AesCipherFactory.ALGORITHM);
-            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, currentOffset - frameStart, filePath, encryptionMetadataCache);
-            
+            byte[] frameIV = AesCipherFactory
+                .computeFrameIV(directoryKey, messageId, frameNumber, currentOffset - frameStart, filePath, encryptionMetadataCache);
+
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
-            
+
             if (currentOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
                 cipher.update(ZERO_SKIP, 0, (int) (currentOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
             }
-            
+
             MemorySegment frameSegment = segment.asSlice(bufferOffset, bytesInFrame);
             ByteBuffer buffer = frameSegment.asByteBuffer();
-            
+
             final int CHUNK_SIZE = Math.min(DEFAULT_MAX_CHUNK_SIZE, (int) bytesInFrame);
             byte[] chunk = new byte[CHUNK_SIZE];
             byte[] decryptedChunk = new byte[CHUNK_SIZE];
-            
+
             int position = 0;
             while (position < buffer.capacity()) {
                 int size = Math.min(CHUNK_SIZE, buffer.capacity() - position);
                 buffer.position(position);
                 buffer.get(chunk, 0, size);
-                
+
                 int decryptedLength = cipher.update(chunk, 0, size, decryptedChunk, 0);
                 if (decryptedLength > 0) {
                     buffer.position(position);
@@ -304,13 +314,13 @@ public class MemorySegmentDecryptor {
                 }
                 position += size;
             }
-            
+
             int finalLength = cipher.doFinal(new byte[0], 0, 0, decryptedChunk, 0);
             if (finalLength > 0) {
                 buffer.position(position - finalLength);
                 buffer.put(decryptedChunk, 0, finalLength);
             }
-            
+
             currentOffset += bytesInFrame;
             bufferOffset += bytesInFrame;
             remaining -= bytesInFrame;

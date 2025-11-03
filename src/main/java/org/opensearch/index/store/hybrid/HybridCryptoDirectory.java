@@ -8,8 +8,6 @@ import java.io.IOException;
 import java.security.Provider;
 import java.util.Set;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.FileSwitchDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -67,7 +65,13 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
      * @param keyIvResolver resolver for encryption keys and initialization vectors (shared across both directories)
      * @throws IOException if either directory cannot be initialized
      */
-    public HybridCryptoDirectory(LockFactory lockFactory, CryptoDirectIODirectory delegate, Provider provider, KeyResolver keyResolver, EncryptionMetadataCache encryptionMetadataCache)
+    public HybridCryptoDirectory(
+        LockFactory lockFactory,
+        CryptoDirectIODirectory delegate,
+        Provider provider,
+        KeyResolver keyResolver,
+        EncryptionMetadataCache encryptionMetadataCache
+    )
         throws IOException {
         super(lockFactory, delegate.getDirectory(), provider, keyResolver, encryptionMetadataCache);
         this.cryptoDirectIODirectory = delegate;

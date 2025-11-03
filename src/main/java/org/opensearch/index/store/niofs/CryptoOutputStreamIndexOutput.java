@@ -7,7 +7,10 @@ package org.opensearch.index.store.niofs;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
+import java.security.Key;
+import java.security.Provider;
 
 import org.apache.lucene.store.OutputStreamIndexOutput;
 import org.opensearch.common.SuppressForbidden;
@@ -19,10 +22,6 @@ import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
-
-import java.lang.foreign.MemorySegment;
-import java.security.Key;
-import java.security.Provider;
 
 /**
  * An IndexOutput implementation that encrypts data before writing using native
@@ -45,8 +44,22 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
      * @param keyResolver The key resolver for directory keys
      * @param provider    The JCE provider to use
      */
-    public CryptoOutputStreamIndexOutput(String name, Path path, OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath, EncryptionMetadataCache encryptionMetadataCache) {
-        super("FSIndexOutput(path=\"" + path + "\")", name, new EncryptedOutputStream(os, keyResolver, provider, algorithmId, filePath, encryptionMetadataCache), CHUNK_SIZE);
+    public CryptoOutputStreamIndexOutput(
+        String name,
+        Path path,
+        OutputStream os,
+        KeyResolver keyResolver,
+        java.security.Provider provider,
+        int algorithmId,
+        Path filePath,
+        EncryptionMetadataCache encryptionMetadataCache
+    ) {
+        super(
+            "FSIndexOutput(path=\"" + path + "\")",
+            name,
+            new EncryptedOutputStream(os, keyResolver, provider, algorithmId, filePath, encryptionMetadataCache),
+            CHUNK_SIZE
+        );
     }
 
     private static class EncryptedOutputStream extends FilterOutputStream {
@@ -72,7 +85,14 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
         private final String normalizedFilePath;
         private final EncryptionMetadataCache encryptionMetadataCache;
 
-        EncryptedOutputStream(OutputStream os, KeyResolver keyResolver, java.security.Provider provider, int algorithmId, Path filePath, EncryptionMetadataCache encryptionMetadataCache) {
+        EncryptedOutputStream(
+            OutputStream os,
+            KeyResolver keyResolver,
+            java.security.Provider provider,
+            int algorithmId,
+            Path filePath,
+            EncryptionMetadataCache encryptionMetadataCache
+        ) {
             super(os);
 
             this.frameSizePower = EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER;
@@ -222,14 +242,18 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             this.currentFrameNumber = frameNumber;
             this.currentFrameOffset = offsetWithinFrame;
 
-            byte[] frameIV = AesCipherFactory.computeFrameIV(
-                    directoryKey, footer.getMessageId(), frameNumber, offsetWithinFrame, normalizedFilePath, encryptionMetadataCache
-            );
+            byte[] frameIV = AesCipherFactory
+                .computeFrameIV(
+                    directoryKey,
+                    footer.getMessageId(),
+                    frameNumber,
+                    offsetWithinFrame,
+                    normalizedFilePath,
+                    encryptionMetadataCache
+                );
 
             try {
-                this.currentCipher = OpenSslNativeCipher.initGCMCipher(
-                        fileKey.getEncoded(), frameIV, offsetWithinFrame
-                );
+                this.currentCipher = OpenSslNativeCipher.initGCMCipher(fileKey.getEncoded(), frameIV, offsetWithinFrame);
             } catch (Throwable t) {
                 throw new RuntimeException("Failed to initialize OpenSSL GCM cipher", t);
             }
@@ -239,7 +263,8 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
          * Finalize current frame and collect GCM tag
          */
         private void finalizeCurrentFrame() {
-            if (currentCipher == null) return;
+            if (currentCipher == null)
+                return;
 
             try {
                 byte[] tag = OpenSslNativeCipher.finalizeAndGetTag(currentCipher);

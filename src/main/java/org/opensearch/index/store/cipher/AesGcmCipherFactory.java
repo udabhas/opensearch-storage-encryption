@@ -4,9 +4,6 @@
  */
 package org.opensearch.index.store.cipher;
 
-import org.opensearch.index.store.footer.EncryptionFooter;
-
-import java.nio.file.Path;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.security.Key;
@@ -16,6 +13,8 @@ import java.security.Provider;
 import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
 import javax.crypto.spec.GCMParameterSpec;
+
+import org.opensearch.index.store.footer.EncryptionFooter;
 
 /**
  * Factory utility for creating and initializing AES-GCM cipher instances.
@@ -216,14 +215,15 @@ public class AesGcmCipherFactory {
     ) {
         // Note: This method needs EncryptionMetadataCache parameter added to its signature
         // For now, using null as placeholder - caller must provide cache instance
-        byte[] frameIV = AesCipherFactory.computeFrameIV(
-            directoryKey,
-            messageId,
-            frameNumber,
-            offsetWithinFrame,
-            filePath,
-            null  // TODO: Pass EncryptionMetadataCache from caller
-        );
+        byte[] frameIV = AesCipherFactory
+            .computeFrameIV(
+                directoryKey,
+                messageId,
+                frameNumber,
+                offsetWithinFrame,
+                filePath,
+                null  // TODO: Pass EncryptionMetadataCache from caller
+            );
 
         Cipher cipher = algorithm.getEncryptionCipher(provider);
         initCipher(cipher, fileKey, frameIV, Cipher.ENCRYPT_MODE, offsetWithinFrame);
@@ -239,13 +239,10 @@ public class AesGcmCipherFactory {
      * @param frameNumber The current frame number (for error messages)
      * @throws java.io.IOException If finalization or writing fails
      */
-    public static void finalizeFrameAndWriteTag(
-        Cipher cipher,
-        EncryptionFooter footer,
-        java.io.OutputStream outputStream,
-        int frameNumber
-    ) throws java.io.IOException {
-        if (cipher == null) return;
+    public static void finalizeFrameAndWriteTag(Cipher cipher, EncryptionFooter footer, java.io.OutputStream outputStream, int frameNumber)
+        throws java.io.IOException {
+        if (cipher == null)
+            return;
 
         try {
             byte[] finalData = finalizeAndGetTag(cipher);
@@ -271,7 +268,7 @@ public class AesGcmCipherFactory {
      * @param key The encryption key
      * @param baseIV The base IV from KeyResolver
      * @param offset The byte offset (e.g., blockNumber * BLOCK_SIZE)
-FHeader should contain translog UUID     * @return Initialized GCM cipher ready for streaming encryption
+    FHeader should contain translog UUID     * @return Initialized GCM cipher ready for streaming encryption
      */
     public static Cipher initializeGCMCipher(Key key, byte[] baseIV, long offset) {
         // Generate unique IV for this offset (16 bytes)
@@ -298,10 +295,7 @@ FHeader should contain translog UUID     * @return Initialized GCM cipher ready 
      * @param channel The FileChannel to write the tag
      * @throws java.io.IOException If finalization or writing fails
      */
-    public static void finalizeCipherAndWriteTag(
-        Cipher cipher,
-        java.nio.channels.FileChannel channel
-    ) throws java.io.IOException {
+    public static void finalizeCipherAndWriteTag(Cipher cipher, java.nio.channels.FileChannel channel) throws java.io.IOException {
         if (cipher == null) {
             throw new IllegalArgumentException("Cipher cannot be null");
         }
