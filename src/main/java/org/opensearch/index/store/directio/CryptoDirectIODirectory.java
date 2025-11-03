@@ -221,7 +221,6 @@ public final class CryptoDirectIODirectory extends FSDirectory {
 
     /**
      * Calculate content length with OSEF validation.
-     * Fast path: check cache first to avoid FileChannel open.
      */
     private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
         if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
@@ -230,21 +229,13 @@ public final class CryptoDirectIODirectory extends FSDirectory {
 
         String normalizedPath = EncryptionMetadataCache.normalizePath(file);
 
-        // Fast path: check cache first - avoids FileChannel open
+        // Fast path: check cache first - else throw error as cache must be populated during IndexOutput
         EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
         if (cachedFooter != null) {
             return rawFileSize - cachedFooter.getFooterLength();
-        }
-
-        // Slow path: read footer from disk
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            try {
-                EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedPath, channel, dataKeyBytes, encryptionMetadataCache);
-                return rawFileSize - footer.getFooterLength();
-            } catch (EncryptionFooter.NotOSEFFileException e) {
-                LOGGER.debug("Not an OSEF file: {}", file);
-                return rawFileSize;
-            }
+        } else {
+            LOGGER.error("Cache miss for footer for file - {}", file.toString());
+            throw new RuntimeException("Unexpected footer cache miss for " + file.toString());
         }
     }
 }
