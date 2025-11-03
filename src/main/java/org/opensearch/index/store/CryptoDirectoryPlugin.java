@@ -126,13 +126,22 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         if ("cryptofs".equals(storeType)) {
             indexModule.addIndexEventListener(new IndexEventListener() {
                 /*
-                 * The resolvers should be removed only AFTER the index is removed since some ongoing
-                 * operations call to get resolver but fail in case we remove the resolver before index is removed.
+                 * The resolvers should be removed only when the index is actually deleted (DELETED reason).
+                 * We should NOT remove resolvers when shards are relocated (NO_LONGER_ASSIGNED) or during
+                 * node restarts, as other nodes may still need the resolver for their shards.
+                 * 
+                 * This prevents race conditions during:
+                 * - Shard relocation between nodes
+                 * - Node restarts with replica recovery
+                 * - Cluster topology changes
                  */
                 @Override
                 public void afterIndexRemoved(Index index, IndexSettings indexSettings, IndexRemovalReason reason) {
-                    String indexUuid = index.getUUID();
-                    IndexKeyResolverRegistry.removeResolver(indexUuid);
+                    // Only remove resolver when index is truly deleted, not during shard relocation
+                    if (reason == IndexRemovalReason.DELETED) {
+                        String indexUuid = index.getUUID();
+                        IndexKeyResolverRegistry.removeResolver(indexUuid);
+                    }
                 }
             });
         }
