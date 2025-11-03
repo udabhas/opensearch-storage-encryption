@@ -216,9 +216,19 @@ public class EncryptionFooter {
         return footer;
     }
 
-    public static int calculateFooterLength(byte[] footerBytes) throws IOException {
-        if (footerBytes.length < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            throw new IOException("Footer too small: " + footerBytes.length);
+    /**
+     * Calculate footer length from byte array starting at offset
+     * 
+     * @param footerBytes byte array containing footer data
+     * @param offset starting position in the array
+     * @return footer length in bytes
+     * @throws IOException if buffer is too small
+     */
+    public static int calculateFooterLength(byte[] footerBytes, int offset) throws IOException {
+        int availableBytes = footerBytes.length - offset;
+        if (availableBytes < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            throw new IOException("Footer too small: " + availableBytes + " bytes available, need " + 
+                                EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
         }
 
         // Read footer length from end: [FooterLength(4)][Magic(4)]
@@ -292,6 +302,12 @@ public class EncryptionFooter {
     }
 
     /**
+     * Maximum footer size to read in single I/O operation.
+     * Covers files up to ~16TB with 32GB frames (512 frames × 16 bytes/tag + overhead)
+     */
+    private static final int MAX_FOOTER_READ_SIZE = 8192; // 8KB
+
+    /**
      * Read and deserialize footer from a FileChannel
      *
      * @param normalizedFilePath normalized file path string
@@ -314,39 +330,63 @@ public class EncryptionFooter {
             throw new NotOSEFFileException("File too small to contain encryption footer: " + normalizedFilePath);
         }
 
-        // Read minimum footer to get actual length and validate magic bytes
-        ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        // Read MAX_FOOTER_READ_SIZE or entire file if smaller
+        int readSize = (int) Math.min(MAX_FOOTER_READ_SIZE, fileSize);
+        long readPosition = fileSize - readSize;
+        
+        ByteBuffer buffer = ByteBuffer.allocate(readSize);
+        int bytesRead = channel.read(buffer, readPosition);
+        
+        if (bytesRead != readSize) {
+            throw new IOException("Failed to read footer: expected " + readSize + " bytes, got " + bytesRead);
+        }
 
-        byte[] minFooterBytes = minBuffer.array();
-
-        // Validate OSEF magic bytes
-        if (!isValidOSEFFile(minFooterBytes)) {
+        // Reset position for reading
+        buffer.flip();
+        
+        // Extract bytes for validation - read from end of buffer
+        byte[] bufferArray = buffer.array();
+        int minFooterStart = bufferArray.length - EncryptionMetadataTrailer.MIN_FOOTER_SIZE;
+        
+        // Validate OSEF magic bytes from the last MIN_FOOTER_SIZE bytes
+        if (!isValidOSEFFile(bufferArray, minFooterStart)) {
             throw new NotOSEFFileException("File does not contain valid OSEF magic bytes: " + normalizedFilePath);
         }
 
-        int footerLength = calculateFooterLength(minFooterBytes);
-
-        // Read complete footer
-        ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
-        int bytesRead = channel.read(footerBuffer, fileSize - footerLength);
-
-        if (bytesRead != footerLength) {
-            throw new IOException("Failed to read complete footer");
+        // Calculate actual footer length from the buffer
+        int footerLength = calculateFooterLength(bufferArray, minFooterStart);
+        
+        // Validate we read enough data
+        if (footerLength > readSize) {
+            throw new IOException("Footer length " + footerLength + " exceeds max read size " + MAX_FOOTER_READ_SIZE + 
+                                ". File may have an unusually large footer.");
         }
 
-        EncryptionFooter footer = deserialize(footerBuffer.array(), fileKey);
+        // Extract actual footer bytes from buffer
+        int footerStart = bufferArray.length - footerLength;
+        byte[] footerBytes = Arrays.copyOfRange(bufferArray, footerStart, bufferArray.length);
+
+        EncryptionFooter footer = deserialize(footerBytes, fileKey);
         encryptionMetadataCache.putFooter(normalizedFilePath, footer);
         return footer;
     }
 
     /**
-     * Check if file has valid OSEF magic bytes
+     * Check if file has valid OSEF magic bytes starting at offset
+     * 
+     * @param footerBytes byte array containing footer data
+     * @param offset starting position in the array
+     * @return true if valid OSEF magic bytes are present
      */
-    private static boolean isValidOSEFFile(byte[] minFooterBytes) {
-        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
+    private static boolean isValidOSEFFile(byte[] footerBytes, int offset) {
+        int availableBytes = footerBytes.length - offset;
+        if (availableBytes < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            return false;
+        }
+        
+        int magicOffset = footerBytes.length - EncryptionMetadataTrailer.MAGIC.length;
         for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
-            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
+            if (footerBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
                 return false;
             }
         }
