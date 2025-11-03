@@ -1,9 +1,6 @@
 /*
+ * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
- *
- * The OpenSearch Contributors require contributions made to
- * this file be licensed under the Apache-2.0 license or a
- * compatible open source license.
  */
 package org.opensearch.index.store.footer;
 
@@ -42,8 +39,10 @@ public class EncryptionMetadataTrailer {
     public static final int GCM_TAG_SIZE = 16;
 
     // Calculated sizes
-    public static final int FIXED_FOOTER_SIZE = MESSAGE_ID_SIZE + KEY_METADATA_LENGTH_SIZE + ALGORITHM_ID_SIZE + FOOTER_LENGTH_SIZE + MAGIC.length;
-    public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + TAG_COUNT_SIZE + FRAME_SIZE_SIZE + FRAME_COUNT_SIZE + FOOTER_AUTH_TAG_SIZE;
+    public static final int FIXED_FOOTER_SIZE = MESSAGE_ID_SIZE + KEY_METADATA_LENGTH_SIZE + ALGORITHM_ID_SIZE + FOOTER_LENGTH_SIZE
+        + MAGIC.length;
+    public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + TAG_COUNT_SIZE + FRAME_SIZE_SIZE + FRAME_COUNT_SIZE
+        + FOOTER_AUTH_TAG_SIZE;
 
     // Frame constants for large file support
     public static final int DEFAULT_FRAME_SIZE_POWER = 35; // 2^35 = 32GB per frame
@@ -55,12 +54,23 @@ public class EncryptionMetadataTrailer {
     public static final int ALGORITHM_AES_256_GCM = 1;
 
     // Special IV for footer authentication (won't collide with frame IVs)
-    public static final byte[] FOOTER_AUTH_IV = new byte[]{
-        (byte)0xFF, (byte)0xFF, (byte)0xFF, (byte)0xFF,
-        (byte)0xFF, (byte)0xFF, (byte)0xFF, (byte)0xFF,
-        (byte)0xFF, (byte)0xFF, (byte)0xFF, (byte)0xFF,
-        (byte)0xFF, (byte)0xFF, (byte)0xFF, (byte)0xFF
-    };
+    public static final byte[] FOOTER_AUTH_IV = new byte[] {
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF,
+        (byte) 0xFF };
 
     /**
      * Calculate total footer size including variable parts

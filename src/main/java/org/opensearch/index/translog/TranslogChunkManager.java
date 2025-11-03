@@ -48,7 +48,7 @@ public class TranslogChunkManager {
 
     // Thread-local buffer pool for reducing allocations
     private static final ThreadLocal<ByteBuffer> CHUNK_BUFFER_POOL = ThreadLocal
-            .withInitial(() -> ByteBuffer.allocate(CHUNK_WITH_TAG_SIZE));
+        .withInitial(() -> ByteBuffer.allocate(CHUNK_WITH_TAG_SIZE));
     private static final ThreadLocal<ByteBuffer> TRANSFER_BUFFER_POOL = ThreadLocal.withInitial(() -> ByteBuffer.allocate(GCM_CHUNK_SIZE));
     private static final ThreadLocal<byte[]> TEMP_ARRAY_POOL = ThreadLocal.withInitial(() -> new byte[GCM_CHUNK_SIZE]);
 
@@ -118,10 +118,7 @@ public class TranslogChunkManager {
         this.actualHeaderSize = filePath.getFileName().toString().endsWith(".tlog") ? calculateTranslogHeaderSize(translogUUID) : 0;
 
         // Derive base IV using HKDF instead of random IV from KeyResolver
-        this.baseIV = HkdfKeyDerivation.deriveTranslogBaseIV(
-                keyResolver.getDataKey().getEncoded(),
-                translogUUID
-        );
+        this.baseIV = HkdfKeyDerivation.deriveTranslogBaseIV(keyResolver.getDataKey().getEncoded(), translogUUID);
     }
 
     /**

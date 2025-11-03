@@ -259,8 +259,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             }
         }
 
-        private void writeEncryptedChunk(byte[] data, int offset, int length, long absoluteOffset
-        ) throws IOException {
+        private void writeEncryptedChunk(byte[] data, int offset, int length, long absoluteOffset) throws IOException {
             int remaining = length;
             int dataOffset = offset;
             long currentOffset = absoluteOffset;
@@ -268,7 +267,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             while (remaining > 0) {
                 int frameNumber = (int) (currentOffset >>> EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER);
                 long frameEnd = (long) (frameNumber + 1) << EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE_POWER;
-                
+
                 if (frameNumber != currentFrameNumber) {
                     finalizeCurrentFrame();
                     initializeFrameCipher(frameNumber, currentOffset % frameSize);
@@ -278,8 +277,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
                 try {
                     // Use OpenSSL native cipher for encryption
-                    byte[] encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher,
-                            slice(data, dataOffset, chunkSize));
+                    byte[] encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, slice(data, dataOffset, chunkSize));
                     out.write(encrypted);
 
                     currentOffset += chunkSize;
@@ -363,21 +361,18 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
             try {
                 // Compute frame-specific IV
-                byte[] frameIV = AesCipherFactory.computeFrameIV(
-                    directoryKey,
-                    footer.getMessageId(),
-                    frameNumber,
-                    offsetWithinFrame,
-                    normalizedPath,
-                    encryptionMetadataCache
-                );
+                byte[] frameIV = AesCipherFactory
+                    .computeFrameIV(
+                        directoryKey,
+                        footer.getMessageId(),
+                        frameNumber,
+                        offsetWithinFrame,
+                        normalizedPath,
+                        encryptionMetadataCache
+                    );
 
                 // Initialize new OpenSSL cipher context
-                currentCipher = OpenSslNativeCipher.initGCMCipher(
-                    fileKey.getEncoded(),
-                    frameIV,
-                    offsetWithinFrame
-                );
+                currentCipher = OpenSslNativeCipher.initGCMCipher(fileKey.getEncoded(), frameIV, offsetWithinFrame);
 
             } catch (Throwable t) {
                 throw new RuntimeException("Failed to initialize frame cipher", t);
@@ -385,7 +380,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         }
 
         private void finalizeCurrentFrame() throws IOException {
-            if (currentCipher == null) return;
+            if (currentCipher == null)
+                return;
 
             try {
                 // Finalize cipher and get authentication tag

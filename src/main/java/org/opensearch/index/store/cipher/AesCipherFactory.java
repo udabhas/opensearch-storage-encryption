@@ -145,7 +145,14 @@ public class AesCipherFactory {
      * @param encryptionMetadataCache the encryption metadata cache
      * @return frame-specific IV for encryption/decryption
      */
-    public static byte[] computeFrameIV(byte[] directoryKey, byte[] messageId, long frameNumber, long offsetWithinFrame, String normalizedFilePath, EncryptionMetadataCache encryptionMetadataCache) {
+    public static byte[] computeFrameIV(
+        byte[] directoryKey,
+        byte[] messageId,
+        long frameNumber,
+        long offsetWithinFrame,
+        String normalizedFilePath,
+        EncryptionMetadataCache encryptionMetadataCache
+    ) {
         if (messageId.length != 16) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }

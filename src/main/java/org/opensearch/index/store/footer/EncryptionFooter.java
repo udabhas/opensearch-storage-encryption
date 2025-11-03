@@ -1,17 +1,8 @@
 /*
+ * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
- *
- * The OpenSearch Contributors require contributions made to
- * this file be licensed under the Apache-2.0 license or a
- * compatible open source license.
  */
 package org.opensearch.index.store.footer;
-
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.opensearch.index.store.PanamaNativeAccess;
-import org.opensearch.index.store.cipher.AesGcmCipherFactory;
-import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -20,9 +11,15 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.index.store.cipher.AesGcmCipherFactory;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 
 /**
  * Footer format: [FooterAuthTag(16)][GcmTags...][TagCount(4)][FrameSize(8)][FrameCount(4)][MessageId(16)][KeyMetadata(0)]
@@ -106,7 +103,8 @@ public class EncryptionFooter {
     }
 
     private byte[] buildFooterDataWithoutAuthTag() {
-        int footerSize = EncryptionMetadataTrailer.MIN_FOOTER_SIZE - EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE + (gcmTags.size() * AesGcmCipherFactory.GCM_TAG_LENGTH) + keyMetadata.length;
+        int footerSize = EncryptionMetadataTrailer.MIN_FOOTER_SIZE - EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE + (gcmTags.size()
+            * AesGcmCipherFactory.GCM_TAG_LENGTH) + keyMetadata.length;
         ByteBuffer buffer = ByteBuffer.allocate(footerSize);
 
         // Write GCM tags
@@ -200,7 +198,8 @@ public class EncryptionFooter {
         int tagCount = ByteBuffer.wrap(footerData, pos, EncryptionMetadataTrailer.TAG_COUNT_SIZE).getInt();
 
         // Validate footer length
-        int expectedLength = EncryptionMetadataTrailer.MIN_FOOTER_SIZE + (tagCount * AesGcmCipherFactory.GCM_TAG_LENGTH) + keyMetadataLength;
+        int expectedLength = EncryptionMetadataTrailer.MIN_FOOTER_SIZE + (tagCount * AesGcmCipherFactory.GCM_TAG_LENGTH)
+            + keyMetadataLength;
         if (footerLength != expectedLength) {
             throw new IOException("Footer length mismatch: expected " + expectedLength + ", got " + footerLength);
         }
@@ -232,8 +231,9 @@ public class EncryptionFooter {
     public static int calculateFooterLength(byte[] footerBytes, int offset) throws IOException {
         int availableBytes = footerBytes.length - offset;
         if (availableBytes < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            throw new IOException("Footer too small: " + availableBytes + " bytes available, need " + 
-                                EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            throw new IOException(
+                "Footer too small: " + availableBytes + " bytes available, need " + EncryptionMetadataTrailer.MIN_FOOTER_SIZE
+            );
         }
 
         // Read footer length from end: [FooterLength(4)][Magic(4)]
@@ -297,7 +297,7 @@ public class EncryptionFooter {
         }
     }
 
-    private static boolean verifyFooterAuthTag(byte[] fileKey, byte[] footerData, byte[] expectedTag) throws IOException{
+    private static boolean verifyFooterAuthTag(byte[] fileKey, byte[] footerData, byte[] expectedTag) throws IOException {
         try {
             byte[] computedTag = generateFooterAuthTag(fileKey, footerData);
             return Arrays.equals(computedTag, expectedTag);
@@ -324,7 +324,12 @@ public class EncryptionFooter {
      * @throws IOException If reading or deserialization fails
      * @throws NotOSEFFileException If file is not a valid OSEF format
      */
-    public static EncryptionFooter readViaFileChannel(String normalizedFilePath, java.nio.channels.FileChannel channel, byte[] fileKey, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
+    public static EncryptionFooter readViaFileChannel(
+        String normalizedFilePath,
+        java.nio.channels.FileChannel channel,
+        byte[] fileKey,
+        EncryptionMetadataCache encryptionMetadataCache
+    ) throws IOException {
 
         EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedFilePath);
         if (cachedFooter != null) {
@@ -339,21 +344,21 @@ public class EncryptionFooter {
         // Read MAX_FOOTER_READ_SIZE or entire file if smaller
         int readSize = (int) Math.min(MAX_FOOTER_READ_SIZE, fileSize);
         long readPosition = fileSize - readSize;
-        
+
         ByteBuffer buffer = ByteBuffer.allocate(readSize);
         int bytesRead = channel.read(buffer, readPosition);
-        
+
         if (bytesRead != readSize) {
             throw new IOException("Failed to read footer: expected " + readSize + " bytes, got " + bytesRead);
         }
 
         // Reset position for reading
         buffer.flip();
-        
+
         // Extract bytes for validation - read from end of buffer
         byte[] bufferArray = buffer.array();
         int minFooterStart = bufferArray.length - EncryptionMetadataTrailer.MIN_FOOTER_SIZE;
-        
+
         // Validate OSEF magic bytes from the last MIN_FOOTER_SIZE bytes
         if (!isValidOSEFFile(bufferArray, minFooterStart)) {
             throw new NotOSEFFileException("File does not contain valid OSEF magic bytes: " + normalizedFilePath);
@@ -361,11 +366,16 @@ public class EncryptionFooter {
 
         // Calculate actual footer length from the buffer
         int footerLength = calculateFooterLength(bufferArray, minFooterStart);
-        
+
         // Validate we read enough data
         if (footerLength > readSize) {
-            throw new IOException("Footer length " + footerLength + " exceeds max read size " + MAX_FOOTER_READ_SIZE + 
-                                ". File may have an unusually large footer.");
+            throw new IOException(
+                "Footer length "
+                    + footerLength
+                    + " exceeds max read size "
+                    + MAX_FOOTER_READ_SIZE
+                    + ". File may have an unusually large footer."
+            );
         }
 
         // Extract actual footer bytes from buffer
@@ -389,7 +399,7 @@ public class EncryptionFooter {
         if (availableBytes < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             return false;
         }
-        
+
         int magicOffset = footerBytes.length - EncryptionMetadataTrailer.MAGIC.length;
         for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
             if (footerBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {

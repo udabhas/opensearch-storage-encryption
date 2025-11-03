@@ -31,8 +31,7 @@ public class CryptoEngineFactory implements EngineFactory {
     /**
      * Default constructor.
      */
-    public CryptoEngineFactory() {
-    }
+    public CryptoEngineFactory() {}
 
     /**
      * {@inheritDoc}
@@ -50,9 +49,9 @@ public class CryptoEngineFactory implements EngineFactory {
             // Create new engine config by copying all fields from existing config
             // but replace the translog factory with our crypto version
             EngineConfig cryptoConfig = config
-                    .toBuilder()
-                    .translogFactory(cryptoTranslogFactory)  // <- Replace with our crypto factory
-                    .build();
+                .toBuilder()
+                .translogFactory(cryptoTranslogFactory)  // <- Replace with our crypto factory
+                .build();
 
             // Return the default engine with crypto-enabled translog
             return new InternalEngine(cryptoConfig);

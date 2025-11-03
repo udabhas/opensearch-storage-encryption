@@ -22,8 +22,8 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.store.key.DefaultKeyResolver;
-import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.IndexKeyResolverRegistry;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -102,7 +102,7 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         // Use a test index UUID
         testIndexUuid = "test-index-uuid-" + System.currentTimeMillis();
         org.apache.lucene.store.Directory directory = new org.apache.lucene.store.NIOFSDirectory(tempDir);
-//        keyResolver = new DefaultKeyResolver(directory, cryptoProvider, keyProvider);
+        // keyResolver = new DefaultKeyResolver(directory, cryptoProvider, keyProvider);
         keyResolver = new DefaultKeyResolver(testIndexUuid, directory, cryptoProvider, keyProvider);
 
         // Register the resolver with IndexKeyResolverRegistry so cache can find it
@@ -174,7 +174,10 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         assertFalse("JSON structure found in plain text! File content: " + fileContentString, fileContentString.contains("\"clientip\""));
 
         // Verify header is still readable (should be unencrypted)
-        assertTrue("Header should contain translog UUID", fileContentString.contains(testTranslogUUID) || fileContentISO.contains(testTranslogUUID));
+        assertTrue(
+            "Header should contain translog UUID",
+            fileContentString.contains(testTranslogUUID) || fileContentISO.contains(testTranslogUUID)
+        );
     }
 
     /**
