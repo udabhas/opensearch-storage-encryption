@@ -7,6 +7,9 @@
  */
 package org.opensearch.index.store.footer;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.index.store.PanamaNativeAccess;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 
@@ -40,6 +43,8 @@ import javax.crypto.spec.SecretKeySpec;
  *
  */
 public class EncryptionFooter {
+
+    private static final Logger LOGGER = LogManager.getLogger(EncryptionFooter.class);
 
     private final byte[] messageId;
     private final List<byte[]> gcmTags;
@@ -292,12 +297,13 @@ public class EncryptionFooter {
         }
     }
 
-    private static boolean verifyFooterAuthTag(byte[] fileKey, byte[] footerData, byte[] expectedTag) {
+    private static boolean verifyFooterAuthTag(byte[] fileKey, byte[] footerData, byte[] expectedTag) throws IOException{
         try {
             byte[] computedTag = generateFooterAuthTag(fileKey, footerData);
             return Arrays.equals(computedTag, expectedTag);
-        } catch (Exception e) {
-            return false;
+        } catch (IOException e) {
+            LOGGER.error("Encountered error while verify footer auth tag", e);
+            throw e;
         }
     }
 
