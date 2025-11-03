@@ -30,10 +30,6 @@ import org.mockito.MockitoAnnotations;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.store.CryptoDirectoryFactory;
-import org.opensearch.index.store.key.DefaultKeyResolver;
-import org.opensearch.index.store.key.IndexKeyResolverRegistry;
-import org.opensearch.index.store.key.KeyResolver;
-import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.test.OpenSearchTestCase;
 
 public class NodeLevelKeyCacheTests extends OpenSearchTestCase {

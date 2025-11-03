@@ -56,13 +56,7 @@ public class CryptoFileChannelWrapper extends FileChannel {
      * @param translogUUID the translog UUID for exact header size calculation
      * @throws IOException if there is an error setting up the channel
      */
-    public CryptoFileChannelWrapper(
-        FileChannel delegate,
-        KeyResolver keyResolver,
-        Path path,
-        Set<OpenOption> options,
-        String translogUUID
-    )
+    public CryptoFileChannelWrapper(FileChannel delegate, KeyResolver keyResolver, Path path, Set<OpenOption> options, String translogUUID)
         throws IOException {
         this.delegate = delegate;
         this.chunkManager = new TranslogChunkManager(delegate, keyResolver, path, translogUUID);

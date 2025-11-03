@@ -60,8 +60,15 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     private final String normalizedFilePath;
 
-
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyResolver keyResolver, Path filePath, EncryptionMetadataCache encryptionMetadataCache) throws IOException {
+    public CryptoBufferedIndexInput(
+        String resourceDesc,
+        FileChannel fc,
+        IOContext context,
+        KeyResolver keyResolver,
+        Path filePath,
+        EncryptionMetadataCache encryptionMetadataCache
+    )
+        throws IOException {
         super(resourceDesc, context);
         this.channel = fc;
         this.off = 0L;
@@ -89,10 +96,23 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.footerLength = footer.getFooterLength();
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize,
-                                    KeyResolver keyResolver, SecretKeySpec keySpec, int footerLength, long frameSize,
-                                    int frameSizePower, short algorithmId, byte[] directoryKey, byte[] messageId, String normalizedFilePath,
-                                    EncryptionMetadataCache encryptionMetadataCache)
+    public CryptoBufferedIndexInput(
+        String resourceDesc,
+        FileChannel fc,
+        long off,
+        long length,
+        int bufferSize,
+        KeyResolver keyResolver,
+        SecretKeySpec keySpec,
+        int footerLength,
+        long frameSize,
+        int frameSizePower,
+        short algorithmId,
+        byte[] directoryKey,
+        byte[] messageId,
+        String normalizedFilePath,
+        EncryptionMetadataCache encryptionMetadataCache
+    )
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -133,21 +153,21 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             );
         }
         return new CryptoBufferedIndexInput(
-                getFullSliceDescription(sliceDescription),
-                channel,
-                off + offset,
-                length,
-                getBufferSize(),
-                keyResolver,
-                keySpec,  // Pass the already-derived keySpec
-                footerLength,
-                frameSize,
-                frameSizePower,
-                algorithm.getAlgorithmId(),
-                directoryKey,  // Pass directory key
-                messageId,      // Pass message ID
-                normalizedFilePath,
-                encryptionMetadataCache
+            getFullSliceDescription(sliceDescription),
+            channel,
+            off + offset,
+            length,
+            getBufferSize(),
+            keyResolver,
+            keySpec,  // Pass the already-derived keySpec
+            footerLength,
+            frameSize,
+            frameSizePower,
+            algorithm.getAlgorithmId(),
+            directoryKey,  // Pass directory key
+            messageId,      // Pass message ID
+            normalizedFilePath,
+            encryptionMetadataCache
         );
     }
 
@@ -182,8 +202,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
             try {
                 Cipher cipher = algorithm.getDecryptionCipher();
-                byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, 0, position,
-                        this.normalizedFilePath, encryptionMetadataCache);
+                byte[] frameIV = AesCipherFactory
+                    .computeFrameIV(directoryKey, messageId, 0, position, this.normalizedFilePath, encryptionMetadataCache);
 
                 cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 
@@ -215,8 +235,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
         try {
             Cipher cipher = algorithm.getDecryptionCipher();
-            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame,
-                    this.normalizedFilePath, encryptionMetadataCache);
+            byte[] frameIV = AesCipherFactory
+                .computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame, this.normalizedFilePath, encryptionMetadataCache);
 
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 

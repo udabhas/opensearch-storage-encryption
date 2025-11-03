@@ -4,8 +4,9 @@
  */
 package org.opensearch.index.store.cipher;
 
-import javax.crypto.Cipher;
 import java.security.Provider;
+
+import javax.crypto.Cipher;
 
 /**
  * Enumeration of supported encryption algorithms
@@ -14,7 +15,7 @@ import java.security.Provider;
  */
 public enum EncryptionAlgorithm {
 
-    AES_256_GCM_CTR((short)1, "AES-256-GCM-CTR");
+    AES_256_GCM_CTR((short) 1, "AES-256-GCM-CTR");
 
     private final short algorithmId;
     private final String algorithmName;

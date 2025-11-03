@@ -61,7 +61,11 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
      * @param segmentPool the memory segment pool for acquiring buffer space
      * @param keyResolver the resolver for obtaining encryption keys and initialization vectors
      */
-    public CryptoDirectIOBlockLoader(Pool<RefCountedMemorySegment> segmentPool, KeyResolver keyResolver, EncryptionMetadataCache encryptionMetadataCache) {
+    public CryptoDirectIOBlockLoader(
+        Pool<RefCountedMemorySegment> segmentPool,
+        KeyResolver keyResolver,
+        EncryptionMetadataCache encryptionMetadataCache
+    ) {
         this.segmentPool = segmentPool;
         this.keyResolver = keyResolver;
         this.encryptionMetadataCache = encryptionMetadataCache;
@@ -91,14 +95,13 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
-
             byte[] messageId = readMessageIdFromFooter(filePath);
             byte[] directoryKey = keyResolver.getDataKey().getEncoded();
-            byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveAesKey(
-                    directoryKey, messageId, "file-encryption");
+            byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
 
             // Use frame-based decryption with derived file key
-            MemorySegmentDecryptor.decryptInPlaceFrameBased(
+            MemorySegmentDecryptor
+                .decryptInPlaceFrameBased(
                     readBytes.address(),
                     readBytes.byteSize(),
                     fileKey,                                    // Derived file key (matches write path)
@@ -108,7 +111,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                     startOffset,                                 // File offset
                     filePath.toAbsolutePath().normalize().toString(),
                     encryptionMetadataCache
-            );
+                );
 
             if (bytesRead == 0) {
                 throw new RuntimeException("EOF or empty read at offset " + startOffset);
@@ -179,7 +182,13 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                 throw new IOException("Not an OSEF file.");
             }
 
-            EncryptionFooter footer = EncryptionFooter.readViaFileChannel(filePath.toAbsolutePath().normalize().toString(), channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
+            EncryptionFooter footer = EncryptionFooter
+                .readViaFileChannel(
+                    filePath.toAbsolutePath().normalize().toString(),
+                    channel,
+                    keyResolver.getDataKey().getEncoded(),
+                    encryptionMetadataCache
+                );
             return footer.getMessageId();
         }
     }

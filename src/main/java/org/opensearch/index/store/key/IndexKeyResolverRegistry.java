@@ -13,8 +13,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.Directory;
 import org.opensearch.common.crypto.MasterKeyProvider;
-import org.opensearch.index.store.key.DefaultKeyResolver;
-import org.opensearch.index.store.key.KeyResolver;
 
 /**
  * Registry that ensures only one KeyResolver instance exists per index UUID.
