@@ -71,7 +71,13 @@ public class DefaultKeyResolver implements KeyResolver {
         try {
             dataKey = new SecretKeySpec(keyProvider.decryptKey(readByteArrayFile(KEY_FILE)), "AES");
         } catch (java.nio.file.NoSuchFileException e) {
-            initNewKey();
+            try {
+                initNewKey();
+            } catch (Exception ex) {
+                throw new IOException("Failed to initialize key for index: " + indexUuid, ex);
+            }
+        } catch (Exception e) {
+            throw new IOException("Failed to initialize key for index: " + indexUuid, e);
         }
     }
 

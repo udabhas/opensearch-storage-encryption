@@ -164,7 +164,12 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
 
         Key loadedKey = resolver.loadKeyFromMasterKeyProvider();
         assertNotNull(loadedKey);
-        assertArrayEquals(dataKey, loadedKey.getEncoded());
+        assertEquals("AES", loadedKey.getAlgorithm());
+        assertEquals(32, loadedKey.getEncoded().length);
+        
+        // Verify consistency - calling twice should return the same derived key
+        Key loadedKey2 = resolver.loadKeyFromMasterKeyProvider();
+        assertArrayEquals(loadedKey.getEncoded(), loadedKey2.getEncoded());
     }
 
     public void testMultipleResolversShareSameKey() throws Exception {

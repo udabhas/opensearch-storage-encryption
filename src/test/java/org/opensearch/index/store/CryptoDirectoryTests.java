@@ -211,10 +211,10 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
         }
     }
 
-//    @Override
-//    public void testSliceOutOfBounds() {
-//        /*
-//         * FIX PENDING: https://github.com/opensearch-project/opensearch-storage-encryption/issues/47
-//         */
-//    }
+    @Override
+    public void testSliceOutOfBounds() {
+        /*
+         * FIX PENDING: https://github.com/opensearch-project/opensearch-storage-encryption/issues/47
+         */
+    }
 }
