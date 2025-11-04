@@ -62,7 +62,7 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
      * @param lockFactory the lock factory for coordinating access across both directories
      * @param delegate the CryptoDirectIODirectory to use for Direct I/O operations
      * @param provider the security provider for cryptographic operations
-     * @param keyIvResolver resolver for encryption keys and initialization vectors (shared across both directories)
+     * @param keyResolver resolver for encryption keys and initialization vectors (shared across both directories)
      * @throws IOException if either directory cannot be initialized
      */
     public HybridCryptoDirectory(

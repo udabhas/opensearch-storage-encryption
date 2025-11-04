@@ -140,7 +140,10 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
                     // Only remove resolver when index is truly deleted, not during shard relocation
                     if (reason == IndexRemovalReason.DELETED) {
                         String indexUuid = index.getUUID();
-                        IndexKeyResolverRegistry.removeResolver(indexUuid);
+                        int numOfShards = indexSettings.getNumberOfShards();
+                        for (int i = 0; i < numOfShards; i++) {
+                            IndexKeyResolverRegistry.removeResolver(indexUuid, i);
+                        }
                     }
                 }
             });
