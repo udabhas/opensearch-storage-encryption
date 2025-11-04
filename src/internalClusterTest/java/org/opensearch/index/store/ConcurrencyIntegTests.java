@@ -198,7 +198,7 @@ public class ConcurrencyIntegTests extends OpenSearchIntegTestCase {
     // ==================== P2: Concurrent Index Creation ====================
 
     /**
-     * Tests IndexKeyResolverRegistry race condition prevention during concurrent
+     * Tests ShardKeyResolverRegistry race condition prevention during concurrent
      * encrypted index creation.
      */
     public void testConcurrentEncryptedIndexCreation() throws Exception {

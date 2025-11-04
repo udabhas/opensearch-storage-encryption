@@ -55,8 +55,8 @@ public class NodeLevelKeyCacheTests extends OpenSearchTestCase {
         // Reset singleton before each test
         NodeLevelKeyCache.reset();
 
-        // Clear the IndexKeyResolverRegistry cache
-        IndexKeyResolverRegistry.clearCache();
+        // Clear the ShardKeyResolverRegistry cache
+        ShardKeyResolverRegistry.clearCache();
 
         // Setup mock resolver
         when(mockResolver.loadKeyFromMasterKeyProvider()).thenReturn(testKey1);
@@ -66,21 +66,20 @@ public class NodeLevelKeyCacheTests extends OpenSearchTestCase {
     public void tearDown() throws Exception {
         // Clean up after each test
         NodeLevelKeyCache.reset();
-        IndexKeyResolverRegistry.clearCache();
+        ShardKeyResolverRegistry.clearCache();
         super.tearDown();
     }
 
     /**
-     * Helper method to register a mock resolver in the IndexKeyResolverRegistry
+     * Helper method to register a mock resolver in the ShardKeyResolverRegistry
      */
-    @SuppressForbidden(reason = "Test needs to register mock resolver in IndexKeyResolverRegistry")
+    @SuppressForbidden(reason = "Test needs to register mock resolver in ShardKeyResolverRegistry")
     private void registerMockResolver(String indexUuid, int shardId) throws Exception {
-        Field resolverCacheField = IndexKeyResolverRegistry.class.getDeclaredField("resolverCache");
+        Field resolverCacheField = ShardKeyResolverRegistry.class.getDeclaredField("resolverCache");
         resolverCacheField.setAccessible(true);
         @SuppressWarnings("unchecked")
-        ConcurrentMap<IndexKeyResolverRegistry.ResolverCacheKey, KeyResolver> resolverCache =
-            (ConcurrentMap<IndexKeyResolverRegistry.ResolverCacheKey, KeyResolver>) resolverCacheField.get(null);
-        resolverCache.put(new IndexKeyResolverRegistry.ResolverCacheKey(indexUuid, shardId), mockResolver);
+        ConcurrentMap<ShardCacheKey, KeyResolver> resolverCache = (ConcurrentMap<ShardCacheKey, KeyResolver>) resolverCacheField.get(null);
+        resolverCache.put(new ShardCacheKey(indexUuid, shardId), mockResolver);
     }
 
     public void testInitialization() {
@@ -387,7 +386,7 @@ public class NodeLevelKeyCacheTests extends OpenSearchTestCase {
             thrown = e;
         }
         assertNotNull(thrown);
-        assertTrue(thrown.getMessage().contains("No resolver registered for index"));
+        assertTrue(thrown.getMessage().contains("No resolver registered for shard"));
 
         // Test evict with null
         thrown = null;
