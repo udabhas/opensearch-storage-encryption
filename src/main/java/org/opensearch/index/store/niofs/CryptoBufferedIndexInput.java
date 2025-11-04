@@ -88,8 +88,13 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.frameSizePower = footer.getFrameSizePower();
         this.algorithm = EncryptionAlgorithm.fromId(footer.getAlgorithmId());
 
-        // Derive file-specific key using messageId from footer
-        byte[] derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
+        // Try cache for file key first
+        byte[] derivedKey = encryptionMetadataCache.getFileKey(normalizedFilePath);
+        if (derivedKey == null) {
+            // Cache miss - derive and cache
+            derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
+            encryptionMetadataCache.putFileKey(normalizedFilePath, derivedKey);
+        }
         this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
 
         // Calculate footer length

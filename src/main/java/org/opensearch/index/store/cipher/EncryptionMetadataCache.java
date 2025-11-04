@@ -50,10 +50,12 @@ public class EncryptionMetadataCache {
 
     private final ConcurrentHashMap<String, EncryptionFooter> footerCache;
     private final ConcurrentHashMap<FrameKey, byte[]> frameIvCache;
+    private final ConcurrentHashMap<String, byte[]> fileKeyCache;
 
     public EncryptionMetadataCache() {
         this.footerCache = new ConcurrentHashMap<>(128, 0.75f, 4);
         this.frameIvCache = new ConcurrentHashMap<>(1024, 0.75f, 4);
+        this.fileKeyCache = new ConcurrentHashMap<>(128, 0.75f, 4);
     }
 
     public static String normalizePath(Path filePath) {
@@ -76,19 +78,30 @@ public class EncryptionMetadataCache {
         frameIvCache.putIfAbsent(new FrameKey(normalizedPath, frameNumber), iv);
     }
 
+    public byte[] getFileKey(String normalizedPath) {
+        return fileKeyCache.get(normalizedPath);
+    }
+
+    public void putFileKey(String normalizedPath, byte[] fileKey) {
+        fileKeyCache.putIfAbsent(normalizedPath, fileKey);
+    }
+
     public void invalidateFile(String normalizedPath) {
         footerCache.remove(normalizedPath);
+        fileKeyCache.remove(normalizedPath);
         frameIvCache.keySet().removeIf(key -> key.pathString.equals(normalizedPath));
     }
 
     public void invalidateDirectory(String normalizedDirPath) {
         String dirPrefix = normalizedDirPath.endsWith("/") ? normalizedDirPath : normalizedDirPath + "/";
         footerCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
+        fileKeyCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
         frameIvCache.keySet().removeIf(key -> key.pathString.startsWith(dirPrefix));
     }
 
     public void clear() {
         footerCache.clear();
+        fileKeyCache.clear();
         frameIvCache.clear();
     }
 }
