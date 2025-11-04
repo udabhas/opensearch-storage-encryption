@@ -43,9 +43,11 @@ public class NodeLevelKeyCache {
      */
     static class CacheKey {
         final String indexUuid;
+        final int shardId;
 
-        CacheKey(String indexUuid) {
+        CacheKey(String indexUuid, int shardId) {
             this.indexUuid = Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
+            this.shardId = shardId;
         }
 
         @Override
@@ -55,17 +57,17 @@ public class NodeLevelKeyCache {
             if (!(o instanceof CacheKey))
                 return false;
             CacheKey that = (CacheKey) o;
-            return Objects.equals(indexUuid, that.indexUuid);
+            return (Objects.equals(indexUuid, that.indexUuid)) && (shardId == that.shardId);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(indexUuid);
+            return Objects.hash(indexUuid, shardId);
         }
 
         @Override
         public String toString() {
-            return "CacheKey[indexUuid=" + indexUuid + "]";
+            return "CacheKey[indexUuid=" + indexUuid + ", shardId=" + shardId + "]";
         }
     }
 
@@ -158,7 +160,7 @@ public class NodeLevelKeyCache {
                     @Override
                     public Key load(CacheKey key) throws Exception {
                         // Get resolver from registry
-                        KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid);
+                        KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid, key.shardId);
                         if (resolver == null) {
                             throw new IllegalStateException("No resolver registered for index: " + key.indexUuid);
                         }
@@ -176,7 +178,7 @@ public class NodeLevelKeyCache {
                     @Override
                     public Key load(CacheKey key) throws Exception {
                         // Get resolver from registry
-                        KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid);
+                        KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid, key.shardId);
                         if (resolver == null) {
                             throw new IllegalStateException("No resolver registered for index: " + key.indexUuid);
                         }
@@ -187,7 +189,7 @@ public class NodeLevelKeyCache {
                     public Key reload(CacheKey key, Key oldValue) throws Exception {
                         try {
                             // Get resolver from registry
-                            KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid);
+                            KeyResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid, key.shardId);
                             if (resolver == null) {
                                 // Index might have been deleted, keep using old key
                                 return oldValue;
@@ -211,11 +213,11 @@ public class NodeLevelKeyCache {
      * @return the encryption key
      * @throws Exception if key loading fails
      */
-    public Key get(String indexUuid) throws Exception {
+    public Key get(String indexUuid, int shardId) throws Exception {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
 
         try {
-            return keyCache.get(new CacheKey(indexUuid));
+            return keyCache.get(new CacheKey(indexUuid, shardId));
         } catch (CompletionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) {
@@ -231,9 +233,9 @@ public class NodeLevelKeyCache {
      * This should be called when an index is deleted.
      * @param indexUuid the index UUID
      */
-    public void evict(String indexUuid) {
+    public void evict(String indexUuid, int shardId) {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-        keyCache.invalidate(new CacheKey(indexUuid));
+        keyCache.invalidate(new CacheKey(indexUuid, shardId));
     }
 
     /**

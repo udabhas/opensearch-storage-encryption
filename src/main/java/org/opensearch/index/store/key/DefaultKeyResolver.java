@@ -38,6 +38,7 @@ public class DefaultKeyResolver implements KeyResolver {
     private final String indexUuid;
     private final Directory directory;
     private final MasterKeyProvider keyProvider;
+    private final int shardId;
 
     private Key dataKey;
 
@@ -46,29 +47,32 @@ public class DefaultKeyResolver implements KeyResolver {
     /**
      * Constructs a new {@link DefaultKeyResolver} and ensures the key is initialized.
      *
-     * @param indexUuid the unique identifier for the index
-     * @param directory the Lucene directory to read/write metadata files
-     * @param provider the JCE provider used for cipher operations
+     * @param indexUuid   the unique identifier for the index
+     * @param directory   the Lucene directory to read/write metadata files
+     * @param provider    the JCE provider used for cipher operations
      * @param keyProvider the master key provider used to encrypt/decrypt data keys
+     * @param shardId
      * @throws IOException if an I/O error occurs while reading or writing key metadata
      */
-    public DefaultKeyResolver(String indexUuid, Directory directory, Provider provider, MasterKeyProvider keyProvider) throws IOException {
+    public DefaultKeyResolver(String indexUuid, Directory directory, Provider provider, MasterKeyProvider keyProvider, int shardId)
+        throws IOException {
         this.indexUuid = indexUuid;
         this.directory = directory;
         this.keyProvider = keyProvider;
-        initialize();
+        this.shardId = shardId;
+        initialize(shardId);
     }
 
     /**
      * Attempts to load the encrypted key from the directory.
      * If not present, it generates and persists new values.
      */
-    private void initialize() throws IOException {
+    private void initialize(int shardId) throws IOException {
         try {
             dataKey = new SecretKeySpec(keyProvider.decryptKey(readByteArrayFile(KEY_FILE)), "AES");
         } catch (java.nio.file.NoSuchFileException e) {
             try {
-                initNewKey();
+                initNewKey(shardId);
             } catch (Exception ex) {
                 throw new IOException("Failed to initialize key for index: " + indexUuid, ex);
             }
@@ -77,11 +81,11 @@ public class DefaultKeyResolver implements KeyResolver {
         }
     }
 
-    private void initNewKey() throws IOException {
+    private void initNewKey(int shardId) throws IOException {
         DataKeyPair pair = keyProvider.generateDataPair();
         byte[] masterKey = pair.getRawKey();
         byte[] indexKey = HkdfKeyDerivation.deriveIndexKey(masterKey, indexUuid);
-        byte[] directoryKey = HkdfKeyDerivation.deriveDirectoryKey(indexKey, 0);
+        byte[] directoryKey = HkdfKeyDerivation.deriveDirectoryKey(indexKey, shardId);
         dataKey = new SecretKeySpec(directoryKey, "AES");
         writeByteArrayFile(KEY_FILE, pair.getEncryptedKey());
     }
@@ -118,7 +122,7 @@ public class DefaultKeyResolver implements KeyResolver {
         byte[] encryptedKey = readByteArrayFile(KEY_FILE);
         byte[] masterKey = keyProvider.decryptKey(encryptedKey);
         byte[] indexKey = HkdfKeyDerivation.deriveIndexKey(masterKey, indexUuid);
-        byte[] directoryKey = HkdfKeyDerivation.deriveDirectoryKey(indexKey, 0);
+        byte[] directoryKey = HkdfKeyDerivation.deriveDirectoryKey(indexKey, shardId);
         return new SecretKeySpec(directoryKey, "AES");
     }
 
@@ -131,7 +135,7 @@ public class DefaultKeyResolver implements KeyResolver {
     @Override
     public Key getDataKey() {
         try {
-            return NodeLevelKeyCache.getInstance().get(indexUuid);
+            return NodeLevelKeyCache.getInstance().get(indexUuid, shardId);
         } catch (Exception ex) {
             throw new RuntimeException("No Node Level Key Cache available for {}", ex);
         }
