@@ -27,6 +27,7 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
+import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.Pool;
 
@@ -95,9 +96,19 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
+            String normalizedPath = filePath.toAbsolutePath().normalize().toString();
+
+            // Get directoryKey and messageId (needed for decryption)
             byte[] messageId = readMessageIdFromFooter(filePath);
             byte[] directoryKey = keyResolver.getDataKey().getEncoded();
-            byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
+
+            // Try cache for file key first
+            byte[] fileKey = encryptionMetadataCache.getFileKey(normalizedPath);
+            if (fileKey == null) {
+                // Cache miss - derive and cache
+                fileKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
+                encryptionMetadataCache.putFileKey(normalizedPath, fileKey);
+            }
 
             // Use frame-based decryption with derived file key
             MemorySegmentDecryptor
