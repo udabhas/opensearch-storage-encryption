@@ -203,7 +203,8 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         final Path location = path.resolveIndex();
         final LockFactory lockFactory = indexSettings.getValue(org.opensearch.index.store.FsDirectoryFactory.INDEX_LOCK_FACTOR_SETTING);
         Files.createDirectories(location);
-        return newFSDirectory(location, lockFactory, indexSettings);
+        int shardId = path.getShardId().getId();
+        return newFSDirectory(location, lockFactory, indexSettings, shardId);
     }
 
     /**
@@ -215,7 +216,8 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * @return the concrete implementation of the encrypted directory based on store type
      * @throws IOException if directory creation fails
      */
-    protected Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings) throws IOException {
+    protected Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings, int shardId)
+        throws IOException {
         final Provider provider = indexSettings.getValue(INDEX_CRYPTO_PROVIDER_SETTING);
 
         // Use index-level key resolver - store keys at index level
@@ -228,7 +230,8 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
 
         // Use shared resolver registry to prevent race conditions
         String indexUuid = indexSettings.getIndex().getUUID();
-        KeyResolver keyResolver = IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);
+        KeyResolver keyResolver = IndexKeyResolverRegistry
+            .getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId);
 
         // Get or create per-index encryption metadata cache
         EncryptionMetadataCache encryptionMetadataCache = EncryptionMetadataCacheRegistry.getOrCreateCache(indexUuid);

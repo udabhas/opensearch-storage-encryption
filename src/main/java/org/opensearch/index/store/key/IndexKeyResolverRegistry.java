@@ -51,11 +51,12 @@ public class IndexKeyResolverRegistry {
         String indexUuid,
         Directory indexDirectory,
         Provider provider,
-        MasterKeyProvider keyProvider
+        MasterKeyProvider keyProvider,
+        int shardId
     ) {
-        return resolverCache.computeIfAbsent(indexUuid, uuid -> {
+        return resolverCache.computeIfAbsent(indexUuid + "-shard-" + shardId, uuid -> {
             try {
-                return new DefaultKeyResolver(indexUuid, indexDirectory, provider, keyProvider);
+                return new DefaultKeyResolver(indexUuid, indexDirectory, provider, keyProvider, shardId);
             } catch (IOException e) {
                 throw new RuntimeException("Failed to create KeyResolver for index: " + uuid, e);
             }
@@ -68,8 +69,8 @@ public class IndexKeyResolverRegistry {
      * @param indexUuid the unique identifier for the index
      * @return the KeyResolver instance for this index, or null if none exists
      */
-    public static KeyResolver getResolver(String indexUuid) {
-        return resolverCache.get(indexUuid);
+    public static KeyResolver getResolver(String indexUuid, int shardId) {
+        return resolverCache.get(indexUuid + "-shard-" + shardId);
     }
 
     /**
@@ -80,12 +81,12 @@ public class IndexKeyResolverRegistry {
      * @param indexUuid the unique identifier for the index
      * @return the removed resolver, or null if no resolver was cached for this index
      */
-    public static KeyResolver removeResolver(String indexUuid) {
-        KeyResolver removed = resolverCache.remove(indexUuid);
+    public static KeyResolver removeResolver(String indexUuid, int shardId) {
+        KeyResolver removed = resolverCache.remove(indexUuid + "-shard-" + shardId);
         if (removed != null) {
             // Evict from node-level cache when index is removed
             try {
-                NodeLevelKeyCache.getInstance().evict(indexUuid);
+                NodeLevelKeyCache.getInstance().evict(indexUuid, shardId);
             } catch (IllegalStateException e) {
                 logger.debug("Could not evict from NodeLevelKeyCache: {}", e.getMessage());
             }
@@ -121,7 +122,7 @@ public class IndexKeyResolverRegistry {
      * @param indexUuid the unique identifier for the index
      * @return true if a resolver is cached for this index, false otherwise
      */
-    public static boolean hasResolver(String indexUuid) {
-        return resolverCache.containsKey(indexUuid);
+    public static boolean hasResolver(String indexUuid, int shardId) {
+        return resolverCache.containsKey(indexUuid + "-shard-" + shardId);
     }
 }

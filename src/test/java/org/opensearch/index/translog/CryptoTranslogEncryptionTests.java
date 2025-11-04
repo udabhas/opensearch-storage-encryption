@@ -43,12 +43,12 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
      * Helper method to register the resolver in the IndexKeyResolverRegistry
      */
     @SuppressForbidden(reason = "Test needs to register mock resolver in IndexKeyResolverRegistry")
-    private void registerResolver(String indexUuid, KeyResolver resolver) throws Exception {
+    private void registerResolver(String indexUuid, int shardId, KeyResolver resolver) throws Exception {
         Field resolverCacheField = IndexKeyResolverRegistry.class.getDeclaredField("resolverCache");
         resolverCacheField.setAccessible(true);
         @SuppressWarnings("unchecked")
         ConcurrentMap<String, KeyResolver> resolverCache = (ConcurrentMap<String, KeyResolver>) resolverCacheField.get(null);
-        resolverCache.put(indexUuid, resolver);
+        resolverCache.put(indexUuid + "-shard-" + shardId, resolver);
     }
 
     @Override
@@ -103,10 +103,10 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         testIndexUuid = "test-index-uuid-" + System.currentTimeMillis();
         org.apache.lucene.store.Directory directory = new org.apache.lucene.store.NIOFSDirectory(tempDir);
         // keyResolver = new DefaultKeyResolver(directory, cryptoProvider, keyProvider);
-        keyResolver = new DefaultKeyResolver(testIndexUuid, directory, cryptoProvider, keyProvider);
+        keyResolver = new DefaultKeyResolver(testIndexUuid, directory, cryptoProvider, keyProvider, 0);
 
         // Register the resolver with IndexKeyResolverRegistry so cache can find it
-        registerResolver(testIndexUuid, keyResolver);
+        registerResolver(testIndexUuid, 0, keyResolver);
     }
 
     @Override
