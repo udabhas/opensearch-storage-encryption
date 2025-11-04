@@ -12,10 +12,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
 import java.security.Security;
+import java.util.concurrent.ConcurrentMap;
 
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSLockFactory;
@@ -24,6 +26,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.test.OpenSearchTestCase;
@@ -63,20 +66,20 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
             directory.close();
         }
         NodeLevelKeyCache.reset();
-        IndexKeyResolverRegistry.clearCache();
+        ShardKeyResolverRegistry.clearCache();
         super.tearDown();
     }
 
     /**
-     * Helper method to register a resolver in the IndexKeyResolverRegistry
+     * Helper method to register a resolver in the ShardKeyResolverRegistry
      */
+    @SuppressForbidden(reason = "Test needs to register resolver in ShardKeyResolverRegistry")
     private void registerResolver(String indexUuid, int shardId, KeyResolver resolver) throws Exception {
-        java.lang.reflect.Field resolverCacheField = IndexKeyResolverRegistry.class.getDeclaredField("resolverCache");
+        Field resolverCacheField = ShardKeyResolverRegistry.class.getDeclaredField("resolverCache");
         resolverCacheField.setAccessible(true);
         @SuppressWarnings("unchecked")
-        java.util.concurrent.ConcurrentMap<IndexKeyResolverRegistry.ResolverCacheKey, KeyResolver> resolverCache =
-            (java.util.concurrent.ConcurrentMap<IndexKeyResolverRegistry.ResolverCacheKey, KeyResolver>) resolverCacheField.get(null);
-        resolverCache.put(new IndexKeyResolverRegistry.ResolverCacheKey(indexUuid, shardId), resolver);
+        ConcurrentMap<ShardCacheKey, KeyResolver> resolverCache = (ConcurrentMap<ShardCacheKey, KeyResolver>) resolverCacheField.get(null);
+        resolverCache.put(new ShardCacheKey(indexUuid, shardId), resolver);
     }
 
     public void testInitializationWithNewKey() throws Exception {
