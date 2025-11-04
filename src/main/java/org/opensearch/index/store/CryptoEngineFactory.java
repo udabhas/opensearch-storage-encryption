@@ -17,8 +17,8 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngine;
-import org.opensearch.index.store.key.IndexKeyResolverRegistry;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.translog.CryptoTranslogFactory;
 
 /**
@@ -81,7 +81,7 @@ public class CryptoEngineFactory implements EngineFactory {
         // Use shared resolver registry to get the SAME resolver instance as CryptoDirectoryFactory
         String indexUuid = config.getIndexSettings().getIndex().getUUID();
         int shardId = config.getShardId().getId();
-        return IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId);
+        return ShardKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId);
     }
 
     /**

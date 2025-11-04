@@ -22,9 +22,10 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.store.key.DefaultKeyResolver;
-import org.opensearch.index.store.key.IndexKeyResolverRegistry;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
+import org.opensearch.index.store.key.ShardCacheKey;
+import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**
@@ -40,16 +41,15 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
     private String testIndexUuid;
 
     /**
-     * Helper method to register the resolver in the IndexKeyResolverRegistry
+     * Helper method to register the resolver in the ShardKeyResolverRegistry
      */
-    @SuppressForbidden(reason = "Test needs to register mock resolver in IndexKeyResolverRegistry")
+    @SuppressForbidden(reason = "Test needs to register resolver in ShardKeyResolverRegistry")
     private void registerResolver(String indexUuid, int shardId, KeyResolver resolver) throws Exception {
-        Field resolverCacheField = IndexKeyResolverRegistry.class.getDeclaredField("resolverCache");
+        Field resolverCacheField = ShardKeyResolverRegistry.class.getDeclaredField("resolverCache");
         resolverCacheField.setAccessible(true);
         @SuppressWarnings("unchecked")
-        ConcurrentMap<IndexKeyResolverRegistry.ResolverCacheKey, KeyResolver> resolverCache =
-            (ConcurrentMap<IndexKeyResolverRegistry.ResolverCacheKey, KeyResolver>) resolverCacheField.get(null);
-        resolverCache.put(new IndexKeyResolverRegistry.ResolverCacheKey(indexUuid, shardId), resolver);
+        ConcurrentMap<ShardCacheKey, KeyResolver> resolverCache = (ConcurrentMap<ShardCacheKey, KeyResolver>) resolverCacheField.get(null);
+        resolverCache.put(new ShardCacheKey(indexUuid, shardId), resolver);
     }
 
     @Override
@@ -58,8 +58,8 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         super.setUp();
         tempDir = Files.createTempDirectory("crypto-translog-encryption-test");
 
-        // Clear the IndexKeyResolverRegistry cache before each test
-        IndexKeyResolverRegistry.clearCache();
+        // Clear the ShardKeyResolverRegistry cache before each test
+        ShardKeyResolverRegistry.clearCache();
 
         // Initialize NodeLevelKeyCache with test settings
         Settings nodeSettings = Settings
@@ -106,7 +106,7 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         // keyResolver = new DefaultKeyResolver(directory, cryptoProvider, keyProvider);
         keyResolver = new DefaultKeyResolver(testIndexUuid, directory, cryptoProvider, keyProvider, 0);
 
-        // Register the resolver with IndexKeyResolverRegistry so cache can find it
+        // Register the resolver with ShardKeyResolverRegistry so cache can find it
         registerResolver(testIndexUuid, 0, keyResolver);
     }
 
@@ -114,8 +114,8 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
     public void tearDown() throws Exception {
         // Reset the NodeLevelKeyCache singleton to prevent test pollution
         NodeLevelKeyCache.reset();
-        // Clear the IndexKeyResolverRegistry cache
-        IndexKeyResolverRegistry.clearCache();
+        // Clear the ShardKeyResolverRegistry cache
+        ShardKeyResolverRegistry.clearCache();
         super.tearDown();
     }
 

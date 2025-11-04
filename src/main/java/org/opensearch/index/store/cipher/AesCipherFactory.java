@@ -184,18 +184,4 @@ public class AesCipherFactory {
 
         return frameIV;
     }
-
-    /**
-     * Calculate which frame contains a given file offset
-     */
-    public static int getFrameNumber(long fileOffset) {
-        return (int) (fileOffset >>> 36);
-    }
-
-    /**
-     * Calculate offset within a frame
-     */
-    public static long getOffsetWithinFrame(long fileOffset) {
-        return fileOffset & 0xFFFFFFFFFFL;
-    }
 }

@@ -7,9 +7,12 @@ package org.opensearch.index.store.cipher;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import org.opensearch.index.store.key.ShardCacheKey;
+
 /**
- * Registry that ensures only one EncryptionMetadataCache instance exists per index UUID.
- * Mirrors the pattern used by IndexKeyResolverRegistry for consistent architecture.
+ * Registry that ensures only one EncryptionMetadataCache instance exists per shard.
+ * Uses shard-level granularity for better cache lifecycle management and isolation.
+ * Mirrors the pattern used by ShardKeyResolverRegistry for consistent architecture.
  * 
  * @opensearch.internal
  */
@@ -20,31 +23,34 @@ public class EncryptionMetadataCacheRegistry {
      */
     private EncryptionMetadataCacheRegistry() {}
 
-    private static final ConcurrentMap<String, EncryptionMetadataCache> cacheRegistry = new ConcurrentHashMap<>();
+    private static final ConcurrentMap<ShardCacheKey, EncryptionMetadataCache> cacheRegistry = new ConcurrentHashMap<>();
 
     /**
-     * Gets or creates an EncryptionMetadataCache for the specified index UUID.
-     * If a cache already exists for this index, returns the existing instance.
+     * Gets or creates an EncryptionMetadataCache for the specified shard.
+     * If a cache already exists for this shard, returns the existing instance.
      * Otherwise, creates a new cache and caches it.
      * 
-     * This method is thread-safe and prevents race conditions during cache creation.
+     * <p>This method is thread-safe and prevents race conditions during cache creation.
      * 
      * @param indexUuid the unique identifier for the index
-     * @return the EncryptionMetadataCache instance for this index
+     * @param shardId   the shard ID
+     * @return the EncryptionMetadataCache instance for this shard
      */
-    public static EncryptionMetadataCache getOrCreateCache(String indexUuid) {
-        return cacheRegistry.computeIfAbsent(indexUuid, uuid -> new EncryptionMetadataCache());
+    public static EncryptionMetadataCache getOrCreateCache(String indexUuid, int shardId) {
+        ShardCacheKey key = new ShardCacheKey(indexUuid, shardId);
+        return cacheRegistry.computeIfAbsent(key, k -> new EncryptionMetadataCache());
     }
 
     /**
-     * Removes the cached EncryptionMetadataCache for the specified index UUID.
-     * This should be called when an index is deleted to prevent memory leaks.
+     * Removes the cached EncryptionMetadataCache for the specified shard.
+     * This should be called when a shard is closed to prevent memory leaks.
      * 
      * @param indexUuid the unique identifier for the index
-     * @return the removed cache, or null if no cache was registered for this index
+     * @param shardId   the shard ID
+     * @return the removed cache, or null if no cache was registered for this shard
      */
-    public static EncryptionMetadataCache removeCache(String indexUuid) {
-        return cacheRegistry.remove(indexUuid);
+    public static EncryptionMetadataCache removeCache(String indexUuid, int shardId) {
+        return cacheRegistry.remove(new ShardCacheKey(indexUuid, shardId));
     }
 
     /**
@@ -66,12 +72,13 @@ public class EncryptionMetadataCacheRegistry {
     }
 
     /**
-     * Checks if a cache is registered for the specified index UUID.
+     * Checks if a cache is registered for the specified shard.
      * 
      * @param indexUuid the unique identifier for the index
-     * @return true if a cache is registered for this index, false otherwise
+     * @param shardId   the shard ID
+     * @return true if a cache is registered for this shard, false otherwise
      */
-    public static boolean hasCache(String indexUuid) {
-        return cacheRegistry.containsKey(indexUuid);
+    public static boolean hasCache(String indexUuid, int shardId) {
+        return cacheRegistry.containsKey(new ShardCacheKey(indexUuid, shardId));
     }
 }
