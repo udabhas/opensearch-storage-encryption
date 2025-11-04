@@ -99,7 +99,14 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             String normalizedPath = filePath.toAbsolutePath().normalize().toString();
 
             // Get directoryKey and messageId (needed for decryption)
-            byte[] messageId = readMessageIdFromFooter(filePath);
+            EncryptionFooter footer = encryptionMetadataCache.getFooter(normalizedPath);
+            byte[] messageId;
+            if (footer == null) {
+                messageId = readMessageIdFromFooter(filePath);
+            } else {
+                messageId = footer.getMessageId();
+            }
+
             byte[] directoryKey = keyResolver.getDataKey().getEncoded();
 
             // Try cache for file key first
@@ -190,7 +197,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             // Check if this is an OSEF file
             if (!isValidOSEFFile(minFooterBytes)) {
                 // Not an OSEF file
-                throw new IOException("Not an OSEF file.");
+                throw new IOException("Not an OSEF file -" + filePath);
             }
 
             EncryptionFooter footer = EncryptionFooter
