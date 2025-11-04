@@ -6,6 +6,7 @@ package org.opensearch.index.store.key;
 
 import java.io.IOException;
 import java.security.Provider;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -18,7 +19,7 @@ import org.opensearch.common.crypto.MasterKeyProvider;
  * Registry that ensures only one KeyResolver instance exists per index UUID.
  * This prevents race conditions when both CryptoDirectoryFactory and CryptoEngineFactory
  * try to create resolvers for the same index simultaneously.
- * 
+ *
  * @opensearch.internal
  */
 public class IndexKeyResolverRegistry {
@@ -31,19 +32,52 @@ public class IndexKeyResolverRegistry {
     private static final Logger logger = LogManager.getLogger(IndexKeyResolverRegistry.class);
 
     // Thread-safe cache of resolvers by index UUID
-    private static final ConcurrentMap<String, KeyResolver> resolverCache = new ConcurrentHashMap<>();
+    private static final ConcurrentMap<ResolverCacheKey, KeyResolver> resolverCache = new ConcurrentHashMap<>();
+
+    public static class ResolverCacheKey {
+        final String indexUuid;
+        final int shardId;
+        private int hash; // Cached hash for performance
+
+        public ResolverCacheKey(String indexUuid, int shardId) {
+            this.indexUuid = Objects.requireNonNull(indexUuid);
+            this.shardId = shardId;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o)
+                return true;
+            if (!(o instanceof ResolverCacheKey))
+                return false;
+            ResolverCacheKey that = (ResolverCacheKey) o;
+            return shardId == that.shardId && indexUuid.equals(that.indexUuid);
+        }
+
+        @Override
+        public int hashCode() {
+            int h = hash;
+            if (h == 0) {
+                h = Objects.hash(indexUuid, shardId);
+                if (h == 0)
+                    h = 1;
+                hash = h;
+            }
+            return h;
+        }
+    }
 
     /**
      * Gets or creates a KeyResolver for the specified index UUID.
      * If a resolver already exists for this index, returns the existing instance.
      * Otherwise, creates a new resolver and caches it.
-     * 
+     * <p>
      * This method is thread-safe and prevents race conditions during resolver creation.
-     * 
-     * @param indexUuid the unique identifier for the index
+     *
+     * @param indexUuid      the unique identifier for the index
      * @param indexDirectory the directory where encryption keys are stored
-     * @param provider the JCE provider for cryptographic operations
-     * @param keyProvider the master key provider
+     * @param provider       the JCE provider for cryptographic operations
+     * @param keyProvider    the master key provider
      * @return the KeyResolver instance for this index
      * @throws RuntimeException if resolver creation fails
      */
@@ -54,7 +88,7 @@ public class IndexKeyResolverRegistry {
         MasterKeyProvider keyProvider,
         int shardId
     ) {
-        return resolverCache.computeIfAbsent(indexUuid + "-shard-" + shardId, uuid -> {
+        return resolverCache.computeIfAbsent(new ResolverCacheKey(indexUuid, shardId), uuid -> {
             try {
                 return new DefaultKeyResolver(indexUuid, indexDirectory, provider, keyProvider, shardId);
             } catch (IOException e) {
@@ -65,24 +99,24 @@ public class IndexKeyResolverRegistry {
 
     /**
      * Gets the cached resolver for the specified index UUID.
-     * 
+     *
      * @param indexUuid the unique identifier for the index
      * @return the KeyResolver instance for this index, or null if none exists
      */
     public static KeyResolver getResolver(String indexUuid, int shardId) {
-        return resolverCache.get(indexUuid + "-shard-" + shardId);
+        return resolverCache.get(new ResolverCacheKey(indexUuid, shardId));
     }
 
     /**
      * Removes the cached resolver for the specified index UUID.
      * This should be called when an index is deleted to prevent memory leaks.
      * Also evicts the key from the node-level cache.
-     * 
+     *
      * @param indexUuid the unique identifier for the index
      * @return the removed resolver, or null if no resolver was cached for this index
      */
     public static KeyResolver removeResolver(String indexUuid, int shardId) {
-        KeyResolver removed = resolverCache.remove(indexUuid + "-shard-" + shardId);
+        KeyResolver removed = resolverCache.remove(new ResolverCacheKey(indexUuid, shardId));
         if (removed != null) {
             // Evict from node-level cache when index is removed
             try {
@@ -97,7 +131,7 @@ public class IndexKeyResolverRegistry {
     /**
      * Gets the number of cached resolvers.
      * Useful for monitoring and testing.
-     * 
+     *
      * @return the number of cached KeyResolver instances
      */
     public static int getCacheSize() {
@@ -107,7 +141,7 @@ public class IndexKeyResolverRegistry {
     /**
      * Clears all cached resolvers.
      * This method is primarily for testing purposes.
-     * 
+     *
      * @return the number of resolvers that were removed
      */
     public static int clearCache() {
@@ -118,11 +152,11 @@ public class IndexKeyResolverRegistry {
 
     /**
      * Checks if a resolver is cached for the specified index UUID.
-     * 
+     *
      * @param indexUuid the unique identifier for the index
      * @return true if a resolver is cached for this index, false otherwise
      */
     public static boolean hasResolver(String indexUuid, int shardId) {
-        return resolverCache.containsKey(indexUuid + "-shard-" + shardId);
+        return resolverCache.containsKey(new ResolverCacheKey(indexUuid, shardId));
     }
 }

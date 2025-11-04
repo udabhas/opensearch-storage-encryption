@@ -74,9 +74,9 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         java.lang.reflect.Field resolverCacheField = IndexKeyResolverRegistry.class.getDeclaredField("resolverCache");
         resolverCacheField.setAccessible(true);
         @SuppressWarnings("unchecked")
-        java.util.concurrent.ConcurrentMap<String, KeyResolver> resolverCache =
-            (java.util.concurrent.ConcurrentMap<String, KeyResolver>) resolverCacheField.get(null);
-        resolverCache.put(indexUuid + "-shard-" + shardId, resolver);
+        java.util.concurrent.ConcurrentMap<IndexKeyResolverRegistry.ResolverCacheKey, KeyResolver> resolverCache =
+            (java.util.concurrent.ConcurrentMap<IndexKeyResolverRegistry.ResolverCacheKey, KeyResolver>) resolverCacheField.get(null);
+        resolverCache.put(new IndexKeyResolverRegistry.ResolverCacheKey(indexUuid, shardId), resolver);
     }
 
     public void testInitializationWithNewKey() throws Exception {
