@@ -233,8 +233,9 @@ public class AesGcmCipherFactory {
      */
     public static void finalizeFrameAndWriteTag(Cipher cipher, EncryptionFooter footer, java.io.OutputStream outputStream, int frameNumber)
         throws java.io.IOException {
-        if (cipher == null)
-            return;
+        if (cipher == null) {
+            throw new RuntimeException("Cipher instance already null in finalizeFrameAndWriteTag ");
+        }
 
         try {
             byte[] finalData = finalizeAndGetTag(cipher);
