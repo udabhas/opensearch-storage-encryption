@@ -38,7 +38,7 @@ import org.opensearch.index.store.key.KeyResolver;
  * @opensearch.internal
  */
 final class CryptoBufferedIndexInput extends BufferedIndexInput {
-    private static final byte[] ZERO_SKIP = new byte[AesCipherFactory.AES_BLOCK_SIZE_BYTES];
+    private static final byte[] ZERO_SKIP = new byte[1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER];
     private static final ByteBuffer EMPTY_BYTEBUFFER = ByteBuffer.allocate(0);
     private static final int CHUNK_SIZE = 16_384;
 
@@ -211,7 +211,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 
             // skip partial AES block within frame if needed
-            int skipBytes = (int) (offsetWithinFrame % AesCipherFactory.AES_BLOCK_SIZE_BYTES);
+            int skipBytes = (int) (offsetWithinFrame & ((1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1));
             if (skipBytes > 0) {
                 cipher.update(ZERO_SKIP, 0, skipBytes);
             }

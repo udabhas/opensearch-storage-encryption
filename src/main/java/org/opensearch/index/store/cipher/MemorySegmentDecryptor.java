@@ -38,7 +38,7 @@ import javax.crypto.spec.SecretKeySpec;
 @SuppressWarnings("preview")
 public class MemorySegmentDecryptor {
 
-    private static final byte[] ZERO_SKIP = new byte[AesCipherFactory.AES_BLOCK_SIZE_BYTES];
+    private static final byte[] ZERO_SKIP = new byte[1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER];
     private static final int DEFAULT_MAX_CHUNK_SIZE = 16_384;
 
     /**
@@ -74,8 +74,8 @@ public class MemorySegmentDecryptor {
 
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
 
-        if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-            cipher.update(ZERO_SKIP, 0, (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+        if ((fileOffset & ((AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1)) > 0) {
+            cipher.update(ZERO_SKIP, 0, (int) (fileOffset & ((1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1)));
         }
 
         MemorySegment segment = MemorySegment.ofAddress(addr).reinterpret(length, arena, null);
@@ -132,8 +132,8 @@ public class MemorySegmentDecryptor {
 
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
 
-        if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-            cipher.update(ZERO_SKIP, 0, (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+        if ((fileOffset & ((1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1)) > 0) {
+            cipher.update(ZERO_SKIP, 0, (int) (fileOffset & ((1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1)));
         }
 
         MemorySegment segment = MemorySegment.ofAddress(addr).reinterpret(length);
@@ -190,8 +190,8 @@ public class MemorySegmentDecryptor {
 
         cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(ivCopy));
 
-        if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-            cipher.update(ZERO_SKIP, 0, (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+        if ((fileOffset & ((1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1)) > 0) {
+            cipher.update(ZERO_SKIP, 0, (int) (fileOffset & ((1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1)));
         }
 
         ByteBuffer buffer = segment.asByteBuffer();

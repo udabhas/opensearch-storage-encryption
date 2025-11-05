@@ -30,8 +30,8 @@ public class AesCipherFactory {
      */
     private AesCipherFactory() {}
 
-    /** AES block size in bytes. Required for counter calculations. */
-    public static final int AES_BLOCK_SIZE_BYTES = 16;
+    /** AES block size in terms of 2 power bytes (16 bytes). Required for counter calculations. */
+    public static final int AES_BLOCK_SIZE_BYTES_IN_POWER = 4;
 
     /** Number of bytes used for the counter in the IV (last 4 bytes). */
     public static final int COUNTER_SIZE_BYTES = 4;
@@ -93,7 +93,7 @@ public class AesCipherFactory {
      */
     public static byte[] computeOffsetIVForAesGcmEncrypted(byte[] baseIV, long offset) {
         byte[] ivCopy = Arrays.copyOf(baseIV, baseIV.length);
-        int blockOffset = (int) (offset / AesCipherFactory.AES_BLOCK_SIZE_BYTES);
+        int blockOffset = (int) (offset >> AES_BLOCK_SIZE_BYTES_IN_POWER);
 
         // Add 2 for GCM compatibility: counter 0 (reserved) + counter 1 (auth) + data counters start at 2
         blockOffset += 2;
@@ -123,7 +123,7 @@ public class AesCipherFactory {
      */
     public static byte[] computeOffsetIVForAesCtrEncrypted(byte[] baseIV, long offset) {
         byte[] ivCopy = Arrays.copyOf(baseIV, baseIV.length);
-        int blockOffset = (int) (offset / AesCipherFactory.AES_BLOCK_SIZE_BYTES);
+        int blockOffset = (int) (offset >> AES_BLOCK_SIZE_BYTES_IN_POWER);
 
         // Set the 4-byte counter in big-endian format (last 4 bytes of IV)
         ivCopy[AesCipherFactory.IV_ARRAY_LENGTH - 1] = (byte) blockOffset;
@@ -171,7 +171,7 @@ public class AesCipherFactory {
         // Modify last 4 bytes for block counter within frame
         byte[] frameIV = new byte[16];
         System.arraycopy(frameBaseIV, 0, frameIV, 0, 16);
-        int blockOffset = (int) (offsetWithinFrame / AES_BLOCK_SIZE_BYTES);
+        int blockOffset = (int) (offsetWithinFrame >> AES_BLOCK_SIZE_BYTES_IN_POWER);
 
         // Add 2 for GCM compatibility: counter 0 (reserved) + counter 1 (auth) + data counters start at 2
         blockOffset += 2;

@@ -137,8 +137,8 @@ public class MemorySegmentDecryptorTests extends OpenSearchTestCase {
         cipher.init(Cipher.ENCRYPT_MODE, keySpec, new IvParameterSpec(offsetIV));
 
         // Advance cipher for non-aligned offset
-        if (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-            byte[] skip = new byte[(int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES)];
+        if (fileOffset % (1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) > 0) {
+            byte[] skip = new byte[(int) (fileOffset % (1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER))];
             cipher.update(skip);
         }
 
@@ -202,7 +202,7 @@ public class MemorySegmentDecryptorTests extends OpenSearchTestCase {
         cipher.init(Cipher.ENCRYPT_MODE, keySpec, new IvParameterSpec(offsetIV));
 
         // Advance cipher for non-aligned offset
-        int skipBytes = (int) (fileOffset % AesCipherFactory.AES_BLOCK_SIZE_BYTES);
+        int skipBytes = (int) (fileOffset % (1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER));
         if (skipBytes > 0) {
             cipher.update(new byte[skipBytes]);
         }
@@ -262,8 +262,8 @@ public class MemorySegmentDecryptorTests extends OpenSearchTestCase {
             byte[] offsetIV = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(TEST_IV, i * 1024L);
             cipher.init(Cipher.ENCRYPT_MODE, keySpec, new IvParameterSpec(offsetIV));
 
-            if ((i * 1024L) % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-                cipher.update(new byte[(int) ((i * 1024L) % AesCipherFactory.AES_BLOCK_SIZE_BYTES)]);
+            if ((i * 1024L) % (1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) > 0) {
+                cipher.update(new byte[(int) ((i * 1024L) % (1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER))]);
             }
 
             byte[] encrypted = cipher.update(originalData[i]);
