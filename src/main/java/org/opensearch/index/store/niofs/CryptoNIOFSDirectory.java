@@ -178,7 +178,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     public synchronized void close() throws IOException {
         isOpen = false;
         deletePendingFiles();
-        encryptionMetadataCache.invalidateDirectory(EncryptionMetadataCache.normalizePath(dirPath));
+        encryptionMetadataCache.invalidateDirectory();
     }
 
     @Override
