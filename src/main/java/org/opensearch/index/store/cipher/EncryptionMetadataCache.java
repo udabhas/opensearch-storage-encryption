@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.opensearch.index.store.footer.EncryptionFooter;
 
 /**
- * Cache for encryption metadata (footers and frame IVs) for an index.
+ * Cache for encryption metadata (footers and frame IVs) for a directory.
  * Shared across all shards of the same index.
  * Lucene segment merging provides natural cleanup via deleteFile() calls.
  */
@@ -92,14 +92,7 @@ public class EncryptionMetadataCache {
         frameIvCache.keySet().removeIf(key -> key.pathString.equals(normalizedPath));
     }
 
-    public void invalidateDirectory(String normalizedDirPath) {
-        String dirPrefix = normalizedDirPath.endsWith("/") ? normalizedDirPath : normalizedDirPath + "/";
-        footerCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
-        fileKeyCache.keySet().removeIf(key -> key.startsWith(dirPrefix));
-        frameIvCache.keySet().removeIf(key -> key.pathString.startsWith(dirPrefix));
-    }
-
-    public void clear() {
+    public void invalidateDirectory() {
         footerCache.clear();
         fileKeyCache.clear();
         frameIvCache.clear();

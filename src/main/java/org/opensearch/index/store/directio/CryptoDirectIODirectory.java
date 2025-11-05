@@ -191,7 +191,7 @@ public final class CryptoDirectIODirectory extends FSDirectory {
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
         readAheadworker.close();
-        encryptionMetadataCache.invalidateDirectory(EncryptionMetadataCache.normalizePath(dirPath));
+        encryptionMetadataCache.invalidateDirectory();
     }
 
     @Override
