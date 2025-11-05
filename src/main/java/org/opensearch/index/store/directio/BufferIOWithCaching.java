@@ -157,11 +157,13 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 return;
 
             if (length >= BUFFER_SIZE) {
-                flushBuffer();
+                // leave large-write path as-is for now
+                flushBuffer(); // will now be block-aligned
                 processAndWrite(b, offset, length);
                 return;
             }
 
+            // CHUNKED WRITES: if this would overflow the buffer, top-off to a block boundary, then flush
             if (bufferPosition + length > BUFFER_SIZE) {
                 int partial = bufferPosition & BLOCK_MASK;
                 if (partial != 0) {
@@ -172,9 +174,10 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                     offset += take;
                     length -= take;
                 }
-                flushBuffer();
+                // buffer now ends at a block boundary (or was already aligned)
+                flushBuffer(); // flushes only whole 8KB blocks; holding partial blocks.
             }
-
+            // normal copy
             System.arraycopy(b, offset, buffer, bufferPosition, length);
             bufferPosition += length;
         }
@@ -188,16 +191,18 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             buffer[bufferPosition++] = (byte) b;
         }
 
+        /** Flush only whole CHUNK_SIZE blocks; keep any <CHUNK_SIZE tail in the buffer (no mid-file partials). */
         private void flushBuffer() throws IOException {
             if (bufferPosition == 0)
                 return;
 
-            final int flushable = (int) (bufferPosition & ~CACHE_BLOCK_MASK);
+            final int flushable = (int) (bufferPosition & ~CACHE_BLOCK_MASK); // largest multiple of 8192
             if (flushable == 0)
-                return;
+                return; // keep tail (<CHUNK_SIZE) until we can complete it (or EOF)
 
             processAndWrite(buffer, 0, flushable);
 
+            // slide tail to start
             final int tail = bufferPosition - flushable;
             if (tail > 0) {
                 System.arraycopy(buffer, flushable, buffer, 0, tail);
@@ -205,6 +210,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             bufferPosition = tail;
         }
 
+        /** Force flush ALL buffered data including any tail < CHUNK_SIZE */
         private void forceFlushBuffer() throws IOException {
             if (bufferPosition > 0) {
                 processAndWrite(buffer, 0, bufferPosition);
@@ -222,7 +228,10 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 int blockOffset = (int) (absoluteOffset & CACHE_BLOCK_MASK);
                 int chunkLen = Math.min(length - offsetInBuffer, CACHE_BLOCK_SIZE - blockOffset);
 
+                // Cache plaintext data for reads
                 cacheBlockIfEligible(full, arrayOffset + offsetInBuffer, blockAlignedOffset, blockOffset, chunkLen);
+
+                // Encrypt and write to disk
                 writeEncryptedChunk(data, arrayOffset + offsetInBuffer, chunkLen, absoluteOffset);
                 offsetInBuffer += chunkLen;
             }
@@ -237,18 +246,20 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             int blockOffset,
             int chunkLen
         ) {
+            // Cache only fully-aligned full blocks
             if (blockOffset == 0 && chunkLen == CACHE_BLOCK_SIZE) {
                 try {
                     final RefCountedMemorySegment refSegment = memorySegmentPool.tryAcquire(5, TimeUnit.MILLISECONDS);
                     if (refSegment != null) {
                         final MemorySegment pooled = refSegment.segment();
                         final MemorySegment pooledSlice = pooled.asSlice(0, CACHE_BLOCK_SIZE);
+                        // Cache plaintext data
                         MemorySegment.copy(sourceData, sourceOffset, pooledSlice, 0, CACHE_BLOCK_SIZE);
 
                         BlockCacheKey cacheKey = new FileBlockCacheKey(path, blockAlignedOffset);
                         blockCache.put(cacheKey, refSegment);
                     } else {
-                        LOGGER.info("Failed to acquire from pool within specified timeout path={} {} ms", path, 5);
+                        LOGGER.debug("Failed to acquire from pool within specified timeout path={} {} ms", path, 5);
                     }
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
@@ -305,7 +316,9 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
             try {
                 checkClosed();
-                forceFlushBuffer();
+                forceFlushBuffer(); // Force flush ALL data including tail
+                // Lucene writes footer here.
+                // this will also flush the buffer.
 
                 finalizeCurrentFrame();
                 footer.setFrameCount(totalFrames);
@@ -314,10 +327,15 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 encryptionMetadataCache.putFooter(normalizedPath, footer);
 
                 super.close();
+
+                // After file is complete, load final block (footer) into cache for immediate reads
                 loadFinalBlocksIntoCache();
 
+                // signal the kernel to flush the file cacehe
+                // we don't call flush aggresevley to avoid cpu pressure.
                 if (streamOffset > 32L * 1024 * 1024) {
                     String absolutePath = path.toAbsolutePath().toString();
+                    // Drop cache BEFORE deletion while file handle is still valid
                     Thread.startVirtualThread(() -> PanamaNativeAccess.dropFileCache(absolutePath));
                 }
 
