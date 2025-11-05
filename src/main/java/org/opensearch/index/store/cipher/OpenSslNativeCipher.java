@@ -266,7 +266,7 @@ public final class OpenSslNativeCipher {
                     throw new OpenSslException("EVP_EncryptInit_ex failed");
                 }
 
-                int skipBytes = (int) (filePosition % AES_BLOCK_SIZE);
+                int skipBytes = (int) (filePosition & (AES_BLOCK_SIZE - 1));
                 if (skipBytes > 0) {
                     MemorySegment dummyIn = arena.allocateArray(ValueLayout.JAVA_BYTE, new byte[skipBytes]);
                     MemorySegment dummyOut = arena.allocate(skipBytes + AES_BLOCK_SIZE, 1);
