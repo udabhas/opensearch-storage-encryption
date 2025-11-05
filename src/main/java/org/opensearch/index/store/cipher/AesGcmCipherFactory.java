@@ -215,15 +215,7 @@ public class AesGcmCipherFactory {
     ) {
         // Note: This method needs EncryptionMetadataCache parameter added to its signature
         // For now, using null as placeholder - caller must provide cache instance
-        byte[] frameIV = AesCipherFactory
-            .computeFrameIV(
-                directoryKey,
-                messageId,
-                frameNumber,
-                offsetWithinFrame,
-                filePath,
-                null  // TODO: Pass EncryptionMetadataCache from caller
-            );
+        byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame, filePath, null);
 
         Cipher cipher = algorithm.getEncryptionCipher(provider);
         initCipher(cipher, fileKey, frameIV, Cipher.ENCRYPT_MODE, offsetWithinFrame);
