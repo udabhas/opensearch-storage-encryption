@@ -25,8 +25,8 @@ import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.shard.IndexEventListener;
-import org.opensearch.index.store.iv.IndexKeyResolverRegistry;
-import org.opensearch.index.store.iv.NodeLevelKeyCache;
+import org.opensearch.index.store.key.NodeLevelKeyCache;
+import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.pool.PoolBuilder;
 import org.opensearch.index.store.pool.PoolSizeCalculator;
 import org.opensearch.indices.cluster.IndicesClusterStateService.AllocatedIndices.IndexRemovalReason;
@@ -126,13 +126,25 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         if ("cryptofs".equals(storeType)) {
             indexModule.addIndexEventListener(new IndexEventListener() {
                 /*
-                 * The resolvers should be removed only AFTER the index is removed since some ongoing 
-                 * operations call to get resolver but fail in case we remove the resolver before index is removed.
+                 * The resolvers should be removed only when the index is actually deleted (DELETED reason).
+                 * We should NOT remove resolvers when shards are relocated (NO_LONGER_ASSIGNED) or during
+                 * node restarts, as other nodes may still need the resolver for their shards.
+                 * 
+                 * This prevents race conditions during:
+                 * - Shard relocation between nodes
+                 * - Node restarts with replica recovery
+                 * - Cluster topology changes
                  */
                 @Override
                 public void afterIndexRemoved(Index index, IndexSettings indexSettings, IndexRemovalReason reason) {
-                    String indexUuid = index.getUUID();
-                    IndexKeyResolverRegistry.removeResolver(indexUuid);
+                    // Only remove resolver when index is truly deleted, not during shard relocation
+                    if (reason == IndexRemovalReason.DELETED) {
+                        String indexUuid = index.getUUID();
+                        int numOfShards = indexSettings.getNumberOfShards();
+                        for (int i = 0; i < numOfShards; i++) {
+                            ShardKeyResolverRegistry.removeResolver(indexUuid, i);
+                        }
+                    }
                 }
             });
         }

@@ -19,7 +19,10 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.common.util.io.IOUtils;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
+import org.opensearch.index.store.key.KeyResolver;
 
 /**
  * A NioFS directory implementation that encrypts files to be stored based on a
@@ -31,23 +34,35 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     private final Provider provider;
 
     /** The resolver for encryption keys and initialization vectors. */
-    public final KeyIvResolver keyIvResolver;
+    public final KeyResolver keyResolver;
 
     private final AtomicLong nextTempFileCounter = new AtomicLong();
+    private final int algorithmId = 1; // Default to AES_256_GCM_CTR
+    private final Path dirPath;
+    private final EncryptionMetadataCache encryptionMetadataCache;
 
     /**
      * Creates a new CryptoNIOFSDirectory with encryption support.
-     * 
+     *
      * @param lockFactory the lock factory for coordinating access
      * @param location the directory path
      * @param provider the security provider for cryptographic operations
-     * @param keyIvResolver resolver for encryption keys and initialization vectors
+     * @param keyResolver resolver for encryption keys and initialization vectors
      * @throws IOException if the directory cannot be created or accessed
      */
-    public CryptoNIOFSDirectory(LockFactory lockFactory, Path location, Provider provider, KeyIvResolver keyIvResolver) throws IOException {
+    public CryptoNIOFSDirectory(
+        LockFactory lockFactory,
+        Path location,
+        Provider provider,
+        KeyResolver keyResolver,
+        EncryptionMetadataCache encryptionMetadataCache
+    )
+        throws IOException {
         super(location, lockFactory);
         this.provider = provider;
-        this.keyIvResolver = keyIvResolver;
+        this.keyResolver = keyResolver;
+        this.dirPath = getDirectory();
+        this.encryptionMetadataCache = encryptionMetadataCache;
     }
 
     @Override
@@ -67,7 +82,9 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
                 "CryptoBufferedIndexInput(path=\"" + path + "\")",
                 fc,
                 context,
-                this.keyIvResolver
+                this.keyResolver,
+                path,
+                this.encryptionMetadataCache
             );
             success = true;
             return indexInput;
@@ -89,7 +106,16 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), provider);
+        return new CryptoOutputStreamIndexOutput(
+            name,
+            path,
+            fos,
+            this.keyResolver,
+            provider,
+            algorithmId,
+            path,
+            this.encryptionMetadataCache
+        );
     }
 
     @Override
@@ -103,12 +129,61 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(name, path, fos, this.keyIvResolver.getDataKey(), keyIvResolver.getIvBytes(), provider);
+        return new CryptoOutputStreamIndexOutput(
+            name,
+            path,
+            fos,
+            this.keyResolver,
+            provider,
+            algorithmId,
+            path,
+            this.encryptionMetadataCache
+        );
+    }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        if (name.contains("segments_") || name.endsWith(".si")) {
+            return super.fileLength(name);
+        }
+
+        Path path = dirPath.resolve(name);
+        long fileSize = super.fileLength(name);
+
+        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            return fileSize;
+        }
+
+        String normalizedPath = EncryptionMetadataCache.normalizePath(path);
+
+        // check cache first
+        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
+        if (cachedFooter != null) {
+            return fileSize - cachedFooter.getFooterLength();
+        }
+
+        // read footer from disk with OSEF validation
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            try {
+                EncryptionFooter footer = EncryptionFooter
+                    .readViaFileChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
+                return fileSize - footer.getFooterLength();
+            } catch (EncryptionFooter.NotOSEFFileException e) {
+                return fileSize;
+            }
+        }
     }
 
     @Override
     public synchronized void close() throws IOException {
         isOpen = false;
         deletePendingFiles();
+        encryptionMetadataCache.invalidateDirectory();
+    }
+
+    @Override
+    public void deleteFile(String name) throws IOException {
+        super.deleteFile(name);
+        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(name)));
     }
 }

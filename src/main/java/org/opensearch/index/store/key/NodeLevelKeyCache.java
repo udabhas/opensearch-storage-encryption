@@ -2,7 +2,7 @@
  * Copyright OpenSearch Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
-package org.opensearch.index.store.iv;
+package org.opensearch.index.store.key;
 
 import java.security.Key;
 import java.util.Objects;
@@ -19,11 +19,11 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 
 /**
- * Node-level cache for encryption keys used across all indices.
+ * Node-level cache for encryption keys used across all shards.
  * Provides centralized key management with global TTL configuration.
  * 
  * This cache replaces the per-resolver Caffeine caches to reduce memory overhead
- * and provide better cache utilization across indices.
+ * and provide better cache utilization across shards.
  * 
  * @opensearch.internal
  */
@@ -33,49 +33,8 @@ public class NodeLevelKeyCache {
 
     private static NodeLevelKeyCache INSTANCE;
 
-    private final LoadingCache<CacheKey, Key> keyCache;
+    private final LoadingCache<ShardCacheKey, Key> keyCache;
     private final long globalTtlSeconds;
-
-    /**
-     * Cache key that contains the index UUID and resolver.
-     * The resolver is passed directly to eliminate registry lookup race conditions.
-     * Note: equals/hashCode use only indexUuid to ensure cache sharing across resolver instances.
-     */
-    static class CacheKey {
-        final String indexUuid;
-        final DefaultKeyIvResolver resolver;
-
-        CacheKey(String indexUuid, DefaultKeyIvResolver resolver) {
-            this.indexUuid = Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-            this.resolver = Objects.requireNonNull(resolver, "resolver cannot be null");
-        }
-
-        // For eviction - no resolver needed
-        CacheKey(String indexUuid) {
-            this.indexUuid = Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-            this.resolver = null;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o)
-                return true;
-            if (!(o instanceof CacheKey))
-                return false;
-            CacheKey that = (CacheKey) o;
-            return Objects.equals(indexUuid, that.indexUuid);
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(indexUuid);
-        }
-
-        @Override
-        public String toString() {
-            return "CacheKey[indexUuid=" + indexUuid + "]";
-        }
-    }
 
     /**
      * Initializes the singleton instance with node-level settings.
@@ -162,14 +121,15 @@ public class NodeLevelKeyCache {
             this.keyCache = Caffeine
                 .newBuilder()
                 // No refreshAfterWrite - keys are loaded once and cached forever
-                .build(new CacheLoader<CacheKey, Key>() {
+                .build(new CacheLoader<ShardCacheKey, Key>() {
                     @Override
-                    public Key load(CacheKey key) throws Exception {
-                        // Use the resolver provided in the cache key - eliminates registry lookup race condition
-                        if (key.resolver == null) {
-                            throw new IllegalStateException("Resolver not provided for index: " + key.indexUuid);
+                    public Key load(ShardCacheKey key) throws Exception {
+                        // Get resolver from registry
+                        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
+                        if (resolver == null) {
+                            throw new IllegalStateException("No resolver registered for shard: " + key);
                         }
-                        return key.resolver.loadKeyFromMasterKeyProvider();
+                        return ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
                     }
                     // No reload method needed since refresh is disabled
                 });
@@ -179,31 +139,28 @@ public class NodeLevelKeyCache {
                 .newBuilder()
                 // Only refresh keys at TTL - they never expire
                 .refreshAfterWrite(globalTtlSeconds, TimeUnit.SECONDS)
-                .build(new CacheLoader<CacheKey, Key>() {
+                .build(new CacheLoader<ShardCacheKey, Key>() {
                     @Override
-                    public Key load(CacheKey key) throws Exception {
-                        // Use the resolver provided in the cache key - eliminates registry lookup race condition
-                        if (key.resolver == null) {
-                            throw new IllegalStateException("Resolver not provided for index: " + key.indexUuid);
+                    public Key load(ShardCacheKey key) throws Exception {
+                        // Get resolver from registry
+                        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
+                        if (resolver == null) {
+                            throw new IllegalStateException("No resolver registered for shard: " + key);
                         }
-                        return key.resolver.loadKeyFromMasterKeyProvider();
+                        return ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
                     }
 
                     @Override
-                    public Key reload(CacheKey key, Key oldValue) throws Exception {
+                    public Key reload(ShardCacheKey key, Key oldValue) throws Exception {
                         try {
-                            // Use the resolver provided in the cache key for refresh
-                            if (key.resolver == null) {
-                                // Fallback: try to get from registry if not provided (shouldn't happen)
-                                KeyIvResolver resolver = IndexKeyResolverRegistry.getResolver(key.indexUuid);
-                                if (resolver == null) {
-                                    // Index might have been deleted, keep using old key
-                                    return oldValue;
-                                }
-                                return ((DefaultKeyIvResolver) resolver).loadKeyFromMasterKeyProvider();
+                            // Get resolver from registry
+                            KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
+                            if (resolver == null) {
+                                // Shard might have been closed, keep using old key
+                                return oldValue;
                             }
 
-                            Key newKey = key.resolver.loadKeyFromMasterKeyProvider();
+                            Key newKey = ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
                             return newKey;
                         } catch (Exception e) {
                             // If reload fails, keep using the old key
@@ -218,16 +175,15 @@ public class NodeLevelKeyCache {
      * Gets a key from the cache, loading it if necessary.
      * 
      * @param indexUuid the index UUID
-     * @param resolver the resolver to use for loading the key (eliminates registry lookup race condition)
+     * @param shardId   the shard ID
      * @return the encryption key
      * @throws Exception if key loading fails
      */
-    public Key get(String indexUuid, DefaultKeyIvResolver resolver) throws Exception {
+    public Key get(String indexUuid, int shardId) throws Exception {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-        Objects.requireNonNull(resolver, "resolver cannot be null");
 
         try {
-            return keyCache.get(new CacheKey(indexUuid, resolver));
+            return keyCache.get(new ShardCacheKey(indexUuid, shardId));
         } catch (CompletionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) {
@@ -240,12 +196,14 @@ public class NodeLevelKeyCache {
 
     /**
      * Evicts a key from the cache.
-     * This should be called when an index is deleted.
+     * This should be called when a shard is closed.
+     * 
      * @param indexUuid the index UUID
+     * @param shardId   the shard ID
      */
-    public void evict(String indexUuid) {
+    public void evict(String indexUuid, int shardId) {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-        keyCache.invalidate(new CacheKey(indexUuid));
+        keyCache.invalidate(new ShardCacheKey(indexUuid, shardId));
     }
 
     /**

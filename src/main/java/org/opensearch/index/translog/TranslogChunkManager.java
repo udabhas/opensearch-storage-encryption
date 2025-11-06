@@ -21,7 +21,8 @@ import org.apache.lucene.codecs.CodecUtil;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesGcmCipherFactory;
 import org.opensearch.index.store.cipher.OpenSslNativeCipher;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyResolver;
 
 /**
  * Manages 8KB encrypted chunks for translog files using AES-GCM authentication.
@@ -52,14 +53,14 @@ public class TranslogChunkManager {
     private static final ThreadLocal<byte[]> TEMP_ARRAY_POOL = ThreadLocal.withInitial(() -> new byte[GCM_CHUNK_SIZE]);
 
     private final FileChannel delegate;
-    private final KeyIvResolver keyIvResolver;
+    private final KeyResolver keyResolver;
     private final Path filePath;
     private final String translogUUID;
 
     // Header size - calculated exactly using TranslogHeader.headerSizeInBytes()
     private final int actualHeaderSize;
 
-    // Base IV
+    // Base IV derived using HKDF for deterministic translog encryption
     private final byte[] baseIV;
 
     // Streaming cipher state for write operations
@@ -101,23 +102,23 @@ public class TranslogChunkManager {
      * Creates a new TranslogChunkManager for managing encrypted chunks.
      *
      * @param delegate the underlying FileChannel for actual I/O operations
-     * @param keyIvResolver the key and IV resolver for encryption operations
+     * @param keyResolver the key resolver for encryption operations
      * @param filePath the file path (used for logging and debugging)
      * @param translogUUID the translog UUID for exact header size calculation
      */
-    public TranslogChunkManager(FileChannel delegate, KeyIvResolver keyIvResolver, Path filePath, String translogUUID) {
+    public TranslogChunkManager(FileChannel delegate, KeyResolver keyResolver, Path filePath, String translogUUID) {
         if (translogUUID == null) {
             throw new IllegalArgumentException("translogUUID is required for exact header size calculation");
         }
         this.delegate = delegate;
-        this.keyIvResolver = keyIvResolver;
+        this.keyResolver = keyResolver;
         this.filePath = filePath;
         this.translogUUID = translogUUID;
         // Non-translog files (.ckp) don't need encryption anyway
         this.actualHeaderSize = filePath.getFileName().toString().endsWith(".tlog") ? calculateTranslogHeaderSize(translogUUID) : 0;
 
-        // base IV
-        this.baseIV = keyIvResolver.getIvBytes();
+        // Derive base IV using HKDF instead of random IV from KeyResolver
+        this.baseIV = HkdfKeyDerivation.deriveTranslogBaseIV(keyResolver.getDataKey().getEncoded(), translogUUID);
     }
 
     /**
@@ -227,7 +228,7 @@ public class TranslogChunkManager {
             buffer.get(encryptedWithTag);
 
             // Use existing key management
-            Key key = keyIvResolver.getDataKey();
+            Key key = keyResolver.getDataKey();
 
             long chunkOffset = (long) chunkIndex * GCM_CHUNK_SIZE;
             byte[] chunkIV = computeOffsetIVForAesGcmEncrypted(baseIV, chunkOffset);
@@ -254,7 +255,7 @@ public class TranslogChunkManager {
     public void encryptAndWriteChunk(int chunkIndex, byte[] plainData) throws IOException {
         try {
             // Use existing key management
-            Key key = keyIvResolver.getDataKey();
+            Key key = keyResolver.getDataKey();
 
             long chunkOffset = (long) chunkIndex * GCM_CHUNK_SIZE;
             byte[] chunkIV = computeOffsetIVForAesGcmEncrypted(baseIV, chunkOffset);
@@ -461,7 +462,7 @@ public class TranslogChunkManager {
      * Initialize GCM cipher for a new block
      */
     private void initializeBlockCipher(long blockNumber) throws IOException {
-        Key key = keyIvResolver.getDataKey();
+        Key key = keyResolver.getDataKey();
         long offset = blockNumber << BLOCK_SIZE_SHIFT;
 
         try {

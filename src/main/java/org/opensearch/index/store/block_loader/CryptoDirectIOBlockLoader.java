@@ -9,8 +9,10 @@ import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_MA
 import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SIZE;
 import static org.opensearch.index.store.directio.DirectIoConfigs.CACHE_BLOCK_SIZE_POWER;
 
+import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -21,18 +23,22 @@ import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
+import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.Pool;
 
 /**
  * A {@link BlockLoader} implementation that loads encrypted file blocks using Direct I/O
  * and automatically decrypts them in-place.
- * 
+ *
  * <p>This loader combines high-performance Direct I/O with transparent decryption to provide
  * efficient access to encrypted file data. It reads blocks directly from storage, bypassing
  * the OS buffer cache, then decrypts the data in memory using the configured key and IV resolver.
- * 
+ *
  * <p>Key features:
  * <ul>
  * <li>Direct I/O for high performance and reduced memory pressure</li>
@@ -46,18 +52,24 @@ import org.opensearch.index.store.pool.Pool;
 public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySegment> {
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectIOBlockLoader.class);
 
+    private final KeyResolver keyResolver;
     private final Pool<RefCountedMemorySegment> segmentPool;
-    private final KeyIvResolver keyIvResolver;
+    private final EncryptionMetadataCache encryptionMetadataCache;
 
     /**
      * Constructs a new CryptoDirectIOBlockLoader with the specified memory pool and key resolver.
      *
      * @param segmentPool the memory segment pool for acquiring buffer space
-     * @param keyIvResolver the resolver for obtaining encryption keys and initialization vectors
+     * @param keyResolver the resolver for obtaining encryption keys and initialization vectors
      */
-    public CryptoDirectIOBlockLoader(Pool<RefCountedMemorySegment> segmentPool, KeyIvResolver keyIvResolver) {
+    public CryptoDirectIOBlockLoader(
+        Pool<RefCountedMemorySegment> segmentPool,
+        KeyResolver keyResolver,
+        EncryptionMetadataCache encryptionMetadataCache
+    ) {
         this.segmentPool = segmentPool;
-        this.keyIvResolver = keyIvResolver;
+        this.keyResolver = keyResolver;
+        this.encryptionMetadataCache = encryptionMetadataCache;
     }
 
     @Override
@@ -84,15 +96,39 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
-            // decrypt the block to cache.
+            String normalizedPath = filePath.toAbsolutePath().normalize().toString();
+
+            // Get directoryKey and messageId (needed for decryption)
+            EncryptionFooter footer = encryptionMetadataCache.getFooter(normalizedPath);
+            byte[] messageId;
+            if (footer == null) {
+                messageId = readMessageIdFromFooter(filePath);
+            } else {
+                messageId = footer.getMessageId();
+            }
+
+            byte[] directoryKey = keyResolver.getDataKey().getEncoded();
+
+            // Try cache for file key first
+            byte[] fileKey = encryptionMetadataCache.getFileKey(normalizedPath);
+            if (fileKey == null) {
+                // Cache miss - derive and cache
+                fileKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
+                encryptionMetadataCache.putFileKey(normalizedPath, fileKey);
+            }
+
+            // Use frame-based decryption with derived file key
             MemorySegmentDecryptor
-                .decryptInPlace(
-                    arena,
+                .decryptInPlaceFrameBased(
                     readBytes.address(),
                     readBytes.byteSize(),
-                    keyIvResolver.getDataKey().getEncoded(),
-                    keyIvResolver.getIvBytes(),
-                    startOffset
+                    fileKey,                                    // Derived file key (matches write path)
+                    directoryKey,                               // Directory key for IV computation
+                    messageId,                                  // Message ID from footer
+                    org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
+                    startOffset,                                 // File offset
+                    filePath.toAbsolutePath().normalize().toString(),
+                    encryptionMetadataCache
                 );
 
             if (bytesRead == 0) {
@@ -143,5 +179,48 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                 handles[i].close();
             }
         }
+    }
+
+    private byte[] readMessageIdFromFooter(Path filePath) throws IOException {
+        // Use separate random access FileChannel to avoid position conflicts
+        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
+            long fileSize = channel.size();
+            if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+                throw new IOException("File too small to contain footer: " + filePath);
+            }
+
+            // Read minimum footer to check OSEF magic bytes
+            ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            byte[] minFooterBytes = minBuffer.array();
+
+            // Check if this is an OSEF file
+            if (!isValidOSEFFile(minFooterBytes)) {
+                // Not an OSEF file
+                throw new IOException("Not an OSEF file -" + filePath);
+            }
+
+            EncryptionFooter footer = EncryptionFooter
+                .readViaFileChannel(
+                    filePath.toAbsolutePath().normalize().toString(),
+                    channel,
+                    keyResolver.getDataKey().getEncoded(),
+                    encryptionMetadataCache
+                );
+            return footer.getMessageId();
+        }
+    }
+
+    /**
+     * Check if file has valid OSEF magic bytes
+     */
+    private boolean isValidOSEFFile(byte[] minFooterBytes) {
+        int magicOffset = minFooterBytes.length - EncryptionMetadataTrailer.MAGIC.length;
+        for (int i = 0; i < EncryptionMetadataTrailer.MAGIC.length; i++) {
+            if (minFooterBytes[magicOffset + i] != EncryptionMetadataTrailer.MAGIC[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 }

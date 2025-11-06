@@ -10,6 +10,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Path;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 
@@ -25,7 +26,11 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.AesCipherFactory;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.cipher.EncryptionAlgorithm;
+import org.opensearch.index.store.cipher.EncryptionMetadataCache;
+import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyResolver;
 
 /**
  * An IndexInput implementation that decrypts data for reading
@@ -33,7 +38,7 @@ import org.opensearch.index.store.iv.KeyIvResolver;
  * @opensearch.internal
  */
 final class CryptoBufferedIndexInput extends BufferedIndexInput {
-    private static final byte[] ZERO_SKIP = new byte[AesCipherFactory.AES_BLOCK_SIZE_BYTES];
+    private static final byte[] ZERO_SKIP = new byte[1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER];
     private static final ByteBuffer EMPTY_BYTEBUFFER = ByteBuffer.allocate(0);
     private static final int CHUNK_SIZE = 16_384;
 
@@ -41,22 +46,78 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private final boolean isClone;
     private final long off;
     private final long end;
-    private final KeyIvResolver keyResolver;
+    private final KeyResolver keyResolver;
     private final SecretKeySpec keySpec;
+    private final byte[] directoryKey;
+    private final byte[] messageId;
+    private final int footerLength;
+    private final long frameSize;
+    private final int frameSizePower;
+    private final EncryptionAlgorithm algorithm;
+    private final EncryptionMetadataCache encryptionMetadataCache;
 
     private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, IOContext context, KeyIvResolver keyResolver) throws IOException {
+    private final String normalizedFilePath;
+
+    public CryptoBufferedIndexInput(
+        String resourceDesc,
+        FileChannel fc,
+        IOContext context,
+        KeyResolver keyResolver,
+        Path filePath,
+        EncryptionMetadataCache encryptionMetadataCache
+    )
+        throws IOException {
         super(resourceDesc, context);
         this.channel = fc;
         this.off = 0L;
         this.end = fc.size();
         this.keyResolver = keyResolver;
-        this.keySpec = new SecretKeySpec(keyResolver.getDataKey().getEncoded(), ALGORITHM);
         this.isClone = false;
+        this.normalizedFilePath = EncryptionMetadataCache.normalizePath(filePath);
+        this.encryptionMetadataCache = encryptionMetadataCache;
+
+        // Get directory key first
+        this.directoryKey = keyResolver.getDataKey().getEncoded();
+
+        // Read footer with temporary key for authentication
+        EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedFilePath, channel, directoryKey, encryptionMetadataCache);
+        this.messageId = footer.getMessageId();
+        this.frameSize = footer.getFrameSize();
+        this.frameSizePower = footer.getFrameSizePower();
+        this.algorithm = EncryptionAlgorithm.fromId(footer.getAlgorithmId());
+
+        // Try cache for file key first
+        byte[] derivedKey = encryptionMetadataCache.getFileKey(normalizedFilePath);
+        if (derivedKey == null) {
+            // Cache miss - derive and cache
+            derivedKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
+            encryptionMetadataCache.putFileKey(normalizedFilePath, derivedKey);
+        }
+        this.keySpec = new SecretKeySpec(derivedKey, ALGORITHM);
+
+        // Calculate footer length
+        this.footerLength = footer.getFooterLength();
     }
 
-    public CryptoBufferedIndexInput(String resourceDesc, FileChannel fc, long off, long length, int bufferSize, KeyIvResolver keyResolver)
+    public CryptoBufferedIndexInput(
+        String resourceDesc,
+        FileChannel fc,
+        long off,
+        long length,
+        int bufferSize,
+        KeyResolver keyResolver,
+        SecretKeySpec keySpec,
+        int footerLength,
+        long frameSize,
+        int frameSizePower,
+        short algorithmId,
+        byte[] directoryKey,
+        byte[] messageId,
+        String normalizedFilePath,
+        EncryptionMetadataCache encryptionMetadataCache
+    )
         throws IOException {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -64,7 +125,15 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.end = off + length;
         this.isClone = true;
         this.keyResolver = keyResolver;
-        this.keySpec = new SecretKeySpec(keyResolver.getDataKey().getEncoded(), ALGORITHM);
+        this.keySpec = keySpec;  // Reuse keySpec from main file
+        this.footerLength = footerLength;
+        this.frameSize = frameSize;
+        this.frameSizePower = frameSizePower;
+        this.algorithm = EncryptionAlgorithm.fromId(algorithmId);
+        this.directoryKey = directoryKey;  // Passed from parent
+        this.messageId = messageId;  // Passed from parent
+        this.normalizedFilePath = normalizedFilePath;
+        this.encryptionMetadataCache = encryptionMetadataCache;
     }
 
     @Override
@@ -94,43 +163,60 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             off + offset,
             length,
             getBufferSize(),
-            keyResolver
+            keyResolver,
+            keySpec,  // Pass the already-derived keySpec
+            footerLength,
+            frameSize,
+            frameSizePower,
+            algorithm.getAlgorithmId(),
+            directoryKey,  // Pass directory key
+            messageId,      // Pass message ID
+            normalizedFilePath,
+            encryptionMetadataCache
         );
     }
 
     @Override
     public long length() {
-        return end - off;
+        // Exclude footer from logical file length (only for main file, not slices)
+        if (isClone) {
+            return end - off;  // Slices use exact length passed in
+        } else {
+            return end - off - footerLength;  // Main file excludes variable footer
+        }
     }
 
     @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
     private int read(ByteBuffer dst, long position) throws IOException {
-
-        // initialize buffer lazy because Lucene may open input slices and clones ahead but never use them
-        // see org.apache.lucene.store.BufferedIndexInput
         if (tmpBuffer == EMPTY_BYTEBUFFER) {
             tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
         }
 
-        tmpBuffer.clear().limit(dst.remaining());
+        long frameNumber = position >>> frameSizePower;
+        long offsetWithinFrame = position & ((1L << frameSizePower) - 1);
+        long frameEnd = (frameNumber + 1) << frameSizePower;
+        int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);
+
+        tmpBuffer.clear().limit(maxReadInFrame);
         int bytesRead = channel.read(tmpBuffer, position);
         if (bytesRead == -1) {
             return -1;
         }
-
         tmpBuffer.flip();
 
         try {
-            Cipher cipher = AesCipherFactory.CIPHER_POOL.get();
+            Cipher cipher = algorithm.getDecryptionCipher();
+            byte[] frameIV = AesCipherFactory
+                .computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame, this.normalizedFilePath, encryptionMetadataCache);
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
 
-            byte[] ivCopy = AesCipherFactory.computeOffsetIVForAesGcmEncrypted(keyResolver.getIvBytes(), position);
-
-            cipher.init(Cipher.DECRYPT_MODE, this.keySpec, new IvParameterSpec(ivCopy));
-
-            if (position % AesCipherFactory.AES_BLOCK_SIZE_BYTES > 0) {
-                cipher.update(ZERO_SKIP, 0, (int) (position % AesCipherFactory.AES_BLOCK_SIZE_BYTES));
+            // skip partial AES block within frame if needed
+            int skipBytes = (int) (offsetWithinFrame & ((1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1));
+            if (skipBytes > 0) {
+                cipher.update(ZERO_SKIP, 0, skipBytes);
             }
 
+            // decrypt into dst
             return (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
         } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException
             | InvalidKeyException ex) {

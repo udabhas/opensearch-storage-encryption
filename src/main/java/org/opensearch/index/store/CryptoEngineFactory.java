@@ -17,8 +17,8 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngine;
-import org.opensearch.index.store.iv.IndexKeyResolverRegistry;
-import org.opensearch.index.store.iv.KeyIvResolver;
+import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.translog.CryptoTranslogFactory;
 
 /**
@@ -40,11 +40,11 @@ public class CryptoEngineFactory implements EngineFactory {
     public Engine newReadWriteEngine(EngineConfig config) {
 
         try {
-            // Create a separate KeyIvResolver for translog encryption
-            KeyIvResolver keyIvResolver = createTranslogKeyIvResolver(config);
+            // Create a separate KeyResolver for translog encryption
+            KeyResolver keyResolver = createTranslogKeyResolver(config);
 
-            // Create the crypto translog factory using the same KeyIvResolver as the directory
-            CryptoTranslogFactory cryptoTranslogFactory = new CryptoTranslogFactory(keyIvResolver);
+            // Create the crypto translog factory using the same KeyResolver as the directory
+            CryptoTranslogFactory cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
 
             // Create new engine config by copying all fields from existing config
             // but replace the translog factory with our crypto version
@@ -60,7 +60,13 @@ public class CryptoEngineFactory implements EngineFactory {
         }
     }
 
-    private KeyIvResolver createTranslogKeyIvResolver(EngineConfig config) throws IOException {
+    /**
+     * Create a separate KeyResolver for translog encryption.
+     */
+    private KeyResolver createTranslogKeyResolver(EngineConfig config) throws IOException {
+        // Create a separate key resolver for translog files
+
+        // Use the translog location for key storage
         // Use index-level keys for translog encryption - same as directory encryption
         Path translogPath = config.getTranslogConfig().getTranslogPath();
         Path indexDirectory = translogPath.getParent().getParent(); // Go up two levels: translog -> shard -> index
@@ -74,7 +80,8 @@ public class CryptoEngineFactory implements EngineFactory {
 
         // Use shared resolver registry to get the SAME resolver instance as CryptoDirectoryFactory
         String indexUuid = config.getIndexSettings().getIndex().getUUID();
-        return IndexKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider);
+        int shardId = config.getShardId().getId();
+        return ShardKeyResolverRegistry.getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId);
     }
 
     /**
