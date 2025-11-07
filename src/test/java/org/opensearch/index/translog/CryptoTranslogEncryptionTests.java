@@ -5,7 +5,6 @@
 package org.opensearch.index.translog;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -14,7 +13,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Provider;
 import java.security.Security;
-import java.util.concurrent.ConcurrentMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -24,8 +22,6 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
-import org.opensearch.index.store.key.ShardCacheKey;
-import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**
@@ -40,26 +36,11 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
     private MasterKeyProvider keyProvider;
     private String testIndexUuid;
 
-    /**
-     * Helper method to register the resolver in the ShardKeyResolverRegistry
-     */
-    @SuppressForbidden(reason = "Test needs to register resolver in ShardKeyResolverRegistry")
-    private void registerResolver(String indexUuid, int shardId, KeyResolver resolver) throws Exception {
-        Field resolverCacheField = ShardKeyResolverRegistry.class.getDeclaredField("resolverCache");
-        resolverCacheField.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        ConcurrentMap<ShardCacheKey, KeyResolver> resolverCache = (ConcurrentMap<ShardCacheKey, KeyResolver>) resolverCacheField.get(null);
-        resolverCache.put(new ShardCacheKey(indexUuid, shardId), resolver);
-    }
-
     @Override
     @SuppressForbidden(reason = "Creating temp directory for test purposes")
     public void setUp() throws Exception {
         super.setUp();
         tempDir = Files.createTempDirectory("crypto-translog-encryption-test");
-
-        // Clear the ShardKeyResolverRegistry cache before each test
-        ShardKeyResolverRegistry.clearCache();
 
         // Initialize NodeLevelKeyCache with test settings
         Settings nodeSettings = Settings
@@ -103,19 +84,13 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         // Use a test index UUID
         testIndexUuid = "test-index-uuid-" + System.currentTimeMillis();
         org.apache.lucene.store.Directory directory = new org.apache.lucene.store.NIOFSDirectory(tempDir);
-        // keyResolver = new DefaultKeyResolver(directory, cryptoProvider, keyProvider);
         keyResolver = new DefaultKeyResolver(testIndexUuid, directory, cryptoProvider, keyProvider, 0);
-
-        // Register the resolver with ShardKeyResolverRegistry so cache can find it
-        registerResolver(testIndexUuid, 0, keyResolver);
     }
 
     @Override
     public void tearDown() throws Exception {
         // Reset the NodeLevelKeyCache singleton to prevent test pollution
         NodeLevelKeyCache.reset();
-        // Clear the ShardKeyResolverRegistry cache
-        ShardKeyResolverRegistry.clearCache();
         super.tearDown();
     }
 

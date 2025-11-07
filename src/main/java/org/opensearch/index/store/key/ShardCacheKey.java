@@ -13,7 +13,6 @@ import java.util.Objects;
  * 
  * <p>This key is used by:
  * <ul>
- * <li>ShardKeyResolverRegistry - for KeyResolver instances</li>
  * <li>EncryptionMetadataCacheRegistry - for EncryptionMetadataCache instances</li>
  * <li>NodeLevelKeyCache - for cached encryption keys</li>
  * </ul>

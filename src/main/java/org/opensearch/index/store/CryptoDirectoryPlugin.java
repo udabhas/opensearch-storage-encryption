@@ -26,7 +26,6 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
-import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.pool.PoolBuilder;
 import org.opensearch.index.store.pool.PoolSizeCalculator;
 import org.opensearch.indices.cluster.IndicesClusterStateService.AllocatedIndices.IndexRemovalReason;
@@ -142,7 +141,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
                         String indexUuid = index.getUUID();
                         int numOfShards = indexSettings.getNumberOfShards();
                         for (int i = 0; i < numOfShards; i++) {
-                            ShardKeyResolverRegistry.removeResolver(indexUuid, i);
+                            NodeLevelKeyCache.getInstance().evict(indexUuid, i);
                         }
                     }
                 }

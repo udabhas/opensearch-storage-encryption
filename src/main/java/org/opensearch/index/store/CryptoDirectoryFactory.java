@@ -38,8 +38,8 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
 import org.opensearch.index.store.directio.CryptoDirectIODirectory;
 import org.opensearch.index.store.hybrid.HybridCryptoDirectory;
+import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
-import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 import org.opensearch.index.store.pool.PoolBuilder;
 import org.opensearch.index.store.read_ahead.Worker;
@@ -228,10 +228,9 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // Create a directory for the index-level keys
         Directory indexKeyDirectory = FSDirectory.open(indexDirectory);
 
-        // Use shared resolver registry to prevent race conditions
+        // Create KeyResolver
         String indexUuid = indexSettings.getIndex().getUUID();
-        KeyResolver keyResolver = ShardKeyResolverRegistry
-            .getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId);
+        KeyResolver keyResolver = new DefaultKeyResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId);
 
         // Get or create per-shard encryption metadata cache
         EncryptionMetadataCache encryptionMetadataCache = EncryptionMetadataCacheRegistry.getOrCreateCache(indexUuid, shardId);

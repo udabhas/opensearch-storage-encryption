@@ -130,16 +130,15 @@ public class DefaultKeyResolver implements KeyResolver {
      * {@inheritDoc}
      * Returns the data key for all operations.
      * The cache handles MasterKey Provider failures by returning the last known key.
-     * Passes this resolver directly to the cache to eliminate registry lookup race conditions.
+     * Passes this resolver directly to the cache to eliminate registry lookup.
      */
     @Override
     public Key getDataKey() {
         try {
-            return NodeLevelKeyCache.getInstance().get(indexUuid, shardId);
+            return NodeLevelKeyCache.getInstance().get(indexUuid, shardId, this);
         } catch (Exception ex) {
-            throw new RuntimeException("No Node Level Key Cache available for {}", ex);
+            throw new RuntimeException("Failed to get key for index: " + indexUuid + ", shard: " + shardId, ex);
         }
-
     }
 
 }

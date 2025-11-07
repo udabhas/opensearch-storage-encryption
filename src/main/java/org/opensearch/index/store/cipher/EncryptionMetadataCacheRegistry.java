@@ -12,7 +12,6 @@ import org.opensearch.index.store.key.ShardCacheKey;
 /**
  * Registry that ensures only one EncryptionMetadataCache instance exists per shard.
  * Uses shard-level granularity for better cache lifecycle management and isolation.
- * Mirrors the pattern used by ShardKeyResolverRegistry for consistent architecture.
  * 
  * @opensearch.internal
  */

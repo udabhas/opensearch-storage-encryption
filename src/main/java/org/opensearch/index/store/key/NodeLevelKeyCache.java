@@ -7,6 +7,8 @@ package org.opensearch.index.store.key;
 import java.security.Key;
 import java.util.Objects;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
@@ -34,6 +36,7 @@ public class NodeLevelKeyCache {
     private static NodeLevelKeyCache INSTANCE;
 
     private final LoadingCache<ShardCacheKey, Key> keyCache;
+    private final ConcurrentMap<ShardCacheKey, DefaultKeyResolver> resolvers = new ConcurrentHashMap<>();
     private final long globalTtlSeconds;
 
     /**
@@ -124,12 +127,12 @@ public class NodeLevelKeyCache {
                 .build(new CacheLoader<ShardCacheKey, Key>() {
                     @Override
                     public Key load(ShardCacheKey key) throws Exception {
-                        // Get resolver from registry
-                        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
+                        // Get resolver from stored map
+                        DefaultKeyResolver resolver = resolvers.get(key);
                         if (resolver == null) {
                             throw new IllegalStateException("No resolver registered for shard: " + key);
                         }
-                        return ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
+                        return resolver.loadKeyFromMasterKeyProvider();
                     }
                     // No reload method needed since refresh is disabled
                 });
@@ -142,25 +145,25 @@ public class NodeLevelKeyCache {
                 .build(new CacheLoader<ShardCacheKey, Key>() {
                     @Override
                     public Key load(ShardCacheKey key) throws Exception {
-                        // Get resolver from registry
-                        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
+                        // Get resolver from stored map
+                        DefaultKeyResolver resolver = resolvers.get(key);
                         if (resolver == null) {
                             throw new IllegalStateException("No resolver registered for shard: " + key);
                         }
-                        return ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
+                        return resolver.loadKeyFromMasterKeyProvider();
                     }
 
                     @Override
                     public Key reload(ShardCacheKey key, Key oldValue) throws Exception {
                         try {
-                            // Get resolver from registry
-                            KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
+                            // Get resolver from stored map
+                            DefaultKeyResolver resolver = resolvers.get(key);
                             if (resolver == null) {
                                 // Shard might have been closed, keep using old key
                                 return oldValue;
                             }
 
-                            Key newKey = ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
+                            Key newKey = resolver.loadKeyFromMasterKeyProvider();
                             return newKey;
                         } catch (Exception e) {
                             // If reload fails, keep using the old key
@@ -176,14 +179,21 @@ public class NodeLevelKeyCache {
      * 
      * @param indexUuid the index UUID
      * @param shardId   the shard ID
+     * @param resolver  the DefaultKeyResolver for loading keys
      * @return the encryption key
      * @throws Exception if key loading fails
      */
-    public Key get(String indexUuid, int shardId) throws Exception {
+    public Key get(String indexUuid, int shardId, DefaultKeyResolver resolver) throws Exception {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
+        Objects.requireNonNull(resolver, "resolver cannot be null");
+
+        ShardCacheKey key = new ShardCacheKey(indexUuid, shardId);
+
+        // Register the resolver for this shard
+        resolvers.putIfAbsent(key, resolver);
 
         try {
-            return keyCache.get(new ShardCacheKey(indexUuid, shardId));
+            return keyCache.get(key);
         } catch (CompletionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) {
@@ -203,7 +213,9 @@ public class NodeLevelKeyCache {
      */
     public void evict(String indexUuid, int shardId) {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-        keyCache.invalidate(new ShardCacheKey(indexUuid, shardId));
+        ShardCacheKey key = new ShardCacheKey(indexUuid, shardId);
+        keyCache.invalidate(key);
+        resolvers.remove(key);
     }
 
     /**
