@@ -4,6 +4,10 @@
  */
 package org.opensearch.index.translog;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
@@ -18,15 +22,22 @@ import java.util.concurrent.ConcurrentMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
+import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.SuppressForbidden;
+import org.opensearch.common.action.ActionFuture;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.key.MasterKeyHealthMonitor;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.index.store.key.ShardCacheKey;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.client.AdminClient;
+import org.opensearch.transport.client.Client;
+import org.opensearch.transport.client.IndicesAdminClient;
 
 /**
  * Verify that translog data encryption actually works.
@@ -49,7 +60,7 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         resolverCacheField.setAccessible(true);
         @SuppressWarnings("unchecked")
         ConcurrentMap<ShardCacheKey, KeyResolver> resolverCache = (ConcurrentMap<ShardCacheKey, KeyResolver>) resolverCacheField.get(null);
-        resolverCache.put(new ShardCacheKey(indexUuid, shardId), resolver);
+        resolverCache.put(new ShardCacheKey(indexUuid, shardId, "test-index"), resolver);
     }
 
     @Override
@@ -64,9 +75,26 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         // Initialize NodeLevelKeyCache with test settings
         Settings nodeSettings = Settings
             .builder()
-            .put("node.store.crypto.key_refresh_interval_secs", 300) // 5 minutes for tests
+            .put("node.store.crypto.key_refresh_interval", "5m") // 5 minutes for tests
             .build();
-        NodeLevelKeyCache.initialize(nodeSettings);
+
+        // Create mock Client and ClusterService for testing
+        Client mockClient = mock(Client.class);
+        ClusterService mockClusterService = mock(ClusterService.class);
+
+        // Setup mock Client chain for block operations
+        AdminClient mockAdminClient = mock(AdminClient.class);
+        IndicesAdminClient mockIndicesAdminClient = mock(IndicesAdminClient.class);
+        @SuppressWarnings("unchecked")
+        ActionFuture<AcknowledgedResponse> mockFuture = (ActionFuture<AcknowledgedResponse>) mock(ActionFuture.class);
+
+        when(mockClient.admin()).thenReturn(mockAdminClient);
+        when(mockAdminClient.indices()).thenReturn(mockIndicesAdminClient);
+        when(mockIndicesAdminClient.updateSettings(any())).thenReturn(mockFuture);
+        when(mockFuture.actionGet()).thenReturn(mock(AcknowledgedResponse.class));
+
+        MasterKeyHealthMonitor.initialize(nodeSettings, mockClient, mockClusterService);
+        NodeLevelKeyCache.initialize(nodeSettings, MasterKeyHealthMonitor.getInstance());
 
         Provider cryptoProvider = Security.getProvider("SunJCE");
 
@@ -104,7 +132,7 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         testIndexUuid = "test-index-uuid-" + System.currentTimeMillis();
         org.apache.lucene.store.Directory directory = new org.apache.lucene.store.NIOFSDirectory(tempDir);
         // keyResolver = new DefaultKeyResolver(directory, cryptoProvider, keyProvider);
-        keyResolver = new DefaultKeyResolver(testIndexUuid, directory, cryptoProvider, keyProvider, 0);
+        keyResolver = new DefaultKeyResolver(testIndexUuid, "test-index", directory, cryptoProvider, keyProvider, 0);
 
         // Register the resolver with ShardKeyResolverRegistry so cache can find it
         registerResolver(testIndexUuid, 0, keyResolver);
@@ -112,7 +140,8 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
 
     @Override
     public void tearDown() throws Exception {
-        // Reset the NodeLevelKeyCache singleton to prevent test pollution
+        // Reset singletons to prevent test pollution
+        MasterKeyHealthMonitor.reset();
         NodeLevelKeyCache.reset();
         // Clear the ShardKeyResolverRegistry cache
         ShardKeyResolverRegistry.clearCache();

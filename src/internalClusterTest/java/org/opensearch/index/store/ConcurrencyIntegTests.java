@@ -50,7 +50,7 @@ public class ConcurrencyIntegTests extends OpenSearchIntegTestCase {
             .put("node.store.crypto.pool_size_percentage", 0.05) // 5% for tests
             .put("node.store.crypto.warmup_percentage", 0.0) // No warmup
             .put("node.store.crypto.cache_to_pool_ratio", 0.8)
-            .put("node.store.crypto.key_refresh_interval_secs", 30) // Short for testing
+            .put("node.store.crypto.key_refresh_interval", "30s") // Short for testing
             .build();
     }
 
@@ -436,6 +436,10 @@ public class ConcurrencyIntegTests extends OpenSearchIntegTestCase {
             response4.getHits().getTotalHits().value(),
             equalTo((long) (numDocs + additionalDocs))
         );
+
+        // Explicit flush to release any BigArrays held by translog/recovery operations
+        // This prevents "arrays have not been released" errors in test framework
+        flush("test-translog");
 
         logger.info("Translog encryption recovery test completed successfully");
     }

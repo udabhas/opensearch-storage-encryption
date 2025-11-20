@@ -27,6 +27,7 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.store.block_cache.BlockCache;
+import org.opensearch.index.store.key.MasterKeyHealthMonitor;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
@@ -70,7 +71,8 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
                 CryptoDirectoryFactory.INDEX_CRYPTO_PROVIDER_SETTING,
                 CryptoDirectoryFactory.INDEX_KMS_ARN_SETTING,
                 CryptoDirectoryFactory.INDEX_KMS_ENC_CTX_SETTING,
-                CryptoDirectoryFactory.NODE_KEY_REFRESH_INTERVAL_SECS_SETTING,
+                CryptoDirectoryFactory.NODE_KEY_REFRESH_INTERVAL_SETTING,
+                CryptoDirectoryFactory.NODE_KEY_EXPIRY_INTERVAL_SETTING,
                 PoolSizeCalculator.NODE_POOL_SIZE_PERCENTAGE_SETTING,
                 PoolSizeCalculator.NODE_CACHE_TO_POOL_RATIO_SETTING,
                 PoolSizeCalculator.NODE_WARMUP_PERCENTAGE_SETTING
@@ -115,7 +117,16 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
     ) {
         this.nodeEnvironment = nodeEnvironment;
         sharedPoolResources = CryptoDirectoryFactory.initializeSharedPool(environment.settings());
-        NodeLevelKeyCache.initialize(environment.settings());
+
+        // Initialize health monitor first (creates monitor)
+        MasterKeyHealthMonitor.initialize(environment.settings(), client, clusterService);
+
+        // Initialize cache second (depends on health monitor reference)
+        NodeLevelKeyCache.initialize(environment.settings(), MasterKeyHealthMonitor.getInstance());
+
+        // Start health monitoring now that everything is initialized
+        MasterKeyHealthMonitor.start();
+
         CryptoMetricsService.initialize(metricsRegistry);
 
         return Collections.emptyList();
@@ -126,6 +137,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         if (sharedPoolResources != null) {
             sharedPoolResources.close();
         }
+        MasterKeyHealthMonitor.shutdown();
     }
 
     @Override
@@ -164,7 +176,8 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
                     * */
                     int nShards = idxSettings.getNumberOfShards();
                     for (int i = 0; i < nShards; i++) {
-                        ShardKeyResolverRegistry.removeResolver(index.getUUID(), i);
+                        ShardKeyResolverRegistry.removeResolver(index.getUUID(), i, index.getName());
+                        NodeLevelKeyCache.getInstance().evict(index.getUUID(), i, index.getName());
                     }
                 }
             });

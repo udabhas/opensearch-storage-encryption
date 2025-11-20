@@ -7,11 +7,11 @@ package org.opensearch.index.store.key;
 import java.security.Key;
 import java.util.Objects;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.index.store.CryptoDirectoryFactory;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
@@ -22,8 +22,16 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
  * Node-level cache for encryption keys used across all shards.
  * Provides centralized key management with global TTL configuration.
  * 
- * This cache replaces the per-resolver Caffeine caches to reduce memory overhead
- * and provide better cache utilization across shards.
+ * <p>This cache focuses solely on caching functionality, delegating health
+ * monitoring and block management to {@link MasterKeyHealthMonitor}.
+ * 
+ * <p>Failure Handling Strategy:
+ * <ul>
+ *   <li>Keys are refreshed in background at TTL intervals (default: 1 hour)</li>
+ *   <li>On refresh failure, old key is retained temporarily</li>
+ *   <li>Failures are reported to MasterKeyHealthMonitor for block management</li>
+ *   <li>System automatically recovers when Master Key Provider is restored</li>
+ * </ul>
  * 
  * @opensearch.internal
  */
@@ -34,24 +42,34 @@ public class NodeLevelKeyCache {
     private static NodeLevelKeyCache INSTANCE;
 
     private final LoadingCache<ShardCacheKey, Key> keyCache;
-    private final long globalTtlSeconds;
+    private final long refreshDuration;
+    private final long keyExpiryDuration;
+    private final MasterKeyHealthMonitor healthMonitor;
 
     /**
-     * Initializes the singleton instance with node-level settings.
-     * This should be called once during plugin initialization.
+     * Initializes the singleton instance with node-level settings and health monitor.
+     * This should be called once during plugin initialization, after MasterKeyHealthMonitor
+     * has been initialized.
      * 
      * @param nodeSettings the node settings containing global TTL configuration
+     * @param healthMonitor the health monitor for failure/success reporting
      */
-    public static synchronized void initialize(Settings nodeSettings) {
+    public static synchronized void initialize(Settings nodeSettings, MasterKeyHealthMonitor healthMonitor) {
         if (INSTANCE == null) {
-            int globalTtlSeconds = CryptoDirectoryFactory.NODE_KEY_REFRESH_INTERVAL_SECS_SETTING.get(nodeSettings);
+            TimeValue refreshInterval = CryptoDirectoryFactory.NODE_KEY_REFRESH_INTERVAL_SETTING.get(nodeSettings);
+            TimeValue expiryInterval = CryptoDirectoryFactory.NODE_KEY_EXPIRY_INTERVAL_SETTING.get(nodeSettings);
 
-            INSTANCE = new NodeLevelKeyCache((long) globalTtlSeconds);
+            // Convert to seconds for internal use, handling negative values (disabled refresh/expiry)
+            long refreshDuration = refreshInterval.getSeconds();
+            long keyExpiryDuration = expiryInterval.getSeconds();
 
-            if (globalTtlSeconds == -1) {
-                logger.debug("Initialized NodeLevelKeyCache with refresh disabled (TTL: -1)");
+            INSTANCE = new NodeLevelKeyCache(refreshDuration, keyExpiryDuration, healthMonitor);
+
+            if (refreshDuration < 0) {
+                logger.info("Initialized NodeLevelKeyCache with refresh disabled");
             } else {
-                logger.debug("Initialized NodeLevelKeyCache with global TTL: {} seconds", globalTtlSeconds);
+                logger
+                    .info("Initialized NodeLevelKeyCache with refresh interval: {}, expiry interval: {}", refreshInterval, expiryInterval);
             }
         }
     }
@@ -70,53 +88,38 @@ public class NodeLevelKeyCache {
     }
 
     /**
-     * Constructs the cache with global TTL configuration.
+     * Constructs the cache with global TTL and expiration configuration.
      * <p>
-     * This implements a non-expiring cache with asynchronous refresh semantics:
+     * This implements a cache with asynchronous refresh:
      * <ul>
-     *  <li> When a key is first requested, it is loaded synchronously from the MasterKey Provider.
+     *  <li>When a key is first requested, it is loaded synchronously from the MasterKey Provider.</li>
      * 
-     *  <li> After the key has been in the cache for the configured TTL duration, 
-     *    the next access will trigger an asynchronous reload in the background.
+     *  <li>After the key has been in the cache for the refresh TTL duration, 
+     *      the next access triggers an asynchronous reload in the background.</li>
      * 
-     *  <li> While the reload is in progress, it continues to return the 
-     *   previously cached (stale) value to avoid blocking operations.
+     *  <li>While the reload is in progress, it continues to return the 
+     *      previously cached (stale) value to avoid blocking operations.</li>
      * 
-     *  <li> If the reload fails due to any exception (e.g., MasterKeyProvider unavailable), 
-     *   the cache retains and continues to serve the old value instead of 
-     *   evicting it, ensuring operations can continue with the last known good key.
+     *  <li>If the reload fails, an exception is thrown (not suppressed), allowing Caffeine to track failures.</li>
+     * 
+     *  <li>Failures are reported to MasterKeyHealthMonitor which handles block management.</li>
      * </ul>
-     * @param globalTtlSeconds the global TTL in seconds (-1 means never refresh)
-    
+     * 
+     * @param refreshDuration the refresh duration in seconds (-1 or 0 means never refresh)
+     * @param keyExpiryDuration expiration duration in seconds (-1 or 0 means never expire)
+     * @param healthMonitor the health monitor for failure/success reporting
      */
-    /* 
-     * Future Enhancement: Stricter Failed Refresh Model
-     * In the next iteration of PRs, when we move toward stricter model of failed reloads,
-     * we could introduce a cache policy using refreshAfterWrite(X) plus expireAfterWrite(Y)
-     * where Y > X and Y = nX (maybe Y = 3X).
-     * 
-     * With this approach:
-     *   - The cache will continue to serve the existing resolver for some failures
-     *   - If refreshes have failed across Y consecutive intervals (i.e., the key being revoked),
-     *       the entry will be auto-evicted
-     *   - At eviction time, we could also mutate the associated resolver instance to null or 
-     *       a dummy value (sentinel), ensuring that any new access on this dummy resolver from 
-     *       index input and output fails and consults the cache, triggering a load
-     *   - This prevents us from building any background task
-     *   - One more advantage is we prevent any unnecessary checks if customer has stopped 
-     *       sending traffic
-     * 
-     * 
-     * DOS Protection: We have to be careful that too many loads (DOS) on a failed key may DOS the cache. 
-     * Hence, we should only attempt a load from cache if the last attempt for a resolver failed 
-     * for more than X minutes.
-     * 
-     */
-    private NodeLevelKeyCache(long globalTtlSeconds) {
-        this.globalTtlSeconds = globalTtlSeconds;
+    private NodeLevelKeyCache(long refreshDuration, long keyExpiryDuration, MasterKeyHealthMonitor healthMonitor) {
+        this.refreshDuration = refreshDuration;
+        this.keyExpiryDuration = keyExpiryDuration;
+        this.healthMonitor = Objects.requireNonNull(healthMonitor, "healthMonitor cannot be null");
 
-        // Check if refresh is disabled
-        if (globalTtlSeconds == -1L) {
+        // Suppress Caffeine's internal logging to reduce log spam during key reload failures
+        // This prevents duplicate exception logging from Caffeine's BoundedLocalCache
+        java.util.logging.Logger.getLogger("com.github.benmanes.caffeine.cache").setLevel(java.util.logging.Level.SEVERE);
+
+        // Check if refresh is disabled (negative or zero means disabled)
+        if (refreshDuration <= 0) {
             // Create cache without refresh
             this.keyCache = Caffeine
                 .newBuilder()
@@ -124,50 +127,95 @@ public class NodeLevelKeyCache {
                 .build(new CacheLoader<ShardCacheKey, Key>() {
                     @Override
                     public Key load(ShardCacheKey key) throws Exception {
-                        // Get resolver from registry
-                        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
-                        if (resolver == null) {
-                            throw new IllegalStateException("No resolver registered for shard: " + key);
-                        }
-                        return ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
+                        return loadKey(key);
                     }
                     // No reload method needed since refresh is disabled
                 });
         } else {
-            // Create cache with refresh-only policy (no expiry)
-            this.keyCache = Caffeine
+            // Create cache with refresh and expiration policy
+            // Keys refresh at intervals, expire after specified duration on consecutive failures
+            Caffeine<Object, Object> builder = Caffeine
                 .newBuilder()
-                // Only refresh keys at TTL - they never expire
-                .refreshAfterWrite(globalTtlSeconds, TimeUnit.SECONDS)
-                .build(new CacheLoader<ShardCacheKey, Key>() {
-                    @Override
-                    public Key load(ShardCacheKey key) throws Exception {
-                        // Get resolver from registry
-                        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
-                        if (resolver == null) {
-                            throw new IllegalStateException("No resolver registered for shard: " + key);
-                        }
-                        return ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
-                    }
+                .refreshAfterWrite(refreshDuration, java.util.concurrent.TimeUnit.SECONDS);
 
-                    @Override
-                    public Key reload(ShardCacheKey key, Key oldValue) throws Exception {
-                        try {
-                            // Get resolver from registry
-                            KeyResolver resolver = ShardKeyResolverRegistry.getResolver(key.getIndexUuid(), key.getShardId());
-                            if (resolver == null) {
-                                // Shard might have been closed, keep using old key
-                                return oldValue;
-                            }
+            // Only set expireAfterWrite if keyExpiryDuration is positive
+            if (keyExpiryDuration > 0) {
+                builder.expireAfterWrite(keyExpiryDuration, java.util.concurrent.TimeUnit.SECONDS);
+            }
 
-                            Key newKey = ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
-                            return newKey;
-                        } catch (Exception e) {
-                            // If reload fails, keep using the old key
-                            return oldValue;
+            this.keyCache = builder.build(new CacheLoader<ShardCacheKey, Key>() {
+                @Override
+                public Key load(ShardCacheKey key) throws Exception {
+                    return loadKey(key);
+                }
+
+                @Override
+                public Key reload(ShardCacheKey key, Key oldValue) throws Exception {
+                    String indexUuid = key.getIndexUuid();
+                    String indexName = key.getIndexName();
+
+                    try {
+                        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(indexUuid, key.getShardId(), indexName);
+                        Key newKey = ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
+
+                        // Success: Report to health monitor
+                        healthMonitor.reportSuccess(indexUuid, indexName);
+                        return newKey;
+
+                    } catch (Exception e) {
+                        // Failure: Report to health monitor (will apply blocks)
+                        healthMonitor.reportFailure(indexUuid, indexName, e);
+
+                        // If it's already a KeyCacheException with clean message, just rethrow
+                        if (e instanceof KeyCacheException) {
+                            throw e;
                         }
+                        // Only wrap unexpected exceptions
+                        throw new KeyCacheException(
+                            "Failed to reload key for index: " + indexName + ". Error: " + e.getMessage(),
+                            null,  // No cause - eliminates ~40 lines of AWS SDK stack trace
+                            true
+                        );
                     }
-                });
+                }
+            });
+        }
+    }
+
+    /**
+     * Loads a key from Master Key Provider and reports status to health monitor.
+     * 
+     * @param key the shard cache key
+     * @return the loaded encryption key
+     * @throws Exception if key loading fails
+     */
+    private Key loadKey(ShardCacheKey key) throws Exception {
+        String indexUuid = key.getIndexUuid();
+        String indexName = key.getIndexName();
+
+        // Get resolver from registry
+        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(indexUuid, key.getShardId(), indexName);
+        if (resolver == null) {
+            throw new IllegalStateException("No resolver registered for shard: " + key);
+        }
+
+        try {
+            Key loadedKey = ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
+
+            // Success: Report to health monitor
+            healthMonitor.reportSuccess(indexUuid, indexName);
+            return loadedKey;
+
+        } catch (Exception e) {
+            // Failure: Report to health monitor (will apply blocks)
+            healthMonitor.reportFailure(indexUuid, indexName, e);
+
+            // If it's already a KeyCacheException with clean message, just rethrow
+            if (e instanceof KeyCacheException) {
+                throw e;
+            }
+            // Only wrap unexpected exceptions
+            throw new KeyCacheException("Failed to load key for index: " + indexName + ". Error: " + e.getMessage(), null, true);
         }
     }
 
@@ -176,14 +224,16 @@ public class NodeLevelKeyCache {
      * 
      * @param indexUuid the index UUID
      * @param shardId   the shard ID
+     * @param indexName the index name
      * @return the encryption key
      * @throws Exception if key loading fails
      */
-    public Key get(String indexUuid, int shardId) throws Exception {
+    public Key get(String indexUuid, int shardId, String indexName) throws Exception {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
+        Objects.requireNonNull(indexName, "indexName cannot be null");
 
         try {
-            return keyCache.get(new ShardCacheKey(indexUuid, shardId));
+            return keyCache.get(new ShardCacheKey(indexUuid, shardId, indexName));
         } catch (CompletionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) {
@@ -200,10 +250,12 @@ public class NodeLevelKeyCache {
      * 
      * @param indexUuid the index UUID
      * @param shardId   the shard ID
+     * @param indexName the index name
      */
-    public void evict(String indexUuid, int shardId) {
+    public void evict(String indexUuid, int shardId, String indexName) {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
-        keyCache.invalidate(new ShardCacheKey(indexUuid, shardId));
+        Objects.requireNonNull(indexName, "indexName cannot be null");
+        keyCache.invalidate(new ShardCacheKey(indexUuid, shardId, indexName));
     }
 
     /**
@@ -225,8 +277,8 @@ public class NodeLevelKeyCache {
     }
 
     /**
-     * Resets the singleton instance.
-     * This method is primarily for testing purposes.
+     * Resets the singleton instance completely.
+     * This method is primarily for testing purposes where complete cleanup is needed.
      */
     public static synchronized void reset() {
         if (INSTANCE != null) {

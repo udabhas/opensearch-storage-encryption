@@ -27,6 +27,7 @@ import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Setting.Property;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.settings.SettingsException;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.crypto.CryptoHandlerRegistry;
 import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
@@ -154,23 +155,37 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     );
 
     /**
-     * Specifies the node-level TTL for data keys in seconds.
-     * Default is 3600 seconds (1 hour).
+     * Specifies the node-level interval for refreshing data keys.
+     * Default is 1 hour (1h).
      * Set to -1 to disable key refresh (keys are loaded once and cached forever).
      * This setting applies globally to all indices.
+     * 
+     * Supported units: s (seconds), m (minutes), h (hours), d (days)
+     * Examples: 30s, 5m, 1h, 2h
      */
-    public static final Setting<Integer> NODE_KEY_REFRESH_INTERVAL_SECS_SETTING = Setting
-        .intSetting(
-            "node.store.crypto.key_refresh_interval_secs",
-            3600,  // default: 3600 seconds (1 hour)
-            -1,    // minimum: -1 means never refresh
-            (value) -> {
-                if (value != -1 && value < 1) {
-                    throw new IllegalArgumentException(
-                        "node.store.crypto.key_refresh_interval_secs must be -1 (never refresh) or a positive value"
-                    );
-                }
-            },
+    public static final Setting<TimeValue> NODE_KEY_REFRESH_INTERVAL_SETTING = Setting
+        .timeSetting(
+            "node.store.crypto.key_refresh_interval",
+            TimeValue.timeValueHours(1),  // default: 1 hour
+            TimeValue.timeValueSeconds(-1),  // minimum: -1 means never refresh
+            Property.NodeScope
+        );
+
+    /**
+     * Specifies the node-level expiration time for data keys after refresh failures.
+     * Default is 3 hours (3h).
+     * Set to -1 to never expire keys (same as refresh disabled).
+     * Keys expire after this duration.
+     * This setting applies globally to all indices.
+     * 
+     * Supported units: s (seconds), m (minutes), h (hours), d (days)
+     * Examples: 60s, 10m, 3h, 12h
+     */
+    public static final Setting<TimeValue> NODE_KEY_EXPIRY_INTERVAL_SETTING = Setting
+        .timeSetting(
+            "node.store.crypto.key_expiry_interval",
+            TimeValue.timeValueHours(24),  // default: 24 hours
+            TimeValue.timeValueSeconds(-1),  // minimum: -1 means never expire
             Property.NodeScope
         );
 
@@ -232,11 +247,12 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
 
         // Use shared resolver registry to prevent race conditions
         String indexUuid = indexSettings.getIndex().getUUID();
+        String indexName = indexSettings.getIndex().getName();
         KeyResolver keyResolver = ShardKeyResolverRegistry
-            .getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId);
+            .getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId, indexName);
 
         // Get or create per-shard encryption metadata cache
-        EncryptionMetadataCache encryptionMetadataCache = EncryptionMetadataCacheRegistry.getOrCreateCache(indexUuid, shardId);
+        EncryptionMetadataCache encryptionMetadataCache = EncryptionMetadataCacheRegistry.getOrCreateCache(indexUuid, shardId, indexName);
 
         IndexModule.Type type = IndexModule.defaultStoreType(IndexModule.NODE_STORE_ALLOW_MMAP.get(indexSettings.getNodeSettings()));
 
