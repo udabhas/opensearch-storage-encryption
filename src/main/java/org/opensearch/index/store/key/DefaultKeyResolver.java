@@ -45,8 +45,6 @@ public class DefaultKeyResolver implements KeyResolver {
     private final MasterKeyProvider keyProvider;
     private final int shardId;
 
-    private Key dataKey;
-
     private static final String KEY_FILE = "keyfile";
 
     /**
@@ -92,7 +90,7 @@ public class DefaultKeyResolver implements KeyResolver {
      */
     private void initialize(int shardId) throws KeyCacheException {
         try {
-            dataKey = new SecretKeySpec(keyProvider.decryptKey(readByteArrayFile(KEY_FILE)), "AES");
+            keyProvider.decryptKey(readByteArrayFile(KEY_FILE));
         } catch (java.nio.file.NoSuchFileException e) {
             // Key file doesn't exist, generate new one
             try {
@@ -115,10 +113,6 @@ public class DefaultKeyResolver implements KeyResolver {
 
     private void initNewKey(int shardId) throws IOException {
         DataKeyPair pair = keyProvider.generateDataPair();
-        byte[] masterKey = pair.getRawKey();
-        byte[] indexKey = HkdfKeyDerivation.deriveIndexKey(masterKey, indexUuid);
-        byte[] directoryKey = HkdfKeyDerivation.deriveDirectoryKey(indexKey, shardId);
-        dataKey = new SecretKeySpec(directoryKey, "AES");
         writeByteArrayFile(KEY_FILE, pair.getEncryptedKey());
     }
 
