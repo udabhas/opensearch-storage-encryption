@@ -32,16 +32,20 @@ import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.shard.IndexEventListener;
+import org.opensearch.index.store.action.GetIndexCountForKeyAction;
+import org.opensearch.index.store.action.TransportGetIndexCountForKeyAction;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.key.MasterKeyHealthMonitor;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.pool.PoolSizeCalculator;
+import org.opensearch.index.store.rest.RestGetIndexCountForKeyAction;
 import org.opensearch.index.store.rest.RestRegisterCryptoAction;
 import org.opensearch.index.store.rest.RestUnregisterCryptoAction;
 import org.opensearch.indices.cluster.IndicesClusterStateService.AllocatedIndices.IndexRemovalReason;
 import org.opensearch.plugins.ActionPlugin;
+import org.opensearch.plugins.ActionPlugin.ActionHandler;
 import org.opensearch.plugins.EnginePlugin;
 import org.opensearch.plugins.IndexStorePlugin;
 import org.opensearch.plugins.Plugin;
@@ -132,11 +136,11 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
     @Override
     public Map<String, DirectoryFactory> getDirectoryFactories() {
         if (isDisabled()) {
-            log.warn("Crypto Directory Plugin is disabled. No directory factories will be registered.");
+            log.debug("Crypto Directory Plugin is disabled. No directory factories will be registered.");
             return Collections.emptyMap();
         }
-        log.info("Crypto Directory Plugin is enabled. Registering cryptofs directory factory.");
-        return Collections.singletonMap("cryptofs", new CryptoDirectoryFactory());
+        log.debug("Crypto Directory Plugin is enabled. Registering cryptofs directory factory.");
+        return Collections.singletonMap(CryptoDirectoryFactory.STORE_TYPE, new CryptoDirectoryFactory());
     }
 
     /**
@@ -149,7 +153,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         }
 
         // Only provide our custom engine factory for cryptofs indices
-        if ("cryptofs".equals(indexSettings.getValue(IndexModule.INDEX_STORE_TYPE_SETTING))) {
+        if (CryptoDirectoryFactory.STORE_TYPE.equals(indexSettings.getValue(IndexModule.INDEX_STORE_TYPE_SETTING))) {
             return Optional.of(new CryptoEngineFactory());
         }
         return Optional.empty();
@@ -210,6 +214,11 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
     }
 
     @Override
+    public List<ActionHandler<?, ?>> getActions() {
+        return Arrays.asList(new ActionHandler<>(GetIndexCountForKeyAction.INSTANCE, TransportGetIndexCountForKeyAction.class));
+    }
+
+    @Override
     public List<RestHandler> getRestHandlers(
         Settings settings,
         RestController restController,
@@ -219,7 +228,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<DiscoveryNodes> nodesInCluster
     ) {
-        return Arrays.asList(new RestRegisterCryptoAction(), new RestUnregisterCryptoAction());
+        return Arrays.asList(new RestRegisterCryptoAction(), new RestUnregisterCryptoAction(), new RestGetIndexCountForKeyAction());
     }
 
     @Override
@@ -236,7 +245,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         Settings indexSettings = indexModule.getSettings();
         String storeType = indexSettings.get(IndexModule.INDEX_STORE_TYPE_SETTING.getKey());
 
-        if ("cryptofs".equals(storeType)) {
+        if (CryptoDirectoryFactory.STORE_TYPE.equals(storeType)) {
             indexModule.addIndexEventListener(new IndexEventListener() {
                 /*
                  * Cache invalidation for closed shards is handled automatically
