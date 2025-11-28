@@ -27,7 +27,6 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
-import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.pool.Pool;
 
@@ -98,25 +97,15 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             long bytesRead = readBytes.byteSize();
 
             String normalizedPath = filePath.toAbsolutePath().normalize().toString();
+            byte[] masterKey = keyResolver.getDataKey().getEncoded();
 
-            // Get directoryKey and messageId (needed for decryption)
-            EncryptionFooter footer = encryptionMetadataCache.getFooter(normalizedPath);
-            byte[] messageId;
-            if (footer == null) {
-                messageId = readMessageIdFromFooter(filePath);
-            } else {
-                messageId = footer.getMessageId();
-            }
+            // Get footer from disk and load metadata (footer + derived key) atomically into cache
+            EncryptionFooter footer = readFooterFromDisk(filePath, masterKey);
 
-            byte[] directoryKey = keyResolver.getDataKey().getEncoded();
-
-            // Try cache for file key first
-            byte[] fileKey = encryptionMetadataCache.getFileKey(normalizedPath);
-            if (fileKey == null) {
-                // Cache miss - derive and cache
-                fileKey = HkdfKeyDerivation.deriveAesKey(directoryKey, messageId, "file-encryption");
-                encryptionMetadataCache.putFileKey(normalizedPath, fileKey);
-            }
+            // Get or create metadata atomically - ensures footer and key are always consistent
+            var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, masterKey);
+            byte[] messageId = metadata.getFooter().getMessageId();
+            byte[] fileKey = metadata.getFileKey();
 
             // Use frame-based decryption with derived file key
             MemorySegmentDecryptor
@@ -124,7 +113,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                     readBytes.address(),
                     readBytes.byteSize(),
                     fileKey,                                    // Derived file key (matches write path)
-                    directoryKey,                               // Directory key for IV computation
+                    masterKey,                                  // Master key for IV computation
                     messageId,                                  // Message ID from footer
                     org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
                     startOffset,                                 // File offset
@@ -182,8 +171,16 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         }
     }
 
-    private byte[] readMessageIdFromFooter(Path filePath) throws IOException {
-        // Use separate random access FileChannel to avoid position conflicts
+    private EncryptionFooter readFooterFromDisk(Path filePath, byte[] masterKey) throws IOException {
+        String normalizedPath = filePath.toAbsolutePath().normalize().toString();
+
+        // Check cache first for fast path
+        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
+        if (cachedFooter != null) {
+            return cachedFooter;
+        }
+
+        // Cache miss - read from disk
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
             long fileSize = channel.size();
             if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
@@ -201,14 +198,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                 throw new IOException("Not an OSEF file -" + filePath);
             }
 
-            EncryptionFooter footer = EncryptionFooter
-                .readViaFileChannel(
-                    filePath.toAbsolutePath().normalize().toString(),
-                    channel,
-                    keyResolver.getDataKey().getEncoded(),
-                    encryptionMetadataCache
-                );
-            return footer.getMessageId();
+            return EncryptionFooter.readViaFileChannel(normalizedPath, channel, masterKey, encryptionMetadataCache);
         }
     }
 
