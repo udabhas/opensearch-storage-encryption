@@ -42,7 +42,6 @@ public class NodeLevelKeyCache {
     private static NodeLevelKeyCache INSTANCE;
 
     private final LoadingCache<ShardCacheKey, Key> keyCache;
-    private final long refreshDuration;
     private final long keyExpiryDuration;
     private final MasterKeyHealthMonitor healthMonitor;
 
@@ -56,20 +55,15 @@ public class NodeLevelKeyCache {
      */
     public static synchronized void initialize(Settings nodeSettings, MasterKeyHealthMonitor healthMonitor) {
         if (INSTANCE == null) {
-            TimeValue refreshInterval = CryptoDirectoryFactory.NODE_KEY_REFRESH_INTERVAL_SETTING.get(nodeSettings);
             TimeValue expiryInterval = CryptoDirectoryFactory.NODE_KEY_EXPIRY_INTERVAL_SETTING.get(nodeSettings);
-
-            // Convert to seconds for internal use, handling negative values (disabled refresh/expiry)
-            long refreshDuration = refreshInterval.getSeconds();
             long keyExpiryDuration = expiryInterval.getSeconds();
 
-            INSTANCE = new NodeLevelKeyCache(refreshDuration, keyExpiryDuration, healthMonitor);
+            INSTANCE = new NodeLevelKeyCache(keyExpiryDuration, healthMonitor);
 
-            if (refreshDuration < 0) {
-                logger.info("Initialized NodeLevelKeyCache with refresh disabled");
+            if (keyExpiryDuration < 0) {
+                logger.info("Initialized NodeLevelKeyCache with no expiry (keys cached forever)");
             } else {
-                logger
-                    .info("Initialized NodeLevelKeyCache with refresh interval: {}, expiry interval: {}", refreshInterval, expiryInterval);
+                logger.info("Initialized NodeLevelKeyCache with expiry interval: {}", expiryInterval);
             }
         }
     }
@@ -88,29 +82,13 @@ public class NodeLevelKeyCache {
     }
 
     /**
-     * Constructs the cache with global TTL and expiration configuration.
-     * <p>
-     * This implements a cache with asynchronous refresh:
-     * <ul>
-     *  <li>When a key is first requested, it is loaded synchronously from the MasterKey Provider.</li>
+     * Constructs the cache with expiration configuration.
+     * Refresh is handled manually by MasterKeyHealthMonitor to avoid reload storms.
      * 
-     *  <li>After the key has been in the cache for the refresh TTL duration, 
-     *      the next access triggers an asynchronous reload in the background.</li>
-     * 
-     *  <li>While the reload is in progress, it continues to return the 
-     *      previously cached (stale) value to avoid blocking operations.</li>
-     * 
-     *  <li>If the reload fails, an exception is thrown (not suppressed), allowing Caffeine to track failures.</li>
-     * 
-     *  <li>Failures are reported to MasterKeyHealthMonitor which handles block management.</li>
-     * </ul>
-     * 
-     * @param refreshDuration the refresh duration in seconds (-1 or 0 means never refresh)
      * @param keyExpiryDuration expiration duration in seconds (-1 or 0 means never expire)
      * @param healthMonitor the health monitor for failure/success reporting
      */
-    private NodeLevelKeyCache(long refreshDuration, long keyExpiryDuration, MasterKeyHealthMonitor healthMonitor) {
-        this.refreshDuration = refreshDuration;
+    private NodeLevelKeyCache(long keyExpiryDuration, MasterKeyHealthMonitor healthMonitor) {
         this.keyExpiryDuration = keyExpiryDuration;
         this.healthMonitor = Objects.requireNonNull(healthMonitor, "healthMonitor cannot be null");
 
@@ -118,72 +96,27 @@ public class NodeLevelKeyCache {
         // This prevents duplicate exception logging from Caffeine's BoundedLocalCache
         java.util.logging.Logger.getLogger("com.github.benmanes.caffeine.cache").setLevel(java.util.logging.Level.SEVERE);
 
-        // Check if refresh is disabled (negative or zero means disabled)
-        if (refreshDuration <= 0) {
-            // Create cache without refresh
-            this.keyCache = Caffeine
-                .newBuilder()
-                // No refreshAfterWrite - keys are loaded once and cached forever
-                .build(new CacheLoader<ShardCacheKey, Key>() {
-                    @Override
-                    public Key load(ShardCacheKey key) throws Exception {
-                        return loadKey(key);
-                    }
-                    // No reload method needed since refresh is disabled
-                });
-        } else {
-            // Create cache with refresh and expiration policy
-            // Keys refresh at intervals, expire after specified duration on consecutive failures
-            Caffeine<Object, Object> builder = Caffeine
-                .newBuilder()
-                .refreshAfterWrite(refreshDuration, java.util.concurrent.TimeUnit.SECONDS);
+        // Create cache with expiration only
+        // Refresh is handled manually by MasterKeyHealthMonitor to avoid reload storms
+        Caffeine<Object, Object> builder = Caffeine.newBuilder();
 
-            // Only set expireAfterWrite if keyExpiryDuration is positive
-            if (keyExpiryDuration > 0) {
-                builder.expireAfterWrite(keyExpiryDuration, java.util.concurrent.TimeUnit.SECONDS);
-            }
-
-            this.keyCache = builder.build(new CacheLoader<ShardCacheKey, Key>() {
-                @Override
-                public Key load(ShardCacheKey key) throws Exception {
-                    return loadKey(key);
-                }
-
-                @Override
-                public Key reload(ShardCacheKey key, Key oldValue) throws Exception {
-                    String indexUuid = key.getIndexUuid();
-                    String indexName = key.getIndexName();
-
-                    try {
-                        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(indexUuid, key.getShardId(), indexName);
-                        Key newKey = ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
-
-                        // Success: Report to health monitor
-                        healthMonitor.reportSuccess(indexUuid, indexName);
-                        return newKey;
-
-                    } catch (Exception e) {
-                        // Failure: Report to health monitor (will apply blocks)
-                        healthMonitor.reportFailure(indexUuid, indexName, e);
-
-                        // If it's already a KeyCacheException with clean message, just rethrow
-                        if (e instanceof KeyCacheException) {
-                            throw e;
-                        }
-                        // Only wrap unexpected exceptions
-                        throw new KeyCacheException(
-                            "Failed to reload key for index: " + indexName + ". Error: " + e.getMessage(),
-                            null,  // No cause - eliminates ~40 lines of AWS SDK stack trace
-                            true
-                        );
-                    }
-                }
-            });
+        // Only set expireAfterWrite if keyExpiryDuration is positive
+        if (keyExpiryDuration > 0) {
+            builder.expireAfterWrite(keyExpiryDuration, java.util.concurrent.TimeUnit.SECONDS);
         }
+        // If keyExpiryDuration <= 0, cache never expires
+
+        this.keyCache = builder.build(new CacheLoader<ShardCacheKey, Key>() {
+            @Override
+            public Key load(ShardCacheKey key) throws Exception {
+                return loadKey(key);
+            }
+        });
     }
 
     /**
-     * Loads a key from Master Key Provider and reports status to health monitor.
+     * Loads a key from Master Key Provider during initial load or post-expiry.
+     * Reports failures to health monitor, applying blocks only for critical errors.
      * 
      * @param key the shard cache key
      * @return the loaded encryption key
@@ -207,14 +140,21 @@ public class NodeLevelKeyCache {
             return loadedKey;
 
         } catch (Exception e) {
-            // Failure: Report to health monitor (will apply blocks)
-            healthMonitor.reportFailure(indexUuid, indexName, e);
+            // Classify the error to determine if blocks are needed
+            FailureType failureType = KeyCacheException.classify(e);
 
-            // If it's already a KeyCacheException with clean message, just rethrow
+            // Only report critical failures that require blocking
+            // Transient failures are logged but don't trigger blocks
+            if (failureType == FailureType.CRITICAL) {
+                healthMonitor.reportFailure(indexUuid, indexName, e, failureType);
+            } else {
+                logger.warn("Transient error loading key for index {} (will retry): {}", indexName, e.getMessage());
+            }
+
+            // Re-throw to prevent caching invalid state
             if (e instanceof KeyCacheException) {
                 throw e;
             }
-            // Only wrap unexpected exceptions
             throw new KeyCacheException("Failed to load key for index: " + indexName + ". Error: " + e.getMessage(), null, true);
         }
     }
@@ -256,6 +196,64 @@ public class NodeLevelKeyCache {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
         Objects.requireNonNull(indexName, "indexName cannot be null");
         keyCache.invalidate(new ShardCacheKey(indexUuid, shardId, indexName));
+    }
+
+    /**
+     * Checks if a key is present in the cache (not expired).
+     * Used by health monitor to determine if blocks should be applied.
+     * 
+     * @param indexUuid the index UUID
+     * @param shardId   the shard ID
+     * @param indexName the index name
+     * @return true if key is cached and valid, false otherwise
+     */
+    public boolean isKeyPresentInCache(String indexUuid, int shardId, String indexName) {
+        Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
+        Objects.requireNonNull(indexName, "indexName cannot be null");
+
+        ShardCacheKey key = new ShardCacheKey(indexUuid, shardId, indexName);
+        // getIfPresent returns null if key is absent or expired
+        return keyCache.getIfPresent(key) != null;
+    }
+
+    /**
+     * Manually refreshes a key in the cache by re-loading it from the Master Key Provider.
+     * This is called by MasterKeyHealthMonitor during periodic health checks to prevent
+     * Caffeine's reload storm issue.
+     * 
+     * <p>If the key is not in cache, does nothing (returns false).
+     * If refresh fails, throws the original exception for proper classification.
+     * 
+     * @param indexUuid the index UUID
+     * @param shardId   the shard ID
+     * @param indexName the index name
+     * @return true if refresh succeeded, false if key not in cache
+     * @throws Exception if refresh fails with the original exception for proper error classification
+     */
+    public boolean refreshKey(String indexUuid, int shardId, String indexName) throws Exception {
+        Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
+        Objects.requireNonNull(indexName, "indexName cannot be null");
+
+        ShardCacheKey cacheKey = new ShardCacheKey(indexUuid, shardId, indexName);
+
+        // Only refresh if key exists in cache
+        if (keyCache.getIfPresent(cacheKey) == null) {
+            return false;
+        }
+
+        // Get resolver and load new key
+        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(indexUuid, shardId, indexName);
+        if (resolver == null) {
+            return false;
+        }
+
+        Key newKey = ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
+
+        // Update cache with new key
+        keyCache.put(cacheKey, newKey);
+
+        healthMonitor.reportSuccess(indexUuid, indexName);
+        return true;
     }
 
     /**

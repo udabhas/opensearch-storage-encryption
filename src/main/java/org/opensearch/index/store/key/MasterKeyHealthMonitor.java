@@ -23,6 +23,8 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.unit.TimeValue;
+import org.opensearch.index.store.CryptoDirectoryFactory;
 import org.opensearch.transport.client.Client;
 
 /**
@@ -56,9 +58,11 @@ public class MasterKeyHealthMonitor {
     private final ScheduledExecutorService healthCheckExecutor;
     private volatile ScheduledFuture<?> healthCheckTask = null;
 
+    // Configurable health check interval from node settings
+    private final long refreshIntervalSeconds;
+
     // Random initial delay (0-300 seconds) to prevent thundering herd when cluster starts
     private static final long HEALTH_CHECK_INITIAL_DELAY_MAX_SECONDS = 300;
-    private static final long HEALTH_CHECK_INTERVAL_SECONDS = 3600;
 
     // Grace period between write and read block (allows in-flight reads to complete)
     private static final long BLOCK_GRACE_PERIOD_SECONDS = 10;
@@ -69,16 +73,22 @@ public class MasterKeyHealthMonitor {
     static class FailureState {
         final AtomicLong lastFailureTimeMillis;
         final AtomicReference<Exception> lastException;
+        volatile FailureType failureType;
         volatile boolean blocksApplied = false;
 
-        FailureState(Exception exception) {
+        FailureState(Exception exception, FailureType failureType) {
             this.lastFailureTimeMillis = new AtomicLong(System.currentTimeMillis());
             this.lastException = new AtomicReference<>(exception);
+            this.failureType = failureType;
         }
 
-        void recordFailure(Exception exception) {
+        void recordFailure(Exception exception, FailureType failureType) {
             lastFailureTimeMillis.set(System.currentTimeMillis());
             lastException.set(exception);
+            // If new failure is critical and stored state was transient, upgrade to critical
+            if (failureType == FailureType.CRITICAL) {
+                this.failureType = failureType;
+            }
         }
     }
 
@@ -92,8 +102,11 @@ public class MasterKeyHealthMonitor {
      */
     public static synchronized void initialize(Settings settings, Client client, ClusterService clusterService) {
         if (INSTANCE == null) {
-            INSTANCE = new MasterKeyHealthMonitor(client, clusterService);
-            logger.info("Initialized MasterKeyHealthMonitor");
+            TimeValue refreshInterval = CryptoDirectoryFactory.NODE_KEY_REFRESH_INTERVAL_SETTING.get(settings);
+            long refreshIntervalSeconds = refreshInterval.getSeconds();
+
+            INSTANCE = new MasterKeyHealthMonitor(client, clusterService, refreshIntervalSeconds);
+            logger.info("Initialized MasterKeyHealthMonitor with refresh interval: {}", refreshInterval);
         }
     }
 
@@ -114,10 +127,15 @@ public class MasterKeyHealthMonitor {
      * Private constructor.
      * Only creates the monitor instance without starting background threads.
      * Call {@link #start()} to begin health monitoring.
+     * 
+     * @param client the client for cluster operations
+     * @param clusterService the cluster service
+     * @param refreshIntervalSeconds the health check interval in seconds
      */
-    private MasterKeyHealthMonitor(Client client, ClusterService clusterService) {
+    private MasterKeyHealthMonitor(Client client, ClusterService clusterService, long refreshIntervalSeconds) {
         this.client = Objects.requireNonNull(client, "client cannot be null");
         this.clusterService = Objects.requireNonNull(clusterService, "clusterService cannot be null");
+        this.refreshIntervalSeconds = refreshIntervalSeconds;
         this.failureTracker = new ConcurrentHashMap<>();
 
         // Initialize executor but don't start health check yet
@@ -147,7 +165,7 @@ public class MasterKeyHealthMonitor {
                 .scheduleAtFixedRate(
                     INSTANCE::checkKmsHealthAndRecover,
                     randomInitialDelay,
-                    HEALTH_CHECK_INTERVAL_SECONDS,
+                    INSTANCE.refreshIntervalSeconds,  // Use configured interval
                     TimeUnit.SECONDS
                 );
         }
@@ -155,27 +173,37 @@ public class MasterKeyHealthMonitor {
 
     /**
      * Reports a key load/reload failure for an index.
-     * Applies blocks on first failure to protect data.
+     * Applies blocks only for critical failures to protect data.
+     * Transient failures (throttling, rate limits) are logged but don't trigger blocks.
      * 
      * @param indexUuid the index UUID
      * @param indexName the index name
      * @param exception the failure exception
+     * @param failureType the type of failure (TRANSIENT or CRITICAL)
      */
-    public void reportFailure(String indexUuid, String indexName, Exception exception) {
+    public void reportFailure(String indexUuid, String indexName, Exception exception, FailureType failureType) {
         FailureState state = failureTracker.get(indexUuid);
 
         if (state == null) {
             // First failure
-            state = new FailureState(exception);
+            state = new FailureState(exception, failureType);
             failureTracker.put(indexUuid, state);
 
-            // Apply blocks on first failure
-            applyBlocks(indexName);
-            state.blocksApplied = true;
+            // Only apply blocks for CRITICAL errors with valid index name
+            if (failureType == FailureType.CRITICAL && indexName != null) {
+                applyBlocks(indexName);
+                state.blocksApplied = true;
+            }
 
         } else {
             // Subsequent failure
-            state.recordFailure(exception);
+            state.recordFailure(exception, failureType);
+
+            // If error type escalated from transient to critical, apply blocks now
+            if (failureType == FailureType.CRITICAL && !state.blocksApplied && indexName != null) {
+                applyBlocks(indexName);
+                state.blocksApplied = true;
+            }
         }
     }
 
@@ -305,17 +333,25 @@ public class MasterKeyHealthMonitor {
     private void triggerShardRetry(int recoveredCount) {
         // Use virtual thread - lightweight, no thread pool needed
         Thread.startVirtualThread(() -> {
-            retryWithBackoff(() -> {
-                ClusterRerouteRequest request = new ClusterRerouteRequest();
-                request.setRetryFailed(true);
-                client.admin().cluster().reroute(request).actionGet();
-                logger.info("Successfully triggered shard retry for {} recovered indices", recoveredCount);
-                return true;
-            },
-                3,  // max attempts
-                1000,  // initial delay ms
-                "shard retry"
-            );
+            try {
+                // Wait for shards to finish closing after block removal
+                // This prevents ShardLockObtainFailedException when shards are still closing
+                Thread.sleep(30000);
+
+                retryWithBackoff(() -> {
+                    ClusterRerouteRequest request = new ClusterRerouteRequest();
+                    request.setRetryFailed(true);
+                    client.admin().cluster().reroute(request).actionGet();
+                    logger.info("Successfully triggered shard retry for {} recovered indices", recoveredCount);
+                    return true;
+                },
+                    3,  // max attempts
+                    1000,  // initial delay ms
+                    "shard retry"
+                );
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         });
     }
 
@@ -406,38 +442,79 @@ public class MasterKeyHealthMonitor {
                         continue;
                     }
 
-                    // Try to load THIS index's specific key (validates MasterKey Provider connectivity)
-                    ((DefaultKeyResolver) resolver).loadKeyFromMasterKeyProvider();
+                    // Get any shard ID for cache operations
+                    int shardId = ShardKeyResolverRegistry.getAnyShardIdForIndex(indexUuid);
 
-                    // Success! Remove blocks if they exist
-                    if (hasBlocks(indexName)) {
-                        removeBlocks(indexName);
-                        recoveredCount++;
+                    // Try to recover the key (refresh if cached, reload if expired)
+                    boolean keyRecovered = false;
+
+                    try {
+                        // Step 1: Try to refresh the key in cache (avoids reload storm for cached keys)
+                        boolean refreshed = NodeLevelKeyCache.getInstance().refreshKey(indexUuid, shardId, indexName);
+
+                        if (refreshed) {
+                            // Key was in cache and successfully refreshed
+                            keyRecovered = true;
+                        } else {
+                            // Key not in cache (expired), try loading it from scratch
+                            NodeLevelKeyCache.getInstance().get(indexUuid, shardId, indexName);
+                            keyRecovered = true;
+                        }
+
+                        if (keyRecovered) {
+                            // Remove blocks if they exist
+                            if (hasBlocks(indexName)) {
+                                removeBlocks(indexName);
+                                recoveredCount++;
+                            }
+
+                            // Clean up failure tracker
+                            failureTracker.remove(indexUuid);
+                        }
+
+                    } catch (Exception recoveryException) {
+                        // Either refresh or load failed, treat as key load failure
+                        throw recoveryException;
                     }
-
-                    // Clean up failure tracker if index was being tracked
-                    failureTracker.remove(indexUuid);
 
                 } catch (Exception e) {
                     // Key load failed for THIS index
+                    // Classify the error to determine if blocks are needed
+                    FailureType failureType = KeyCacheException.classify(e);
+
+                    // Get resolver and index name for further checks
+                    KeyResolver resolver = ShardKeyResolverRegistry.getAnyResolverForIndex(indexUuid);
+                    String indexName = resolver != null ? ((DefaultKeyResolver) resolver).getIndexName() : indexUuid;
+
+                    // Check if key is still cached (not expired)
+                    // We should only apply blocks if the cached key has expired or doesn't exist
+                    boolean keyInCache = false;
+                    if (resolver != null) {
+                        int shardId = ShardKeyResolverRegistry.getAnyShardIdForIndex(indexUuid);
+                        keyInCache = NodeLevelKeyCache.getInstance().isKeyPresentInCache(indexUuid, shardId, indexName);
+                    }
+
                     FailureState state = failureTracker.get(indexUuid);
                     if (state == null) {
-                        // First failure detected by health check (early detection!)
-                        state = new FailureState(e);
+                        state = new FailureState(e, failureType);
                         failureTracker.put(indexUuid, state);
 
-                        // Get index name for logging
-                        KeyResolver resolver = ShardKeyResolverRegistry.getAnyResolverForIndex(indexUuid);
-                        String indexName = resolver != null ? ((DefaultKeyResolver) resolver).getIndexName() : indexUuid;
-
-                        // Apply blocks to protect data
-                        if (indexName != null && !indexName.equals(indexUuid)) {
+                        // Apply blocks only if:
+                        // 1. Error is critical, AND
+                        // 2. Key is NOT in cache (expired or never loaded)
+                        if (indexName != null && !indexName.equals(indexUuid) && failureType == FailureType.CRITICAL && !keyInCache) {
                             applyBlocks(indexName);
                             state.blocksApplied = true;
                         }
                     } else {
-                        // Still failing, update failure time
-                        state.recordFailure(e);
+                        state.recordFailure(e, failureType);
+
+                        if (failureType == FailureType.CRITICAL && !state.blocksApplied && !keyInCache) {
+                            if (indexName != null && !indexName.equals(indexUuid)) {
+                                applyBlocks(indexName);
+                                state.blocksApplied = true;
+                            }
+                        }
                     }
                 }
             }
@@ -449,7 +526,6 @@ public class MasterKeyHealthMonitor {
 
         } catch (Exception e) {
             logger.error("Error during Master Key Provider health check", e);
-            // Keep monitoring thread running even on error
         }
     }
 
@@ -471,7 +547,6 @@ public class MasterKeyHealthMonitor {
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    logger.warn("Interrupted while waiting for health check executor to terminate");
                 }
             }
         }
