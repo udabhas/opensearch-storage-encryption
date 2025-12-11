@@ -19,13 +19,16 @@ import java.nio.file.Paths;
 import java.util.Map;
 
 import org.junit.Before;
+import org.opensearch.index.store.CaffeineThreadLeakFilter;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.test.OpenSearchTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 
 @SuppressWarnings("unchecked")
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class CaffeineBlockCacheTests extends OpenSearchTestCase {
 
     private Cache<BlockCacheKey, BlockCacheValue<String>> caffeineCache;
