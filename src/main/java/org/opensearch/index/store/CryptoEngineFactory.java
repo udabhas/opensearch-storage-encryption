@@ -39,8 +39,30 @@ public class CryptoEngineFactory implements EngineFactory {
             // Create a separate KeyResolver for translog encryption
             KeyResolver keyResolver = createTranslogKeyResolver(config);
 
-            // Create the crypto translog factory using the same KeyResolver as the directory
-            CryptoTranslogFactory cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
+            // Check if remote translog is enabled
+            boolean isRemoteTranslogEnabled = config.getIndexSettings().isRemoteTranslogStoreEnabled();
+
+            CryptoTranslogFactory cryptoTranslogFactory;
+
+            if (isRemoteTranslogEnabled) {
+                // Get remote store parameters from static storage (set in CryptoDirectoryPlugin.createComponents)
+                // and from EngineConfig
+                cryptoTranslogFactory = new CryptoTranslogFactory(
+                    keyResolver,
+                    CryptoDirectoryPlugin.getRepositoriesServiceSupplier(),  // From plugin static storage
+                    config.getThreadPool(),  // From EngineConfig
+                    config.getIndexSettings().getRemoteStoreTranslogRepository(),  // From IndexSettings
+                    new org.opensearch.index.remote.RemoteTranslogTransferTracker(
+                        // Create on-demand for this shard
+                        config.getShardId(),
+                        100  // Moving average window size - standard value
+                    ),
+                    CryptoDirectoryPlugin.getRemoteStoreSettings()  // From plugin static storage
+                );
+            } else {
+                // Use local-only constructor - creates CryptoTranslog
+                cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
+            }
 
             // Create new engine config by copying all fields from existing config
             // but replace the translog factory with our crypto version

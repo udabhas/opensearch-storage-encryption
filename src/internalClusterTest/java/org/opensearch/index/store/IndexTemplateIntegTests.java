@@ -24,7 +24,10 @@ import org.opensearch.common.unit.TimeValue;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST)
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class IndexTemplateIntegTests extends OpenSearchIntegTestCase {
 
     @Override

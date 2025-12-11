@@ -280,8 +280,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         final Path location = path.resolveIndex();
         final LockFactory lockFactory = indexSettings.getValue(org.opensearch.index.store.FsDirectoryFactory.INDEX_LOCK_FACTOR_SETTING);
         Files.createDirectories(location);
-        int shardId = path.getShardId().getId();
-        return newFSDirectory(location, lockFactory, indexSettings, shardId);
+        return newFSDirectory(location, lockFactory, indexSettings);
     }
 
     /**
@@ -371,8 +370,10 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * @return the concrete implementation of the encrypted directory based on store type
      * @throws IOException if directory creation fails
      */
-    protected Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings, int shardId)
-        throws IOException {
+    public Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings) throws IOException {
+        // Extract shardId from path structure: .../indices/{index-uuid}/{shard-id}/index/
+        // location.getParent() gives us the shard directory
+        int shardId = Integer.parseInt(location.getParent().getFileName().toString());
         final Provider provider = Security.getProvider(DEFAULT_CRYPTO_PROVIDER);
 
         // Use index-level key resolver - store keys at index level

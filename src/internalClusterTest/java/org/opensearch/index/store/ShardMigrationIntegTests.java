@@ -26,6 +26,8 @@ import org.opensearch.common.unit.TimeValue;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 /**
  * Integration tests for encrypted shard migration, relocation, and recovery across nodes.
  * Tests various scenarios including:
@@ -35,6 +37,7 @@ import org.opensearch.test.OpenSearchIntegTestCase;
  * - Replica synchronization with data changes during downtime
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
 
     @Override
