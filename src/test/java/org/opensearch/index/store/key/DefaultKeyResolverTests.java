@@ -33,6 +33,7 @@ import org.opensearch.common.action.ActionFuture;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.index.store.CaffeineThreadLeakFilter;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.test.OpenSearchTestCase;
@@ -40,9 +41,12 @@ import org.opensearch.transport.client.AdminClient;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.IndicesAdminClient;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 /**
  * Unit tests for {@link DefaultKeyResolver}
  */
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class DefaultKeyResolverTests extends OpenSearchTestCase {
 
     @Mock
