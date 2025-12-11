@@ -218,6 +218,8 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         return encryptionContextResolver.resolveDefaultEncryptionContext();
     }
 
+
+
     MasterKeyProvider getKeyProvider(IndexSettings indexSettings) {
         final String KEY_PROVIDER = indexSettings.getValue(INDEX_KEY_PROVIDER_SETTING);
 
@@ -360,6 +362,10 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                 e
             );
         }
+    }
+
+    public Directory newFSDirectory(Path location,LockFactory lockFactory,IndexSettings indexSettings) throws IOException {
+        return newFSDirectory(location, lockFactory, indexSettings, 0);
     }
 
     /**

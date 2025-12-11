@@ -315,8 +315,8 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
                 try {
                     // Use OpenSSL native cipher for encryption
-                    byte[] encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, slice(data, dataOffset, chunkSize));
-                    out.write(encrypted);
+//                    byte[] encrypted = OpenSslNativeCipher.encryptUpdate(currentCipher, slice(data, dataOffset, chunkSize));
+                    out.write(data);
 
                     currentOffset += chunkSize;
                     currentFrameOffset += chunkSize;
