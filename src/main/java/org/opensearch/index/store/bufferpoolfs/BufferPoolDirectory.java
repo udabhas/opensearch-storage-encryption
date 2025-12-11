@@ -124,7 +124,8 @@ public class BufferPoolDirectory extends FSDirectory {
         }
 
         // Calculate content length with OSEF validation
-        long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
+//        long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
+        long contentLength = rawFileSize;
 
         ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker);
         ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
@@ -133,8 +134,7 @@ public class BufferPoolDirectory extends FSDirectory {
         return CachedMemorySegmentIndexInput
             .newInstance(
                 "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
-                file,
-                contentLength,
+                file, contentLength,
                 blockCache,
                 readAheadManager,
                 readAheadContext,
@@ -236,29 +236,30 @@ public class BufferPoolDirectory extends FSDirectory {
      * Returns raw file size for non-OSEF files (< MIN_FOOTER_SIZE).
      */
     private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
-        if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
-            return rawFileSize;
-        }
-
-        String normalizedPath = EncryptionMetadataCache.normalizePath(file);
-
-        // Check cache first for fast path
-        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
-        if (cachedFooter != null) {
-            return rawFileSize - cachedFooter.getFooterLength();
-        }
-
-        // Cache miss - read footer from disk (happens during file open before cache populated)
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedPath, channel, masterKeyBytes, encryptionMetadataCache);
-
-            // Metadata is already cached by readViaFileChannel
-
-            return rawFileSize - footer.getFooterLength();
-        } catch (EncryptionFooter.NotOSEFFileException e) {
-            // Not an encrypted file - return raw size
-            return rawFileSize;
-        }
+        return rawFileSize;
+//        if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+//            return rawFileSize;
+//        }
+//
+//        String normalizedPath = EncryptionMetadataCache.normalizePath(file);
+//
+//        // Check cache first for fast path
+//        EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
+//        if (cachedFooter != null) {
+//            return rawFileSize - cachedFooter.getFooterLength();
+//        }
+//
+//        // Cache miss - read footer from disk (happens during file open before cache populated)
+//        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+//            EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedPath, channel, masterKeyBytes, encryptionMetadataCache);
+//
+//            // Metadata is already cached by readViaFileChannel
+//
+//            return rawFileSize - footer.getFooterLength();
+//        } catch (EncryptionFooter.NotOSEFFileException e) {
+//            // Not an encrypted file - return raw size
+//            return rawFileSize;
+//        }
     }
 
     private void logCacheAndPoolStats() {
