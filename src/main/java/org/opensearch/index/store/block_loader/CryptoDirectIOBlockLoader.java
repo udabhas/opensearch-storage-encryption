@@ -73,7 +73,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
     }
 
     @Override
-    public RefCountedMemorySegment[] load(Path filePath, long startOffset, long blockCount) throws Exception {
+    public RefCountedMemorySegment[] load(Path filePath, long startOffset, long blockCount, long poolTimeoutMs) throws Exception {
         if (!Files.exists(filePath)) {
             throw new NoSuchFileException(filePath.toString());
         }
@@ -122,7 +122,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                 );
 
             if (bytesRead == 0) {
-                throw new RuntimeException("EOF or empty read at offset " + startOffset);
+                throw new java.io.EOFException("Unexpected EOF or empty read at offset " + startOffset + " for file " + filePath);
             }
 
             int blockIndex = 0;
@@ -130,10 +130,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
             try {
                 while (blockIndex < blockCount && bytesCopied < bytesRead) {
-                    RefCountedMemorySegment handle = segmentPool.tryAcquire(10, TimeUnit.MILLISECONDS);
-                    if (handle == null) {
-                        throw new RuntimeException("Failed to acquire a block");
-                    }
+                    // Use caller-specified timeout (5s for critical loads, 50ms for prefetch)
+                    RefCountedMemorySegment handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
 
                     MemorySegment pooled = handle.segment();
 
@@ -150,7 +148,11 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
             } catch (InterruptedException e) {
                 releaseHandles(result, blockIndex);
-                throw new RuntimeException("Failed to load blocks", e);
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while acquiring pool segment", e);
+            } catch (IOException e) {
+                releaseHandles(result, blockIndex);
+                throw e;
             }
 
             return result;
