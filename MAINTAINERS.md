@@ -10,5 +10,6 @@ This document contains a list of maintainers in this repo. See [opensearch-proje
 | Soji Denloye             | [asonje](https://github.com/asonje)                    | Intel       |
 | Shubham Kumar            | [shubhmkr-amazon](https://github.com/shubhmkr-amazon)  | Amazon      |
 | Uday Bhaskar             | [udabhas](https://github.com/udabhas)                  | Amazon      |
+| Rajat Gupta              | [RajatGupta02](https://github.com/RajatGupta02)        | Amazon      |
 
 
