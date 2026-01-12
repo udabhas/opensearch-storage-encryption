@@ -132,4 +132,8 @@ public interface BlockCache<T> {
      * @return total number of cache misses since cache creation
      */
     long missCount();
+
+    default void clearSafely() {
+       clear();
+    }
 }

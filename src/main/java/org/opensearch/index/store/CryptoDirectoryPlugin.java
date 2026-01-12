@@ -32,6 +32,7 @@ import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.shard.IndexEventListener;
+import org.opensearch.action.admin.cluster.health.ClusterHealthCacheHook;
 import org.opensearch.index.store.action.GetIndexCountForKeyAction;
 import org.opensearch.index.store.action.TransportGetIndexCountForKeyAction;
 import org.opensearch.index.store.block_cache.BlockCache;
@@ -196,6 +197,12 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         // This prevents allocation on dedicated master nodes which never create shards
         CryptoDirectoryFactory.setNodeSettings(environment.settings());
         CryptoMetricsService.initialize(metricsRegistry);
+
+        // Register cache cleanup hook for benchmarking (cold cache simulation)
+        ClusterHealthCacheHook.setCacheCleanup(() -> {
+            BlockCache<?> cache = CryptoDirectoryFactory.getSharedBlockCache();
+            if (cache != null) cache.clearSafely();
+        });
 
         return Collections.emptyList();
     }

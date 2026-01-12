@@ -9,8 +9,11 @@ import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -297,6 +300,21 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     @Override
     public long missCount() {
         return cache.stats().missCount();
+    }
+
+    @Override
+    public void clearSafely() {
+        long initialSize = cache.estimatedSize();
+        ConcurrentMap<BlockCacheKey, BlockCacheValue<T>> map = cache.asMap();
+        Set<BlockCacheKey> keys = new HashSet<>();
+        map.forEach((k, v) -> {
+            if (v.getRefCount() == 1) {
+                keys.add(k);
+            }
+        });
+        cache.invalidateAll(keys);  // More efficient than individual invalidate calls
+        long removedCount = initialSize - cache.estimatedSize();
+        LOGGER.info("Cleared {} entries from buffer cache (expected: {})", removedCount, keys.size());
     }
 
 }
