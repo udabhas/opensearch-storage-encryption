@@ -119,17 +119,17 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * plugin should be installed.
      */
     public static final Setting<String> INDEX_KEY_PROVIDER_SETTING = new Setting<>(
-        "index.store.crypto.key_provider",
-        "",
-        Function.identity(),
-        (s) -> {
-            if (s == null || s.isEmpty()) {
-                throw new SettingsException("index.store.crypto.key_provider must be set");
-            }
-        },
-        Property.NodeScope,
-        Property.IndexScope,
-        Property.InternalIndex
+            "index.store.crypto.key_provider",
+            "",
+            Function.identity(),
+            (s) -> {
+                if (s == null || s.isEmpty()) {
+                    throw new SettingsException("index.store.crypto.key_provider must be set");
+                }
+            },
+            Property.NodeScope,
+            Property.IndexScope,
+            Property.InternalIndex
     );
 
     /**
@@ -137,70 +137,70 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * Specifies the Amazon Resource Name of the KMS key used as master key for encrypting index data.
      */
     public static final Setting<String> INDEX_KMS_ARN_SETTING = new Setting<>(
-        "index.store.crypto.kms.key_arn",
-        "",
-        Function.identity(),
-        (s) -> {
-            if (s == null || s.isEmpty()) {
-                throw new SettingsException("index.store.kms.arn must be set");
-            }
-        },
-        Property.IndexScope,
-        Property.InternalIndex
+            "index.store.crypto.kms.key_arn",
+            "",
+            Function.identity(),
+            (s) -> {
+                if (s == null || s.isEmpty()) {
+                    throw new SettingsException("index.store.kms.arn must be set");
+                }
+            },
+            Property.IndexScope,
+            Property.InternalIndex
     );
 
     /**
      * AWS KMS encryption context for additional authenticated data.
      * Provides extra security by requiring the same context for both encrypt and decrypt operations.
-    */
+     */
     public static final Setting<String> INDEX_KMS_ENC_CTX_SETTING = new Setting<>(
-        "index.store.crypto.kms.encryption_context",
-        Constants.DEFAULT_KMS_ENC_CTX,
-        Function.identity(),
-        Property.IndexScope,
-        Property.InternalIndex
+            "index.store.crypto.kms.encryption_context",
+            Constants.DEFAULT_KMS_ENC_CTX,
+            Function.identity(),
+            Property.IndexScope,
+            Property.InternalIndex
     );
 
     /**
      * Specifies the node-level interval for proactive health monitoring of encryption keys.
      * The health monitor periodically validates all encrypted indices and attempts to refresh their keys,
      * providing early detection of issues and automatic recovery.
-     * 
+     *
      * Default: 1 hour (1h)
      * Minimum: 1 second (1s) - must be positive
-     * 
+     *
      * This setting applies globally to all indices.
-     * 
+     *
      * Supported units: s (seconds), m (minutes), h (hours), d (days)
      * Examples: 30s, 5m, 1h, 2h
      */
     public static final Setting<TimeValue> NODE_KEY_REFRESH_INTERVAL_SETTING = Setting
-        .timeSetting(
-            "node.store.crypto.key_refresh_interval",
-            TimeValue.timeValueHours(1),  // default: 1 hour
-            TimeValue.timeValueSeconds(1),  // minimum: 1 second (must be positive)
-            Property.NodeScope
-        );
+            .timeSetting(
+                    "node.store.crypto.key_refresh_interval",
+                    TimeValue.timeValueHours(1),  // default: 1 hour
+                    TimeValue.timeValueSeconds(1),  // minimum: 1 second (must be positive)
+                    Property.NodeScope
+            );
 
     /**
      * Specifies the node-level expiration time for cached encryption keys.
      * Keys are evicted from cache after this duration and must be reloaded from the key provider.
-     * 
+     *
      * Default: 24 hours (24h)
      * Set to -1 to never expire keys (cache forever until node restart).
-     * 
+     *
      * This setting applies globally to all indices.
-     * 
+     *
      * Supported units: s (seconds), m (minutes), h (hours), d (days)
      * Examples: 60s, 10m, 3h, 12h, -1 (never expire)
      */
     public static final Setting<TimeValue> NODE_KEY_EXPIRY_INTERVAL_SETTING = Setting
-        .timeSetting(
-            "node.store.crypto.key_expiry_interval",
-            TimeValue.timeValueHours(24),  // default: 24 hours
-            TimeValue.timeValueSeconds(-1),  // minimum: -1 means never expire
-            Property.NodeScope
-        );
+            .timeSetting(
+                    "node.store.crypto.key_expiry_interval",
+                    TimeValue.timeValueHours(24),  // default: 24 hours
+                    TimeValue.timeValueSeconds(-1),  // minimum: -1 means never expire
+                    Property.NodeScope
+            );
 
     /**
      * Get default encryption context from cluster metadata using the configured resolver.
@@ -235,23 +235,23 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             if (indexEncCtx == null || indexEncCtx.isEmpty()) {
                 // Use default encryption context if index doesn't specify one
                 LOGGER
-                    .info(
-                        "Using default encryption context from cluster repository for index {}: {}",
-                        indexSettings.getIndex().getName(),
-                        defaultEncCtx
-                    );
+                        .info(
+                                "Using default encryption context from cluster repository for index {}: {}",
+                                indexSettings.getIndex().getName(),
+                                defaultEncCtx
+                        );
                 settings = Settings.builder().put(settings).put("kms.encryption_context", defaultEncCtx).build();
             } else {
                 // Merge: default context is the baseline, index context is additional
                 String mergedEncCtx = defaultEncCtx + "," + indexEncCtx;
                 LOGGER
-                    .info(
-                        "Merging default encryption context '{}' with index-specific context '{}' for index {}: result='{}'",
-                        defaultEncCtx,
-                        indexEncCtx,
-                        indexSettings.getIndex().getName(),
-                        mergedEncCtx
-                    );
+                        .info(
+                                "Merging default encryption context '{}' with index-specific context '{}' for index {}: result='{}'",
+                                defaultEncCtx,
+                                indexEncCtx,
+                                indexSettings.getIndex().getName(),
+                                mergedEncCtx
+                        );
                 settings = Settings.builder().put(settings).put("kms.encryption_context", mergedEncCtx).build();
             }
         }
@@ -277,8 +277,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         final Path location = path.resolveIndex();
         final LockFactory lockFactory = indexSettings.getValue(org.opensearch.index.store.FsDirectoryFactory.INDEX_LOCK_FACTOR_SETTING);
         Files.createDirectories(location);
-        int shardId = path.getShardId().getId();
-        return newFSDirectory(location, lockFactory, indexSettings, shardId);
+        return newFSDirectory(location, lockFactory, indexSettings);
     }
 
     /**
@@ -304,12 +303,12 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         }
 
         LOGGER
-            .info(
-                "Detected resize operation for index {} from source index {} (UUID: {})",
-                indexSettings.getIndex().getName(),
-                resizeSourceName,
-                resizeSourceUuid
-            );
+                .info(
+                        "Detected resize operation for index {} from source index {} (UUID: {})",
+                        indexSettings.getIndex().getName(),
+                        resizeSourceName,
+                        resizeSourceUuid
+                );
 
         // Determine source index directory path
         Path targetParent = targetIndexDirectory.getParent(); // indices/
@@ -321,12 +320,12 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // Check if source keyfile exists
         if (!Files.exists(sourceKeyfile)) {
             LOGGER
-                .warn(
-                    "[Resize operation] for index {} from source index {} which does not have index-level encryption enabled. "
-                        + "Target index will generate a new encryption key.",
-                    indexSettings.getIndex().getName(),
-                    resizeSourceName
-                );
+                    .warn(
+                            "[Resize operation] for index {} from source index {} which does not have index-level encryption enabled. "
+                                    + "Target index will generate a new encryption key.",
+                            indexSettings.getIndex().getName(),
+                            resizeSourceName
+                    );
             return;
         }
 
@@ -335,12 +334,12 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // and another shard has already copied the keyfile
         if (Files.exists(targetKeyfile)) {
             LOGGER
-                .debug(
-                    "[Resize operation] encryption keyfile already exists at {} for index {}"
-                        + "Skipping copy as it was likely created by another shard initialization.",
-                    targetKeyfile,
-                    indexSettings.getIndex().getName()
-                );
+                    .debug(
+                            "[Resize operation] encryption keyfile already exists at {} for index {}"
+                                    + "Skipping copy as it was likely created by another shard initialization.",
+                            targetKeyfile,
+                            indexSettings.getIndex().getName()
+                    );
             return;
         }
 
@@ -350,11 +349,11 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             LOGGER.debug("Successfully copied keyfile from {} to {} for resize operation", sourceKeyfile, targetKeyfile);
         } catch (IOException e) {
             throw new IOException(
-                "[Resize operation] Failed to copy keyfile from source index "
-                    + resizeSourceName
-                    + " to target index "
-                    + indexSettings.getIndex().getName(),
-                e
+                    "[Resize operation] Failed to copy keyfile from source index "
+                            + resizeSourceName
+                            + " to target index "
+                            + indexSettings.getIndex().getName(),
+                    e
             );
         }
     }
@@ -368,8 +367,10 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * @return the concrete implementation of the encrypted directory based on store type
      * @throws IOException if directory creation fails
      */
-    protected Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings, int shardId)
-        throws IOException {
+    public Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings) throws IOException {
+        // Extract shardId from path structure: .../indices/{index-uuid}/{shard-id}/index/
+        // location.getParent() gives us the shard directory
+        int shardId = Integer.parseInt(location.getParent().getFileName().toString());
         final Provider provider = Security.getProvider(DEFAULT_CRYPTO_PROVIDER);
 
         // Use index-level key resolver - store keys at index level
@@ -387,7 +388,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         String indexUuid = indexSettings.getIndex().getUUID();
         String indexName = indexSettings.getIndex().getName();
         KeyResolver keyResolver = ShardKeyResolverRegistry
-            .getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId, indexName);
+                .getOrCreateResolver(indexUuid, indexKeyDirectory, provider, keyProvider, shardId, indexName);
 
         // Get or create per-shard encryption metadata cache
         EncryptionMetadataCache encryptionMetadataCache = EncryptionMetadataCacheRegistry.getOrCreateCache(indexUuid, shardId, indexName);
@@ -399,19 +400,19 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
                 LOGGER.debug("Using HYBRIDFS directory with Direct I/O and block caching");
                 final Set<String> nioExtensions = new HashSet<>(indexSettings.getValue(IndexModule.INDEX_STORE_HYBRID_NIO_EXTENSIONS));
                 BufferPoolDirectory bufferPoolDirectory = createCryptoBufferPoolFSDirectory(
-                    location,
-                    lockFactory,
-                    provider,
-                    keyResolver,
-                    encryptionMetadataCache
+                        location,
+                        lockFactory,
+                        provider,
+                        keyResolver,
+                        encryptionMetadataCache
                 );
                 return new HybridCryptoDirectory(
-                    lockFactory,
-                    bufferPoolDirectory,
-                    provider,
-                    keyResolver,
-                    encryptionMetadataCache,
-                    nioExtensions
+                        lockFactory,
+                        bufferPoolDirectory,
+                        provider,
+                        keyResolver,
+                        encryptionMetadataCache,
+                        nioExtensions
                 );
             }
             case MMAPFS -> {
@@ -428,54 +429,54 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
 
     @SuppressWarnings("unchecked")
     private BufferPoolDirectory createCryptoBufferPoolFSDirectory(
-        Path location,
-        LockFactory lockFactory,
-        Provider provider,
-        KeyResolver keyResolver,
-        EncryptionMetadataCache encryptionMetadataCache
+            Path location,
+            LockFactory lockFactory,
+            Provider provider,
+            KeyResolver keyResolver,
+            EncryptionMetadataCache encryptionMetadataCache
     ) throws IOException {
         /*
-        * ================================
-        * Shared Block Cache Architecture
-        * ================================
-        *
-        * This method creates a CryptoBufferPoolFSDirectory that uses node-level shared resources
-        * (pool and cache) for efficient memory utilization and high cache hit rates.
-        *
-        * Shared Resources:
-        * -----------------
-        * - sharedSegmentPool: Pool of RefCountedMemorySegments (initialized in initializeSharedPool)
-        * - sharedBlockCache: Caffeine cache storing decrypted blocks (initialized in initializeSharedPool)
-        *
-        * Per-Directory Resources:
-        * ------------------------
-        * - BlockLoader: Directory-specific loader using this directory's keyIvResolver for decryption
-        * - Cache Wrapper: Wraps the shared cache with directory-specific loader
-        * - ReadAhead Worker: Asynchronous prefetching for sequential reads
-        *
-        * Memory Lifecycle:
-        * -----------------
-        * 1. Cache miss: Loader reads encrypted data, decrypts it, stores in RefCountedMemorySegment
-        * 2. Initial refCount=1 (cache's reference)
-        * 3. Reader pins: refCount incremented via tryPin()
-        * 4. Reader unpins: refCount decremented via decRef()
-        * 5. Cache eviction: retired=true set (prevents new pins), then decRef() called
-        * 6. refCount=0: Segment returned to pool for reuse
-        *
-        * Two-Phase Eviction (prevents stale reads):
-        * -------------------------------------------
-        * - evictionListener: Sets retired=true (marks stale for BlockSlotTinyCache)
-        * - removalListener: Calls decRef() (releases cache's reference)
-        */
+         * ================================
+         * Shared Block Cache Architecture
+         * ================================
+         *
+         * This method creates a CryptoBufferPoolFSDirectory that uses node-level shared resources
+         * (pool and cache) for efficient memory utilization and high cache hit rates.
+         *
+         * Shared Resources:
+         * -----------------
+         * - sharedSegmentPool: Pool of RefCountedMemorySegments (initialized in initializeSharedPool)
+         * - sharedBlockCache: Caffeine cache storing decrypted blocks (initialized in initializeSharedPool)
+         *
+         * Per-Directory Resources:
+         * ------------------------
+         * - BlockLoader: Directory-specific loader using this directory's keyIvResolver for decryption
+         * - Cache Wrapper: Wraps the shared cache with directory-specific loader
+         * - ReadAhead Worker: Asynchronous prefetching for sequential reads
+         *
+         * Memory Lifecycle:
+         * -----------------
+         * 1. Cache miss: Loader reads encrypted data, decrypts it, stores in RefCountedMemorySegment
+         * 2. Initial refCount=1 (cache's reference)
+         * 3. Reader pins: refCount incremented via tryPin()
+         * 4. Reader unpins: refCount decremented via decRef()
+         * 5. Cache eviction: retired=true set (prevents new pins), then decRef() called
+         * 6. refCount=0: Segment returned to pool for reuse
+         *
+         * Two-Phase Eviction (prevents stale reads):
+         * -------------------------------------------
+         * - evictionListener: Sets retired=true (marks stale for BlockSlotTinyCache)
+         * - removalListener: Calls decRef() (releases cache's reference)
+         */
 
         // Ensure pool resources are initialized before creating directory
         PoolBuilder.PoolResources resources = ensurePoolInitialized();
 
         // Create a per-directory loader that uses this directory's keyIvResolver for decryption
         BlockLoader<RefCountedMemorySegment> loader = new CryptoDirectIOBlockLoader(
-            resources.getSegmentPool(),
-            keyResolver,
-            encryptionMetadataCache
+                resources.getSegmentPool(),
+                keyResolver,
+                encryptionMetadataCache
         );
 
         // Cache architecture: One shared Caffeine cache storage, multiple wrapper instances
@@ -486,12 +487,12 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // * Per-directory decryption via directory-specific loaders with unique keyIvResolvers
         // * Unified eviction policy managed by the shared cache
         CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> sharedCaffeineCache =
-            (CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment>) resources.getBlockCache();
+                (CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment>) resources.getBlockCache();
 
         BlockCache<RefCountedMemorySegment> directoryCache = new CaffeineBlockCache<>(
-            sharedCaffeineCache.getCache(),
-            loader,
-            resources.getMaxCacheBlocks()
+                sharedCaffeineCache.getCache(),
+                loader,
+                resources.getMaxCacheBlocks()
         );
 
         // Use the shared node-wide read-ahead worker
@@ -499,15 +500,15 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         Worker readaheadWorker = resources.getSharedReadaheadWorker();
 
         return new BufferPoolDirectory(
-            location,
-            lockFactory,
-            provider,
-            keyResolver,
-            resources.getSegmentPool(),
-            directoryCache,
-            loader,
-            readaheadWorker,
-            encryptionMetadataCache
+                location,
+                lockFactory,
+                provider,
+                keyResolver,
+                resources.getSegmentPool(),
+                directoryCache,
+                loader,
+                readaheadWorker,
+                encryptionMetadataCache
         );
     }
 
