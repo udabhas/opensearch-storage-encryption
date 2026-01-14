@@ -7,6 +7,8 @@ package org.opensearch.index.store.bufferpoolfs;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE_POWER;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.file.Path;
 import java.util.concurrent.locks.LockSupport;
 
@@ -16,67 +18,60 @@ import org.opensearch.index.store.block_cache.BlockCacheValue;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 
 /**
- * An optimized tiny L1 block cache in front of the main Caffeine L2 cache for fast lookups.
+ * Tiny L1 cache in front of the main Caffeine L2 cache.
  *
- * Sequential and near-sequential reads (common in Lucene) tend to access the same blocks repeatedly.
- * Even with a large Caffeine cache, every lookup involves ConcurrentHashMap operations, 
- * and other overhead which we want to avoid on a very hot paths.
- * This tiny cache eliminates that overhead for the most recently accessed blocks.
+ * Accessing Caffeine for every block read is expensive even when it's a cache hit.
+ * This gives us a tiny 32-slot direct-mapped cache that sits in front of Caffeine,
+ * handling the hottest blocks with zero locking and minimal overhead.
  *
+ * We maintain 32 slots using parallel arrays. Each slot can hold one cached block.
+ * The slot index is computed by hashing the block index: hash(blockIdx) % 32.
  *
- * PIN/UNPIN LIFECYCLE FOR A SINGLE IndexInput
- * -------------------------------------------
- *  When and index input moves from one
- * block to another, it pins the new block and unpins the previous one. This keeps
- * memory usage extremely small: at any moment, *only one block is pinned per
- * IndexInput*.
+ * Each slot stores three pieces of data (in separate arrays):
+ *   - slotBlockIdx[i]: which block number is cached here
+ *   - slotVal[i]: the actual cached segment value
+ *   - slotStamp[i]: packed [generation:32 | hash:32] acting as a memory barrier gate
  *
- * Typical flow:
- *    1. acquireRefCountedValue(offset) → returns a *pinned* block
- *    2. IndexInput reads from that block
- *    3. When moving to a new block:
- *          oldBlock.unpin()        // refCount--
- *          newBlock.tryPin()       // refCount++
+ * SYNCHRONIZATION VIA STAMP GATE:
+ * We can't use locks (too slow) and we can't make everything volatile (too slow).
+ * Instead we use acquire/release ordering on the stamp as a publication gate.
  *
+ * When writing to a slot (publishToL1):
+ *   1. Write slotBlockIdx[i] and slotVal[i] with plain stores
+ *   2. Pack (hash, generation) into a stamp
+ *   3. Write stamp[i] with RELEASE semantics (VarHandle.setRelease)
+ *      This ensures all preceding writes become visible before the stamp update.
  *
- * Blocks (MemorySegments) come from a pool. When a block is evicted from the main
- * cache, the pool increments the segment's generation and may reuse it for a
- * completely different file or offset.
+ * When reading from a slot (acquireRefCountedValue):
+ *   1. Read stamp[i] with ACQUIRE semantics (VarHandle.getAcquire)
+ *      This ensures we don't read dependent fields before seeing the stamp.
+ *   2. Check if hash matches our target block
+ *   3. If yes, safe to read slotBlockIdx[i] and slotVal[i]
+ *      The acquire load guarantees we see the values the writer published.
  *
- * This means cached references can become stale:
- *    • same memory
- *    • different contents
- *    • different file/offset
+ * Result: If stamp matches, {slotBlockIdx, slotVal} are guaranteed consistent.
+ * No torn reads, no stale data, no locks needed. We cannot affors locks, the moment 
+ * you add a lock, reading from caffeine directly is going to be better.
  *
- * To prevent returning a recycled segment, the tiny cache records the generation at
- * the moment the slot was filled and compares it against the current generation:
+ * HANDLING SEGMENT RECYCLING (THE TRICKY PART):
+ * Memory segments get recycled: evicted, returned to pool, reused for different blocks.
+ * If you cache a pointer to block 42 (say) but that memory gets reused for block 99 (say), you'll
+ * read wrong data. We use generation counters to detect this.
  *
- *        cachedGeneration == segment.getGeneration()
+ * Each segment has a generation number that bumps on eviction. We snapshot the generation
+ * in the stamp when caching. When retrieving, we do pin-then-validate:
+ *   1. Pin the segment (holds refcount, prevents pool return)
+ *   2. Check generation still matches snapshot
+ *   3. If match: safe. If mismatch: unpin, treat as miss (segment was recycled)
  *
- * If they differ, the segment was evicted/reused → the slot is ignored and we reload.
- *
- *
- * BlockSlotTinyCache only stores *pointers* (blockIdx, value, generation). It never
- * keeps segments pinned. Only the IndexInput pins the block it is actively reading.
- *
- * On lookup:
- *    • First check thread-local MRU (fastest path).
- *    • Then check the slot (fast path).
- *    • Both require: matching blockIdx + matching generation + successful tryPin().
- *    • If any check fails, we fall back to the main cache and fill the slot/MRU.
- *
- * Because the tiny cache never holds pinned blocks, it never blocks eviction, and
- * generation mismatches automatically invalidate stale entries.
+ * Why pin BEFORE validating? If we check generation first, the segment could get evicted
+ * and recycled between the check and pin. Pin holds it stable during validation.
+ * Generation detects staleness, pinning controls lifecycle. Hand-in-hand coordination. But
+ * we avoid tight coupling of generation with pin -- they serve different purposes.
  *
  */
-
 public class BlockSlotTinyCache {
 
-    /**
-     * Mutable holder for cache hit/miss status to avoid allocation on hot path.
-     * Reuse a single instance index-input to track whether
-     * the last acquired value call hit cache or loaded from disk.
-     */
     public static final class CacheHitHolder {
         private boolean wasCacheHit;
 
@@ -93,194 +88,136 @@ public class BlockSlotTinyCache {
         }
     }
 
-    // 32 slots provides good hit rate while keeping memory footprint tiny (~8KB with padding).
-    // fits easily into cpu LI cache.
     private static final int SLOT_COUNT = 32;
     private static final int SLOT_MASK = SLOT_COUNT - 1;
 
-    /**
-     * Mutable slot object reused in place.
-     *
-     * PADDING OPTIMIZATION:
-     * CPU cache lines are typically 64 bytes. When multiple threads access adjacent memory locations,
-     * they can cause "false sharing" - where updating one slot invalidates another thread's cache line,
-     * causing expensive cross-core cache coherency traffic. 
-     *
-     * Each padding field (long) is 8 bytes:
-     * - 7 longs before = 56 bytes padding
-     * - 3 hot fields (long + reference + int) = ~24 bytes (with alignment)
-     * - 7 longs after = 56 bytes padding
-     * Total: ~136 bytes per slot, ensuring hot fields sit on their own cache line.
-     *
-     * This matters because multiple threads may simultaneously access different slots in the array,
-     * and without padding, they'd constantly invalidate each other's CPU caches.
-     */
-    private static final class Slot {
-        // Padding before the hot fields (helps isolate from object header / neighbors)
-        @SuppressWarnings("unused")
-        long p1, p2, p3, p4, p5, p6, p7;
-
-        // Hot fields - accessed on every slot check
-        long blockIdx = -1;         // Which block this slot caches
-        BlockCacheValue<RefCountedMemorySegment> val;  // The cached value
-        int generation;              // Generation number to detect pool reuse
-
-        // Padding after the hot fields (helps keep next Slot on a different cache line)
-        @SuppressWarnings("unused")
-        long q1, q2, q3, q4, q5, q6, q7;
-    }
-
-    /**
-     * Thread-local mutable MRU (Most Recently Used) entry.
-     *
-     * WHY THREAD-LOCAL:
-     * This is an optimization over using (varhandles or volaties). THREAD-LOCAL (small) 
-     * give us zero synchronization cost which has huge benefit on very hot path. Each thread tracks its
-     * most recent block access independently. Since Lucene tends to read sequentially within
-     * a thread (e.g., scanning a posting list).
-     *
-     */
-    private static final class LastAccessed {
-        long blockIdx = -1;
-        BlockCacheValue<RefCountedMemorySegment> val;
-        int generation;
-    }
+    // VarHandle for acquire/release element access on long[]
+    private static final VarHandle STAMP_ARR = MethodHandles.arrayElementVarHandle(long[].class);
 
     private final BlockCache<RefCountedMemorySegment> cache;
     private final Path path;
 
-    private final Slot[] slots;
-    private final FileBlockCacheKey[] slotKeys;
+    // Parallel arrays for Tier-2 L1 slots (faster than object allocations)
+    private final long[] slotBlockIdx; // published under stamp gate
+    private final BlockCacheValue<RefCountedMemorySegment>[] slotVal; // published under stamp gate
 
-    /** Thread-local MRU; no allocation after initialization. */
-    private final ThreadLocal<LastAccessed> lastAccessed = ThreadLocal.withInitial(LastAccessed::new);
+    /**
+     * Stamp array acts as a memory barrier gate using acquire/release ordering:
+     *
+     * WRITER (publishToL1):
+     *   1. Plain stores to slotBlockIdx[i] and slotVal[i]
+     *   2. VarHandle.setRelease(slotStamp, i, stamp)  ← RELEASE barrier
+     *      - Ensures all preceding plain stores become visible before stamp update
+     *      - Forms a "happens-before" edge with any acquire load of this stamp
+     *
+     * READER (acquireRefCountedValue):
+     *   1. s = VarHandle.getAcquire(slotStamp, i)     // ACQUIRE barrier
+     *      - Ensures stamp is read before any dependent reads
+     *      - Synchronizes-with the release store from writer
+     *   2. If stamp matches, safe to read slotBlockIdx[i] and slotVal[i]
+     *      - Acquire load guarantees we see the values that writer published
+     *
+     * Result: stamp != 0 && hash matches = {slotBlockIdx, slotVal} are consistent
+     *         No torn reads, no stale data, no locks needed.
+     */
+    private final long[] slotStamp; // 0 => empty; otherwise pack(gen, hash(blockIdx))
+
+    // Key reuse per slot
+    private final FileBlockCacheKey[] slotKeys;
 
     public BlockSlotTinyCache(BlockCache<RefCountedMemorySegment> cache, Path path, long fileLength) {
         this.cache = cache;
         this.path = path;
 
-        this.slots = new Slot[SLOT_COUNT];
-        for (int i = 0; i < SLOT_COUNT; i++) {
-            slots[i] = new Slot();
-        }
+        this.slotBlockIdx = new long[SLOT_COUNT];
+        this.slotStamp = new long[SLOT_COUNT];
+
+        @SuppressWarnings("unchecked")
+        final BlockCacheValue<RefCountedMemorySegment>[] tmp = (BlockCacheValue<RefCountedMemorySegment>[]) new BlockCacheValue[SLOT_COUNT];
+        this.slotVal = tmp;
 
         this.slotKeys = new FileBlockCacheKey[SLOT_COUNT];
+
+        for (int i = 0; i < SLOT_COUNT; i++) {
+            slotBlockIdx[i] = -1;
+            slotVal[i] = null;
+            slotStamp[i] = 0L;
+            slotKeys[i] = null;
+        }
     }
 
-    /**
-     * Returns an already-pinned block. Caller "must" unpin() when done.
-     *
-     * @param blockOff the block offset to acquire
-     * @return the pinned block cache value
-     * @throws IOException if unable to acquire the block
-     */
     public BlockCacheValue<RefCountedMemorySegment> acquireRefCountedValue(long blockOff) throws IOException {
         return acquireRefCountedValue(blockOff, null);
     }
 
-    /**
-     * Returns an already-pinned block with hit/miss tracking. Caller "must" unpin() when done.
-     *
-     * @param blockOff the block offset to acquire
-     * @param hitHolder optional holder to record cache hit status (null to skip tracking)
-     * @return the pinned block cache value
-     * @throws IOException if unable to acquire the block
-     */
     public BlockCacheValue<RefCountedMemorySegment> acquireRefCountedValue(long blockOff, CacheHitHolder hitHolder) throws IOException {
 
         final long blockIdx = blockOff >>> CACHE_BLOCK_SIZE_POWER;
-
-        // TIER 1: Thread-local MRU check (fastest path - zero synchronization)
-        LastAccessed last = lastAccessed.get();
-        if (last.blockIdx == blockIdx) {
-            BlockCacheValue<RefCountedMemorySegment> v = last.val;
-            // Generation check ensures the pooled segment wasn't recycled and reused.
-            if (v != null && v.value().getGeneration() == last.generation && v.tryPin()) {
-                if (hitHolder != null) {
-                    hitHolder.setWasCacheHit(true); // L1 hit
-                }
-                return v;
-            }
-        }
-
-        // TIER 2: Shared slot array check (fast path - plain reads with cache-line padding)
-        // Apply a small XOR fold to mix high bits into the low bits before masking.
-        // Without this mixing, sequential block indices alias every SLOT_COUNT blocks,
-        // causing predictable collisions. The fold spreads access patterns more evenly.
         final int slotIdx = (int) ((blockIdx ^ (blockIdx >>> 17)) & SLOT_MASK);
 
-        Slot slot = slots[slotIdx];
-        if (slot.blockIdx == blockIdx) {
-            BlockCacheValue<RefCountedMemorySegment> v = slot.val;
-            if (v != null) {
-                int currentGen = v.value().getGeneration();
-                // Generation check is critical: memory segments are pooled and reused.
-                // Without this check, we could return a segment that was recycled and now
-                // contains completely different (or partially overwritten) data.
-                if (currentGen == slot.generation && v.tryPin()) {
-                    // Promote to thread-local MRU for next access (note: we do in-place update, no allocations)
-                    last.blockIdx = blockIdx;
-                    last.val = v;
-                    last.generation = currentGen;
-                    if (hitHolder != null) {
-                        hitHolder.setWasCacheHit(true); // L1 slot hit
+        // Acquire-load stamp FIRST (publication gate)
+        final long stamp = (long) STAMP_ARR.getAcquire(slotStamp, slotIdx);
+        if (stamp != 0L) {
+            final int wantHash = hashBlockIdx(blockIdx);
+            final int gotHash = (int) stamp;
+            if (gotHash == wantHash) {
+                // Safe to read published fields after matching stamp
+                if (slotBlockIdx[slotIdx] == blockIdx) {
+                    final BlockCacheValue<RefCountedMemorySegment> v = slotVal[slotIdx];
+                    if (v != null) {
+                        final int expectedGen = (int) (stamp >>> 32);
+                        if (v.tryPin()) {
+                            if (v.value().getGeneration() == expectedGen) {
+                                if (hitHolder != null)
+                                    hitHolder.setWasCacheHit(true);
+                                return v;
+                            }
+                            v.unpin();
+                        }
                     }
-                    return v;
                 }
             }
         }
 
-        // TIER 3: Main Caffeine cache lookup with retry logic
-        // This path is slower but unavoidable for true cache misses or highly contended blocks.
         final int maxAttempts = 10;
-        BlockCacheValue<RefCountedMemorySegment> val = null;
-        boolean wasInCache = false;
 
-        // KEY REUSE OPTIMIZATION:
-        // FileBlockCacheKey is small but not free to allocate. Since we're hashing by slot,
-        // there's a good chance the same slot will be used for the same file/offset again.
-        // Reusing the key saves object allocation overhead.
         FileBlockCacheKey key = slotKeys[slotIdx];
         if (key == null || key.fileOffset() != blockOff) {
             key = new FileBlockCacheKey(path, blockOff);
             slotKeys[slotIdx] = key;
         }
 
-        // RETRY LOOP:
-        // Under heavy concurrent load, a segment might be evicted from the pool between
-        // when we get it from the cache and when we try to pin it. This is rare but possible
-        // when the pool is small relative to working set size. Exponential backoff gives
-        // time for churn to settle.
         for (int attempts = 0; attempts < maxAttempts; attempts++) {
-            val = cache.get(key);
-            if (val == null) {
-                // Not in cache at all - load from disk (decrypt, decompress if needed)
-                val = cache.getOrLoad(key);
-                wasInCache = false; // Had to load from disk
-            } else {
-                wasInCache = true; // Found in main cache
-            }
-
-            if (val != null && val.tryPin()) {
-                int gen = val.value().getGeneration();
-
-                // Populate both caches for next access (in-place updates, zero allocations)
-                slot.blockIdx = blockIdx;
-                slot.val = val;
-                slot.generation = gen;
-
-                last.blockIdx = blockIdx;
-                last.val = val;
-                last.generation = gen;
-
-                if (hitHolder != null) {
-                    hitHolder.setWasCacheHit(wasInCache); // L2 cache or disk load
+            // 1) Prefer hit
+            BlockCacheValue<RefCountedMemorySegment> v = cache.get(key);
+            if (v != null) {
+                final int expectedGen = v.value().getGeneration();
+                if (v.tryPin()) {
+                    if (v.value().getGeneration() == expectedGen) {
+                        publishToL1(slotIdx, blockIdx, v, expectedGen);
+                        if (hitHolder != null)
+                            hitHolder.setWasCacheHit(true);
+                        return v;
+                    }
+                    v.unpin(); // pinned recycled object; treat as miss
                 }
-
-                return val;
             }
 
-            // todo: we can also use thread-spin-wait
+            // 2) Load path (deduped by caffeine get())
+            BlockCacheValue<RefCountedMemorySegment> loaded = cache.getOrLoad(key);
+            if (loaded != null) {
+                final int expectedGen = loaded.value().getGeneration();
+                if (loaded.tryPin()) {
+                    if (loaded.value().getGeneration() == expectedGen) {
+                        publishToL1(slotIdx, blockIdx, loaded, expectedGen);
+                        if (hitHolder != null)
+                            hitHolder.setWasCacheHit(false);
+                        return loaded;
+                    }
+                    loaded.unpin();
+                }
+            }
+
             if (attempts < maxAttempts - 1) {
                 LockSupport.parkNanos(50_000L << attempts);
             }
@@ -289,25 +226,32 @@ public class BlockSlotTinyCache {
         throw new IOException("Unable to pin memory segment for block offset " + blockOff + " after " + maxAttempts + " attempts");
     }
 
-    /**
-     * Reset the tiny cache.
-     *
-     * Called when the file is closed or when we need to invalidate cached entries.
-     * Thread-local entries are removed (other threads will lazily refresh on next access).
-     * Shared slot entries are cleared immediately to prevent stale references.
-     *
-     * Note: This is not synchronized because:
-     * 1. It's typically called during shutdown/close when concurrent access is unlikely
-     * 2. In the rare case of concurrent access during clear, worst case is a cache miss
-     *    (incorrect generation will be detected and we'll fall through to main cache)
-     */
+    private void publishToL1(int slotIdx, long blockIdx, BlockCacheValue<RefCountedMemorySegment> v, int gen) {
+        // Write fields first (plain)
+        slotBlockIdx[slotIdx] = blockIdx;
+        slotVal[slotIdx] = v;
+
+        // Publish stamp LAST with release semantics
+        final long stamp = packStamp(hashBlockIdx(blockIdx), gen);
+        STAMP_ARR.setRelease(slotStamp, slotIdx, stamp);
+    }
+
+    private static long packStamp(int hash, int gen) {
+        // upper 32 = gen, lower 32 = hash
+        return ((gen & 0xFFFF_FFFFL) << 32) | (hash & 0xFFFF_FFFFL);
+    }
+
+    private static int hashBlockIdx(long blockIdx) {
+        // small, fast mix; collisions OK because we still compare full blockIdx
+        return (int) (blockIdx ^ (blockIdx >>> 32));
+    }
+
     public void clear() {
-        lastAccessed.remove();
         for (int i = 0; i < SLOT_COUNT; i++) {
-            Slot s = slots[i];
-            s.blockIdx = -1;
-            s.val = null;
-            s.generation = 0;
+            slotBlockIdx[i] = -1;
+            slotVal[i] = null;
+            // Clear stamp LAST (best-effort)
+            slotStamp[i] = 0L;
             slotKeys[i] = null;
         }
     }

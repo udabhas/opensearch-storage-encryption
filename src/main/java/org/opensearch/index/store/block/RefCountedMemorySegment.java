@@ -16,19 +16,33 @@ import org.opensearch.index.store.metrics.ErrorType;
 
 /**
  * A reference-counted wrapper around a {@link MemorySegment} that implements {@link BlockCacheValue}.
+ * SAFE for concurrent access.
  *
- * <h2>Purpose</h2>
- * Enables safe sharing of native memory segments across multiple concurrent readers while ensuring
- * the underlying resource is released exactly once when no longer in use.
+ * WHY this exists -- 
+ * We allocate chunks of native memory (off-heap) to cache decrypted file blocks.
+ * Multiple threads can read the same block simultaneously. We need to know when nobody
+ * is using a block anymore so we can safely return it to the pool for reuse.
  *
- * <h2>Reference Counting Lifecycle</h2>
- * <ol>
- *   <li><b>Creation:</b> refCount starts at 1 (represents cache's ownership)</li>
- *   <li><b>Pin:</b> Reader calls {@link #tryPin()} → refCount incremented (if not retired)</li>
- *   <li><b>Use:</b> Reader accesses {@link #segment()} while pinned</li>
- *   <li><b>Unpin:</b> Reader calls {@link #unpin()} → refCount decremented</li>
- *   <li><b>Release:</b> When refCount reaches 0, {@link BlockReleaser} callback returns segment to pool</li>
- * </ol>
+ * Think of it like a library book: refCount tracks how many people have it checked out.
+ * When the count hits zero, the book goes back on the shelf (pool).
+ *
+ *
+ * Packed-state design:
+ *  - We store (generation, refCount) in a single volatile long, updated atomically via CAS.
+ *  - This avoids TOCTOU between reading generation and pinning:
+ *      * tryPin() observes BOTH generation and refCount in one snapshot
+ *      * CAS increments refCount only if generation is unchanged
+ *  - close() atomically:
+ *      * bumps generation
+ *      * drops cache's ref (refCount--)
+ *    in the same CAS, so readers never see a mix of old/new state.
+ *
+ * Layout (64-bit):
+ *   [ generation: 32 bits ][ refCount: 32 bits ]
+ *
+ * Important Notes:
+ *  - generation is treated as unsigned 32-bit (wraparound is fine in practice)
+ *  - refCount must stay > 0 for pin to succeed; 0 means retired/released
  *
  */
 @SuppressWarnings("preview")
@@ -37,169 +51,228 @@ public final class RefCountedMemorySegment implements BlockCacheValue<RefCounted
     private static final Logger LOGGER = LogManager.getLogger(RefCountedMemorySegment.class);
 
     private final MemorySegment slicedSegment;
-
-    /** Logical length of valid data in the segment (may be less than segment capacity). */
     private final int length;
 
+    /** Called when refCount reaches 0. Returns segment to pool. */
+    private final BlockReleaser<RefCountedMemorySegment> onFullyReleased;
+
     /**
-     * VarHandle for atomic operations on the refCount field.
-     * Used for CAS, increment, and decrement operations.
+     * Packed state: upper 32 bits generation, lower 32 bits refCount.
+     *
+     * Initial value: gen=0, refCount=1 (cache ownership).
      */
-    private static final VarHandle REFCOUNT;
+    @SuppressWarnings("unused") // accessed via VarHandle
+    private volatile long state = packState(0, 1);
+
+    private static final VarHandle STATE;
     static {
         try {
-            REFCOUNT = MethodHandles.lookup().findVarHandle(RefCountedMemorySegment.class, "refCount", int.class);
+            STATE = MethodHandles.lookup().findVarHandle(RefCountedMemorySegment.class, "state", long.class);
         } catch (IllegalAccessException | NoSuchFieldException e) {
             throw new Error(e);
         }
     }
 
-    /**
-     * Reference counter tracking active users of this segment.
-     * - Starts at 1 (cache's initial reference)
-     * - Incremented by {@link #tryPin()} when readers acquire the segment
-     * - Decremented by {@link #decRef()} when released
-     * - When reaches 0, segment is returned to pool via {@link #onFullyReleased}
-     *
-     * Uses volatile int with VarHandle for atomic operations, saving 16 bytes per segment
-     * compared to AtomicInteger while maintaining same performance.
-     */
-    private volatile int refCount = 1;
-
-    /**
-     * Callback invoked when reference count reaches zero.
-     * Typically returns the segment to a memory pool for reuse.
-     */
-    private final BlockReleaser<RefCountedMemorySegment> onFullyReleased;
-
-    /**
-     * Generation counter incremented on each eviction (close) cycle.
-     * Used by BlockSlotTinyCache to detect stale cached references.
-     *
-     * Incremented when:
-     * - close() is called (segment evicted from cache)
-     *
-     * NOT incremented when:
-     * - reset() is called (segment reused from pool)
-     *
-     * This allows generation-based staleness detection without a separate retired flag.
-     * Once close() increments generation, all cached references with the old generation
-     * become invalid, preventing use of stale or recycled memory.
-     *
-     * Uses plain volatile for ultra-fast reads (hot path in BlockSlotTinyCache).
-     * VarHandle used only for atomic increment in close() (cold path).
-     */
-    private volatile int generation = 0;
-
-    /**
-     * Creates a reference-counted memory segment.
-     *
-     * @param segment the native memory segment to wrap
-     * @param length the logical length of valid data (0 to segment.byteSize())
-     * @param onFullyReleased callback invoked when refCount reaches 0 (typically returns to pool)
-     * @throws IllegalArgumentException if segment or callback is null
-     */
     public RefCountedMemorySegment(MemorySegment segment, int length, BlockReleaser<RefCountedMemorySegment> onFullyReleased) {
         if (segment == null || onFullyReleased == null) {
             throw new IllegalArgumentException("segment and onFullyReleased must not be null");
         }
         this.length = length;
         this.onFullyReleased = onFullyReleased;
-
         this.slicedSegment = (length < segment.byteSize()) ? segment.asSlice(0, length) : segment;
     }
 
-    /**
-     * Increments the reference count (internal use - prefer {@link #tryPin()} for external callers).
-     *
-     * <p><b>WARNING:</b> This bypasses retirement checks. Use only when you already hold a valid reference
-     * (e.g., creating a clone/slice of an IndexInput).
-     *
-     * @throws IllegalStateException if attempting to increment a fully released segment (refCount was 0)
-     */
-    public void incRef() {
-        int count = (int) REFCOUNT.getAndAdd(this, 1) + 1;
-        if (count <= 1) {
-            recordErrorMetric();
-            throw new IllegalStateException("Attempted to revive a released segment (refCount=" + count + ")");
-        }
-    }
-
-    /**
-     * Decrements the reference count (internal use - prefer {@link #unpin()} for external callers).
-     * When refCount reaches 0, invokes {@link #onFullyReleased} to return segment to pool.
-     *
-     * @throws IllegalStateException if refCount underflows (more decrements than increments)
-     */
     @Override
-    public void decRef() {
-        int prev = (int) REFCOUNT.getAndAdd(this, -1);
-        if (prev == 1) {
-            // Last reference dropped - return segment to pool
-            onFullyReleased.release(this);
-        } else if (prev <= 0) {
-            recordErrorMetric();
-            throw new IllegalStateException("decRef underflow (refCount=" + (prev - 1) + ')');
-        }
+    public RefCountedMemorySegment value() {
+        return this;
     }
 
-    /**
-     * Returns the current reference count (for diagnostics/metrics only).
-     *
-     * @return the current refCount value (1 = cache only, >1 = cache + active readers)
-     */
-    public int getRefCount() {
-        return refCount; // Direct volatile read
-    }
-
-    /**
-     * Returns a sliced view of the underlying memory segment containing only valid data.
-     * The returned segment has bounds [0, length), hiding any unused capacity.
-     *
-     * <p><b>IMPORTANT:</b> Only call this while holding a valid pin (after successful {@link #tryPin()}).
-     *
-     * @return sliced MemorySegment from offset 0 to {@link #length}
-     */
-
-    public MemorySegment segment() {
-        return slicedSegment;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
     @Override
     public int length() {
         return length;
     }
 
+    public MemorySegment segment() {
+        return slicedSegment;
+    }
+
+    @Override
+    public int getGeneration() {
+        // Single volatile read of packed state.
+        final long s = (long) STATE.getVolatile(this);
+        return unpackGeneration(s);
+    }
+
+    public int getRefCount() {
+        final long s = (long) STATE.getVolatile(this);
+        return unpackRefCount(s);
+    }
+
     /**
-     * Attempts to acquire a pin (increment refCount) for safe access to this segment.
-     * Uses CAS loops for thread-safe concurrent pinning.
+     * Atomically increments refCount iff refCount > 0.
      *
-     * <p><b>Usage Pattern:</b>
-     * <pre>{@code
-     * RefCountedMemorySegment seg = cache.get(key);
-     * if (seg.tryPin()) {
-     *     try {
-     *         // Safe to use seg.segment() here
-     *     } finally {
-     *         seg.unpin();
-     *     }
-     * }
-     * }</pre>
-     *
-     * @return true if successfully pinned (caller must call {@link #unpin()}), false if retired/released
+     * Hot-path is straight-line:
+     *   - read packed state
+     *   - check rc > 0
+     *   - CAS state+1 (increment low 32 bits only)
      */
     @Override
     public boolean tryPin() {
-        int r = (int) REFCOUNT.getVolatile(this);
-        while (r > 0) {
-            if (REFCOUNT.compareAndSet(this, r, r + 1))
+        long s = (long) STATE.getVolatile(this);
+
+        for (;;) {
+            final int rc = unpackRefCount(s);
+            if (rc <= 0) {
+                return tryPinFailed();
+            }
+
+            // Increment refcount (lower 32 bits) only; generation (upper 32) unchanged.
+            final long ns = s + 1L;
+
+            if (STATE.compareAndSet(this, s, ns)) {
                 return true;
-            r = (int) REFCOUNT.getVolatile(this);
+            }
+
+            s = (long) STATE.getVolatile(this);
             Thread.onSpinWait();
         }
+    }
+
+    /**
+     * Drops one ref. When it reaches 0, releases to pool.
+     */
+    @Override
+    public void unpin() {
+        decRef();
+    }
+
+    @Override
+    public void decRef() {
+        long s = (long) STATE.getVolatile(this);
+
+        for (;;) {
+            final int rc = unpackRefCount(s);
+            if (rc <= 0) {
+                recordErrorMetric();
+                throw new IllegalStateException("decRef underflow (refCount=" + (rc - 1) + ')');
+            }
+
+            // Decrement refcount (lower 32 bits) only; generation unchanged.
+            final long ns = s - 1L;
+
+            if (STATE.compareAndSet(this, s, ns)) {
+                if (rc == 1) { // transitioned to 0
+                    onFullyReleased.release(this);
+                }
+                return;
+            }
+
+            s = (long) STATE.getVolatile(this);
+            Thread.onSpinWait();
+        }
+    }
+
+    /**
+     * Internal-only-for tests.
+     */
+    public void incRef() {
+        long s = (long) STATE.getVolatile(this);
+
+        for (;;) {
+            final int rc = unpackRefCount(s);
+            if (rc <= 0) {
+                recordErrorMetric();
+                throw new IllegalStateException("Attempted to revive a released segment (refCount=" + rc + ")");
+            }
+
+            final long ns = s + 1L;
+            if (STATE.compareAndSet(this, s, ns)) {
+                return;
+            }
+
+            s = (long) STATE.getVolatile(this);
+            Thread.onSpinWait();
+        }
+    }
+
+    /**
+     * Resets this segment to a fresh state when reused from pool.
+     * Must be called under pool lock, before publishing the segment.
+     *
+     * IMPORTANT: resets refCount to 1 but does NOT touch generation.
+     * Generation bump happens on close() (eviction), not on reset().
+     */
+    public void reset() {
+        // Under pool lock; plain set is fine.
+        final long s = (long) STATE.getVolatile(this);
+        final int gen = unpackGeneration(s);
+        state = packState(gen, 1);
+    }
+
+    /**
+     * Atomically:
+     *  - bump generation
+     *  - drop cache's reference (refCount--)
+     *
+     * Done in a single CAS:
+     *   ns = s + (1<<32) - 1
+     */
+    @Override
+    public void close() {
+        long s = (long) STATE.getVolatile(this);
+
+        for (;;) {
+            final int rc = unpackRefCount(s);
+
+            // cache should always hold a ref while entry is alive
+            if (rc <= 0) {
+                recordErrorMetric();
+                throw new IllegalStateException("close on already released segment (refCount=" + rc + ")");
+            }
+
+            // bump generation (upper 32) and drop one ref (lower 32)
+            final long ns = s + (1L << 32) - 1L;
+
+            if (STATE.compareAndSet(this, s, ns)) {
+                if (rc == 1) { // transitioned to 0
+                    onFullyReleased.release(this);
+                }
+                return;
+            }
+
+            s = (long) STATE.getVolatile(this);
+            Thread.onSpinWait();
+        }
+    }
+
+    /**
+     * Optional helper: atomically pins only if the generation matches expected.
+     * This reduces "pin then validate then unpin" churn in callers.
+     */
+    public boolean tryPinIfGeneration(int expectedGen) {
+        long s = (long) STATE.getVolatile(this);
+
+        for (;;) {
+            final int rc = unpackRefCount(s);
+            if (rc <= 0) {
+                return false;
+            }
+            if (unpackGeneration(s) != expectedGen) {
+                return false;
+            }
+
+            final long ns = s + 1L;
+            if (STATE.compareAndSet(this, s, ns)) {
+                return true;
+            }
+
+            s = (long) STATE.getVolatile(this);
+            Thread.onSpinWait();
+        }
+    }
+
+    /** Cold path: keep debug checks out of the hot loop. */
+    private boolean tryPinFailed() {
         if (LOGGER.isDebugEnabled()) {
             LOGGER.debug("tryPin failed: refCount=0");
         }
@@ -207,81 +280,51 @@ public final class RefCountedMemorySegment implements BlockCacheValue<RefCounted
     }
 
     /**
-     * Releases a previously acquired pin.
-     * Every successful {@link #tryPin()} MUST be paired with exactly one {@code unpin()}.
+     * Pack generation and refCount into a single 64-bit long.
      *
-     * <p>Delegates to {@link #decRef()}.
+     * Layout: [generation:32][refCount:32]
+     *
+     * Math breakdown:
+     *   generation & 0xFFFF_FFFFL   - mask to 32 bits (treat as unsigned)
+     *   << 32                        - shift left 32 bits (moves to upper half)
+     *   refCount & 0xFFFF_FFFFL      - mask to 32 bits (treat as unsigned)
+     *
+     * Example: gen=5, refCount=3
+     *   gen & 0xFFFF_FFFFL      = 0x0000_0005
+     *   << 32                   = 0x0000_0005_0000_0000
+     *   refCount & 0xFFFF_FFFFL = 0x0000_0003
+     *   result                  = 0x0000_0005_0000_0003
      */
-    @Override
-    public void unpin() {
-        decRef();
+    private static long packState(int generation, int refCount) {
+        return ((generation & 0xFFFF_FFFFL) << 32) | (refCount & 0xFFFF_FFFFL);
     }
 
     /**
-     * Resets this segment to a fresh state for reuse from the pool.
-     * Must be called when a segment is reacquired from the free list.
+     * Extract generation from packed state (upper 32 bits).
      *
-     * <p><b>IMPORTANT:</b> This method is NOT thread-safe and should only be called
-     * by the pool while holding its lock, before the segment is handed out.
+     * Math: unsigned right shift by 32 bits drops the lower 32 bits (refCount),
+     * leaving only generation. Cast to int to get the 32-bit value.
      *
-     * <p>Resets:
-     * <ul>
-     *   <li>refCount to 1 (represents new cache/owner reference)</li>
-     * </ul>
-     *
-     * <p>Does NOT increment generation - that happens in close() when evicted.
+     * Example: state = 0x0000_0005_0000_0003
+     *   >>> 32  shifts: 0x0000_0000_0000_0005
+     *   (int) cast:     5
      */
-    public void reset() {
-        refCount = 1; // safe under pool lock
+    private static int unpackGeneration(long state) {
+        return (int) (state >>> 32);
     }
 
     /**
-     * Returns the current generation number.
-     * Used by BlockSlotTinyCache to detect segment reuse.
+     * Extract refCount from packed state (lower 32 bits).
      *
-     * <p>Ultra-fast volatile read optimized for hot path.
-     * Direct field access allows JIT to inline completely.
+     * Math: casting long to int simply drops the upper 32 bits. Its safe.
+     * Java truncates to the lower 32 bits automatically.
      *
-     * @return current generation counter value
+     * Example: state = 0x0000_0005_0000_0003
+     *   (int) cast: 3
      */
-    public int getGeneration() {
-        return generation; // Direct volatile read - fastest possible
-    }
-
-    /**
-     * Closes this cache value by invalidating it and dropping the cache's reference.
-     *
-     * <p><b>IMPORTANT:</b> This method must be called exactly once per cache entry lifecycle.
-     * Caffeine guarantees removalListener is called exactly once, so this is safe.
-     * Multiple calls would cause refCount underflow.
-     *
-     * <p>This method:
-     * <ol>
-     *   <li>Increments generation (invalidates all cached references in BlockSlotTinyCache)</li>
-     *   <li>Calls decRef() (drops cache's reference)</li>
-     * </ol>
-     *
-     * <p>Once generation is incremented, any cached entries with the old
-     * generation will fail the generation check and reload from the main cache.
-     */
-    @Override
-    public void close() {
-        // By decrementing refcount before bumping generation,
-        // any concurrent tryPin will see refcount=0 and fail
-        // immediately, avoiding any racees between generation checks
-        // and tryPin()
-        decRef();
-        generation++;
-    }
-
-    /**
-     * Returns this instance (self-referential for BlockCacheValue contract).
-     *
-     * @return this RefCountedMemorySegment
-     */
-    @Override
-    public RefCountedMemorySegment value() {
-        return this;
+    private static int unpackRefCount(long state) {
+        // JLS 5.1.3: narrowing long->int keeps low 32 bits (mod 2^32)
+        return (int) state;
     }
 
     private static void recordErrorMetric() {

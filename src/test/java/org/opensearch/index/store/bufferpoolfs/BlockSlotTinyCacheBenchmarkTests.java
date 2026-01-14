@@ -192,6 +192,11 @@ public class BlockSlotTinyCacheBenchmarkTests {
         public void decRef() {
             segment.decRef();
         }
+
+        @Override
+        public int getGeneration() {
+            return segment.getGeneration();
+        }
     }
 
     /**
@@ -343,7 +348,6 @@ public class BlockSlotTinyCacheBenchmarkTests {
     private static void runBenchmarks() throws Exception {
         System.out.println("BlockSlotTinyCache Benchmark");
         System.out.println("============================");
-        System.out.println("Implementation: ThreadLocal");
         System.out.println();
 
         List<BenchmarkScenario> scenarios = new ArrayList<>();
