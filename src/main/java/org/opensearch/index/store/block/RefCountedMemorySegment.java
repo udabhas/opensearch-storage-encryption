@@ -153,7 +153,7 @@ public final class RefCountedMemorySegment implements BlockCacheValue<RefCounted
         for (;;) {
             final int rc = unpackRefCount(s);
             if (rc <= 0) {
-                recordErrorMetric();
+                CryptoMetricsService.getInstance().recordError(ErrorType.DEC_SEGMENT_ERROR);
                 throw new IllegalStateException("decRef underflow (refCount=" + (rc - 1) + ')');
             }
 
@@ -181,7 +181,7 @@ public final class RefCountedMemorySegment implements BlockCacheValue<RefCounted
         for (;;) {
             final int rc = unpackRefCount(s);
             if (rc <= 0) {
-                recordErrorMetric();
+                CryptoMetricsService.getInstance().recordError(ErrorType.INC_SEGMENT_ERROR);
                 throw new IllegalStateException("Attempted to revive a released segment (refCount=" + rc + ")");
             }
 
@@ -226,7 +226,7 @@ public final class RefCountedMemorySegment implements BlockCacheValue<RefCounted
 
             // cache should always hold a ref while entry is alive
             if (rc <= 0) {
-                recordErrorMetric();
+                CryptoMetricsService.getInstance().recordError(ErrorType.CLOSE_SEGMENT_ERROR);
                 throw new IllegalStateException("close on already released segment (refCount=" + rc + ")");
             }
 
@@ -325,13 +325,5 @@ public final class RefCountedMemorySegment implements BlockCacheValue<RefCounted
     private static int unpackRefCount(long state) {
         // JLS 5.1.3: narrowing long->int keeps low 32 bits (mod 2^32)
         return (int) state;
-    }
-
-    private static void recordErrorMetric() {
-        try {
-            CryptoMetricsService.getInstance().recordError(ErrorType.INTERNAL_ERROR);
-        } catch (Throwable t) {
-            // ignore metric exception
-        }
     }
 }

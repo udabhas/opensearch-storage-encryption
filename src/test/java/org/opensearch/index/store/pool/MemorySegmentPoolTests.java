@@ -8,9 +8,13 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.mock;
 
 import org.junit.After;
+import org.junit.Before;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**
@@ -20,6 +24,13 @@ import org.opensearch.test.OpenSearchTestCase;
 public class MemorySegmentPoolTests extends OpenSearchTestCase {
 
     private MemorySegmentPool pool;
+
+    @Before
+    public void setUp() throws Exception {
+        super.setUp();
+        // Initialize with a mock metrics registry for testing
+        CryptoMetricsService.initialize(mock(MetricsRegistry.class));
+    }
 
     @After
     public void tearDown() throws Exception {

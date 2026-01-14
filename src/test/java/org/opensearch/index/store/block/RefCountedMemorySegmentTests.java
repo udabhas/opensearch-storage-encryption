@@ -9,6 +9,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.mock;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -21,6 +22,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.After;
 import org.junit.Before;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.test.OpenSearchTestCase;
 
 @SuppressWarnings("preview")
@@ -31,6 +34,8 @@ public class RefCountedMemorySegmentTests extends OpenSearchTestCase {
     @Before
     public void setUp() throws Exception {
         super.setUp();
+        // Initialize with a mock metrics registry for testing
+        CryptoMetricsService.initialize(mock(MetricsRegistry.class));
         arena = Arena.ofConfined();
     }
 

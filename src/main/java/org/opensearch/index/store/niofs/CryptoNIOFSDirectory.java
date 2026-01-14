@@ -23,6 +23,8 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 
 /**
  * A NioFS directory implementation that encrypts files to be stored based on a
@@ -67,55 +69,65 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        if (name.contains("segments_") || name.endsWith(".si")) {
-            return super.openInput(name, context);
-        }
-
-        ensureOpen();
-        ensureCanRead(name);
-        Path path = getDirectory().resolve(name);
-        FileChannel fc = FileChannel.open(path, StandardOpenOption.READ);
-        boolean success = false;
-
         try {
-            final IndexInput indexInput = new CryptoBufferedIndexInput(
-                "CryptoBufferedIndexInput(path=\"" + path + "\")",
-                fc,
-                context,
-                this.keyResolver,
-                path,
-                this.encryptionMetadataCache
-            );
-            success = true;
-            return indexInput;
-        } finally {
-            if (!success) {
-                IOUtils.closeWhileHandlingException(fc);
+            if (name.contains("segments_") || name.endsWith(".si")) {
+                return super.openInput(name, context);
             }
+
+            ensureOpen();
+            ensureCanRead(name);
+            Path path = getDirectory().resolve(name);
+            FileChannel fc = FileChannel.open(path, StandardOpenOption.READ);
+            boolean success = false;
+
+            try {
+                final IndexInput indexInput = new CryptoBufferedIndexInput(
+                    "CryptoBufferedIndexInput(path=\"" + path + "\")",
+                    fc,
+                    context,
+                    this.keyResolver,
+                    path,
+                    this.encryptionMetadataCache
+                );
+                success = true;
+                return indexInput;
+            } finally {
+                if (!success) {
+                    IOUtils.closeWhileHandlingException(fc);
+                }
+            }
+        } catch (Exception e) {
+            CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_INPUT_ERROR);
+            throw e;
         }
     }
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
-        if (name.contains("segments_") || name.endsWith(".si")) {
-            return super.createOutput(name, context);
+        try {
+            if (name.contains("segments_") || name.endsWith(".si")) {
+                return super.createOutput(name, context);
+            }
+
+            ensureOpen();
+            Path path = directory.resolve(name);
+
+            OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+
+            return new CryptoOutputStreamIndexOutput(
+                name,
+                path,
+                fos,
+                this.keyResolver,
+                provider,
+                algorithmId,
+                path,
+                this.encryptionMetadataCache
+            );
+        } catch (Exception e) {
+            CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_OUTPUT_ERROR);
+            throw e;
         }
-
-        ensureOpen();
-        Path path = directory.resolve(name);
-
-        OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
-
-        return new CryptoOutputStreamIndexOutput(
-            name,
-            path,
-            fos,
-            this.keyResolver,
-            provider,
-            algorithmId,
-            path,
-            this.encryptionMetadataCache
-        );
     }
 
     @Override

@@ -44,6 +44,8 @@ import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.kms_encryption_context.EncryptionContextResolver;
 import org.opensearch.index.store.kms_encryption_context.EncryptionContextResolverFactory;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 import org.opensearch.index.store.pool.PoolBuilder;
 import org.opensearch.index.store.read_ahead.Worker;
@@ -274,11 +276,16 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      */
     @Override
     public Directory newDirectory(IndexSettings indexSettings, ShardPath path) throws IOException {
-        final Path location = path.resolveIndex();
-        final LockFactory lockFactory = indexSettings.getValue(org.opensearch.index.store.FsDirectoryFactory.INDEX_LOCK_FACTOR_SETTING);
-        Files.createDirectories(location);
-        int shardId = path.getShardId().getId();
-        return newFSDirectory(location, lockFactory, indexSettings, shardId);
+        try {
+            final Path location = path.resolveIndex();
+            final LockFactory lockFactory = indexSettings.getValue(org.opensearch.index.store.FsDirectoryFactory.INDEX_LOCK_FACTOR_SETTING);
+            Files.createDirectories(location);
+            int shardId = path.getShardId().getId();
+            return newFSDirectory(location, lockFactory, indexSettings, shardId);
+        } catch (Exception e) {
+            CryptoMetricsService.getInstance().recordError(ErrorType.DIRECTORY_CREATION_ERROR);
+            throw e;
+        }
     }
 
     /**

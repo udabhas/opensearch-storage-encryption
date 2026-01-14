@@ -34,6 +34,8 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
@@ -114,55 +116,64 @@ public class BufferPoolDirectory extends FSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        ensureOpen();
-        ensureCanRead(name);
+        try {
+            ensureOpen();
+            ensureCanRead(name);
 
-        Path file = dirPath.resolve(name);
-        long rawFileSize = Files.size(file);
-        if (rawFileSize == 0) {
-            throw new IOException("Cannot open empty file with DirectIO: " + file);
+            Path file = dirPath.resolve(name);
+            long rawFileSize = Files.size(file);
+            if (rawFileSize == 0) {
+                throw new IOException("Cannot open empty file with DirectIO: " + file);
+            }
+
+            // Calculate content length with OSEF validation
+            long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
+
+            ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker, blockCache);
+            ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
+            BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
+
+            return CachedMemorySegmentIndexInput
+                .newInstance(
+                    "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
+                    file,
+                    contentLength,
+                    blockCache,
+                    readAheadManager,
+                    readAheadContext,
+                    pinRegistry
+                );
+        } catch (Exception e) {
+            CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_INPUT_ERROR);
+            throw e;
         }
-
-        // Calculate content length with OSEF validation
-        long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
-
-        ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker, blockCache);
-        ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
-        BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
-
-        return CachedMemorySegmentIndexInput
-            .newInstance(
-                "CachedMemorySegmentIndexInput(path=\"" + file + "\")",
-                file,
-                contentLength,
-                blockCache,
-                readAheadManager,
-                readAheadContext,
-                pinRegistry
-            );
     }
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
-        if (name.contains("segments_") || name.endsWith(".si")) {
-            return super.createOutput(name, context);
+        try {
+            if (name.contains("segments_") || name.endsWith(".si")) {
+                return super.createOutput(name, context);
+            }
+
+            ensureOpen();
+            Path path = directory.resolve(name);
+            OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+
+            return new BufferIOWithCaching(
+                name,
+                path,
+                fos,
+                masterKeyBytes,
+                this.memorySegmentPool,
+                this.blockCache,
+                this.provider,
+                this.encryptionMetadataCache
+            );
+        } catch (Exception e) {
+            CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_OUTPUT_ERROR);
+            throw e;
         }
-
-        ensureOpen();
-        Path path = directory.resolve(name);
-        OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
-
-        return new BufferIOWithCaching(
-            name,
-            path,
-            fos,
-            masterKeyBytes,
-            this.memorySegmentPool,
-            this.blockCache,
-            this.provider,
-            this.encryptionMetadataCache
-        );
-
     }
 
     @Override
