@@ -30,11 +30,14 @@ import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 /**
  * Extended integration tests for CryptoDirectory plugin.
  * Tests multi-node operations, lifecycle management, resilience, and performance.
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class ConcurrencyIntegTests extends OpenSearchIntegTestCase {
 
     @Override

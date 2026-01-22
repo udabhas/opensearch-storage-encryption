@@ -25,14 +25,17 @@ import org.junit.After;
 import org.junit.Before;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+import org.opensearch.index.store.CaffeineThreadLeakFilter;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.test.OpenSearchTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 
 @SuppressWarnings("preview")
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class BlockCacheTests extends OpenSearchTestCase {
 
     @Mock
