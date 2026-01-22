@@ -16,12 +16,16 @@ import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.index.reindex.ReindexAction;
 import org.opensearch.index.reindex.ReindexModulePlugin;
 import org.opensearch.index.reindex.ReindexRequestBuilder;
+import org.opensearch.index.store.CaffeineThreadLeakFilter;
 import org.opensearch.index.store.CryptoDirectoryPlugin;
 import org.opensearch.index.store.MockCryptoKeyProviderPlugin;
 import org.opensearch.index.store.MockCryptoPlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class CryptoDirectoryIntegTestCases extends OpenSearchIntegTestCase {
 
     @Override

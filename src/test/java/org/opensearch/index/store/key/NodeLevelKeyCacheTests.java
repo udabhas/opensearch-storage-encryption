@@ -36,12 +36,16 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.action.ActionFuture;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.index.store.CaffeineThreadLeakFilter;
 import org.opensearch.index.store.CryptoDirectoryFactory;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.transport.client.AdminClient;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.IndicesAdminClient;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class NodeLevelKeyCacheTests extends OpenSearchTestCase {
 
     @Mock

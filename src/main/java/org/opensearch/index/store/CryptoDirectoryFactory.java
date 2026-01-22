@@ -288,6 +288,14 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         }
     }
 
+    @Override
+    public Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings) throws IOException {
+        // Extract shardId from path structure: .../indices/{index-uuid}/{shard-id}/index/
+        // location.getParent() gives us the shard directory
+        int shardId = Integer.parseInt(location.getParent().getFileName().toString());
+        return newFSDirectory(location, lockFactory, indexSettings, shardId);
+    }
+
     /**
      * Handles keyfile copying for clone/resize operations.
      * When an index is cloned, Lucene copies the ciphertext segment files verbatim,

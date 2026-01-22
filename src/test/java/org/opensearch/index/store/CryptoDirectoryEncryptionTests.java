@@ -61,6 +61,7 @@ import org.opensearch.transport.client.AdminClient;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.IndicesAdminClient;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 
@@ -68,6 +69,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
  * Tests to verify that directory-level encryption properly isolates data between different keys.
  * This validates the core security property: data encrypted with Key A cannot be read with Key B.
  */
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
 
     private static final Logger logger = LogManager.getLogger(CryptoDirectoryEncryptionTests.class);
