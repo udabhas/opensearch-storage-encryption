@@ -43,6 +43,7 @@ import org.opensearch.index.store.pool.PoolSizeCalculator;
 import org.opensearch.index.store.rest.RestGetIndexCountForKeyAction;
 import org.opensearch.index.store.rest.RestRegisterCryptoAction;
 import org.opensearch.index.store.rest.RestUnregisterCryptoAction;
+import org.opensearch.indices.RemoteStoreSettings;
 import org.opensearch.indices.cluster.IndicesClusterStateService.AllocatedIndices.IndexRemovalReason;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.EnginePlugin;
@@ -79,6 +80,10 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
     private NodeEnvironment nodeEnvironment;
     private final boolean enabled;
 
+    // Static storage for remote store parameters (accessible by CryptoEngineFactory)
+    private static Supplier<RepositoriesService> repositoriesServiceSupplier;
+    private static RemoteStoreSettings remoteStoreSettings;
+
     /**
      * Constructor with settings.
      * @param settings OpenSearch node settings
@@ -106,6 +111,22 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
      */
     public boolean isDisabled() {
         return !enabled;
+    }
+
+    /**
+     * Get the RepositoriesService supplier for remote store operations.
+     * @return the repositories service supplier, or null if not initialized
+     */
+    public static Supplier<RepositoriesService> getRepositoriesServiceSupplier() {
+        return repositoriesServiceSupplier;
+    }
+
+    /**
+     * Get the RemoteStoreSettings for remote store operations.
+     * @return the remote store settings, or null if not initialized
+     */
+    public static RemoteStoreSettings getRemoteStoreSettings() {
+        return remoteStoreSettings;
     }
 
     /**
@@ -179,6 +200,11 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         }
 
         this.nodeEnvironment = nodeEnvironment;
+
+        // Store remote store parameters for CryptoEngineFactory to access
+        CryptoDirectoryPlugin.repositoriesServiceSupplier = repositoriesServiceSupplier;
+        // Create RemoteStoreSettings with node settings and cluster settings
+        CryptoDirectoryPlugin.remoteStoreSettings = new RemoteStoreSettings(environment.settings(), clusterService.getClusterSettings());
 
         // Set cluster service for accessing cluster metadata (e.g., repository settings)
         CryptoDirectoryFactory.setClusterService(clusterService);

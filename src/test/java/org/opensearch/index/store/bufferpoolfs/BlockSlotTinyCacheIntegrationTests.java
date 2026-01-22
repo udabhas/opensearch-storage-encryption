@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.opensearch.index.store.CaffeineThreadLeakFilter;
 import org.opensearch.index.store.block.BlockReleaser;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
@@ -33,7 +34,10 @@ import org.opensearch.index.store.block_cache.BlockCacheValue;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.test.OpenSearchTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 @SuppressWarnings("preview")
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class BlockSlotTinyCacheIntegrationTests extends OpenSearchTestCase {
 
     private static final int BLOCK_SIZE = 4096;

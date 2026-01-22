@@ -45,6 +45,7 @@ public class CryptoFileChannelWrapper extends FileChannel {
     private final AtomicLong position;
     private final ReentrantReadWriteLock positionLock;
     private volatile boolean closed = false;
+    private final Path filePath;
 
     /**
      * Creates a new CryptoFileChannelWrapper that wraps the provided FileChannel.
@@ -59,6 +60,7 @@ public class CryptoFileChannelWrapper extends FileChannel {
     public CryptoFileChannelWrapper(FileChannel delegate, KeyResolver keyResolver, Path path, Set<OpenOption> options, String translogUUID)
         throws IOException {
         this.delegate = delegate;
+        this.filePath = path;
         this.chunkManager = new TranslogChunkManager(delegate, keyResolver, path, translogUUID);
         this.position = new AtomicLong(delegate.position());
         this.positionLock = new ReentrantReadWriteLock();
@@ -274,5 +276,15 @@ public class CryptoFileChannelWrapper extends FileChannel {
         if (closed || !delegate.isOpen()) {
             throw new ClosedChannelException();
         }
+    }
+
+    /**
+     * Gets the TranslogChunkManager for this channel.
+     * This allows access to finalize the cipher before upload.
+     *
+     * @return the TranslogChunkManager instance
+     */
+    public TranslogChunkManager getChunkManager() {
+        return chunkManager;
     }
 }

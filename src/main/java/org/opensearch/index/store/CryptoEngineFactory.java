@@ -16,6 +16,7 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngine;
+import org.opensearch.index.remote.RemoteTranslogTransferTracker;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.translog.CryptoTranslogFactory;
@@ -39,8 +40,23 @@ public class CryptoEngineFactory implements EngineFactory {
             // Create a separate KeyResolver for translog encryption
             KeyResolver keyResolver = createTranslogKeyResolver(config);
 
-            // Create the crypto translog factory using the same KeyResolver as the directory
-            CryptoTranslogFactory cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
+            // Check if remote translog is enabled
+            boolean isRemoteTranslogEnabled = config.getIndexSettings().isRemoteTranslogStoreEnabled();
+
+            CryptoTranslogFactory cryptoTranslogFactory;
+
+            if (isRemoteTranslogEnabled) {
+                cryptoTranslogFactory = new CryptoTranslogFactory(
+                    keyResolver,
+                    CryptoDirectoryPlugin.getRepositoriesServiceSupplier(),
+                    config.getThreadPool(),
+                    config.getIndexSettings().getRemoteStoreTranslogRepository(),
+                    new RemoteTranslogTransferTracker(config.getShardId(), 100),
+                    CryptoDirectoryPlugin.getRemoteStoreSettings()
+                );
+            } else {
+                cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
+            }
 
             // Create new engine config by copying all fields from existing config
             // but replace the translog factory with our crypto version
