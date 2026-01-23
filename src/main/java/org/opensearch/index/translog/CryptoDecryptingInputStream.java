@@ -93,17 +93,7 @@ public class CryptoDecryptingInputStream extends InputStream {
             int bytesRead = decryptingChannel.read(buffer);
 
             // Check for EOF
-            if (bytesRead == -1) {
-                eof = true;
-                return -1;
-            }
-
-            // If we read 0 bytes, check if we're at actual EOF to prevent infinite loop when channel returns 0 instead of -1
-            if (bytesRead == 0) {
-                if (encryptedChannel.position() >= encryptedChannel.size()) {
-                    eof = true;
-                    return -1;
-                }
+            if (bytesRead <= 0) {
                 eof = true;
                 return -1;
             }
