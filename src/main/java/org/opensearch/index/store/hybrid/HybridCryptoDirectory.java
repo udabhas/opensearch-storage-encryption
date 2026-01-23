@@ -120,7 +120,8 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
      */
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
-        return super.createTempOutput(prefix, suffix, context);
+        return bufferPoolDirectory.createTempOutput(prefix, suffix, context);
+        // return super.createTempOutput(prefix, suffix, context);
     }
 
     @Override
