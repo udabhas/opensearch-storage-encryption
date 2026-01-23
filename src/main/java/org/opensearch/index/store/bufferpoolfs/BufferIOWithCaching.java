@@ -295,7 +295,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
 
         private void writeEncryptedChunk(byte[] data, int offset, int length, long absoluteOffset) throws IOException {
 
-            out.write(data);
+            out.write(data, offset, length);
 
 //            int remaining = length;
 //            int dataOffset = offset;
