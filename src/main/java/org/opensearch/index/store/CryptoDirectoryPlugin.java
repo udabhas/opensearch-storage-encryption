@@ -141,21 +141,21 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         return Collections.singletonMap(CryptoDirectoryFactory.STORE_TYPE, new CryptoDirectoryFactory());
     }
 
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public Optional<EngineFactory> getEngineFactory(IndexSettings indexSettings) {
-        if (isDisabled()) {
-            return Optional.empty();
-        }
-
-        // Only provide our custom engine factory for cryptofs indices
-        if (CryptoDirectoryFactory.STORE_TYPE.equals(indexSettings.getValue(IndexModule.INDEX_STORE_TYPE_SETTING))) {
-            return Optional.of(new CryptoEngineFactory());
-        }
-        return Optional.empty();
-    }
+//    /**
+//     * {@inheritDoc}
+//     */
+//    @Override
+//    public Optional<EngineFactory> getEngineFactory(IndexSettings indexSettings) {
+//        if (isDisabled()) {
+//            return Optional.empty();
+//        }
+//
+//        // Only provide our custom engine factory for cryptofs indices
+//        if (CryptoDirectoryFactory.STORE_TYPE.equals(indexSettings.getValue(IndexModule.INDEX_STORE_TYPE_SETTING))) {
+//            return Optional.of(new CryptoEngineFactory());
+//        }
+//        return Optional.empty();
+//    }
 
     @Override
     public Collection<Object> createComponents(
