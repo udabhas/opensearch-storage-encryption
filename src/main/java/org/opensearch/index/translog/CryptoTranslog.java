@@ -148,7 +148,6 @@ public class CryptoTranslog extends LocalTranslog {
             CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyResolver, translogUUID);
             return channelFactory;
         } catch (Exception e) {
-            logger.error("Failed to initialize CryptoChannelFactory: {}", e.getMessage(), e);
             throw new IOException(
                 "Failed to initialize crypto channel factory for translog encryption. " + "Cannot proceed without encryption!",
                 e

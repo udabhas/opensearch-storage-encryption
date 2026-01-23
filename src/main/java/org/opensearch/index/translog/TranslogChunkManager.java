@@ -204,7 +204,6 @@ public class TranslogChunkManager {
      * @throws IOException if reading or decryption fails
      */
     public byte[] readAndDecryptChunk(int chunkIndex) throws IOException {
-        // System.out.println("[DEBUG] readAndDecryptChunk: chunkIndex=" + chunkIndex);
         try {
             // Calculate disk position for this chunk
             long diskPosition = determineHeaderSize() + ((long) chunkIndex * CHUNK_WITH_TAG_SIZE);
@@ -218,6 +217,7 @@ public class TranslogChunkManager {
             ByteBuffer buffer = CHUNK_BUFFER_POOL.get();
             buffer.clear();
             int bytesRead = delegate.read(buffer, diskPosition);
+
             if (bytesRead <= GCM_TAG_SIZE) {
                 return new byte[0]; // Empty or invalid chunk
             }
@@ -340,16 +340,13 @@ public class TranslogChunkManager {
 
         // Initialize new cipher
         if (currentCipher == null) {
-            // Start new block
             initializeBlockCipher(currentBlockNumber++);
         }
 
         while (src.hasRemaining()) {
             // Finalize cipher when block is full and initialize new cipher
             if (currentCipher != null && currentBlockBytesWritten >= BLOCK_SIZE) {
-                // Block is full - finalize and write tag
                 finalizeCurrentBlock();
-                // Start new block
                 initializeBlockCipher(currentBlockNumber++);
             }
 
