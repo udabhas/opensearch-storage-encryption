@@ -10,7 +10,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.Supplier;
 
 import org.apache.logging.log4j.LogManager;
@@ -30,7 +29,6 @@ import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
 import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
-import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.store.action.GetIndexCountForKeyAction;
 import org.opensearch.index.store.action.TransportGetIndexCountForKeyAction;
@@ -141,21 +139,21 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         return Collections.singletonMap(CryptoDirectoryFactory.STORE_TYPE, new CryptoDirectoryFactory());
     }
 
-//    /**
-//     * {@inheritDoc}
-//     */
-//    @Override
-//    public Optional<EngineFactory> getEngineFactory(IndexSettings indexSettings) {
-//        if (isDisabled()) {
-//            return Optional.empty();
-//        }
-//
-//        // Only provide our custom engine factory for cryptofs indices
-//        if (CryptoDirectoryFactory.STORE_TYPE.equals(indexSettings.getValue(IndexModule.INDEX_STORE_TYPE_SETTING))) {
-//            return Optional.of(new CryptoEngineFactory());
-//        }
-//        return Optional.empty();
-//    }
+    // /**
+    // * {@inheritDoc}
+    // */
+    // @Override
+    // public Optional<EngineFactory> getEngineFactory(IndexSettings indexSettings) {
+    // if (isDisabled()) {
+    // return Optional.empty();
+    // }
+    //
+    // // Only provide our custom engine factory for cryptofs indices
+    // if (CryptoDirectoryFactory.STORE_TYPE.equals(indexSettings.getValue(IndexModule.INDEX_STORE_TYPE_SETTING))) {
+    // return Optional.of(new CryptoEngineFactory());
+    // }
+    // return Optional.empty();
+    // }
 
     @Override
     public Collection<Object> createComponents(
