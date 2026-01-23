@@ -96,30 +96,30 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
-            String normalizedPath = filePath.toAbsolutePath().normalize().toString();
-            byte[] masterKey = keyResolver.getDataKey().getEncoded();
-
-            // Get footer from disk and load metadata (footer + derived key) atomically into cache
-            EncryptionFooter footer = readFooterFromDisk(filePath, masterKey);
-
-            // Get or create metadata atomically - ensures footer and key are always consistent
-            var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, masterKey);
-            byte[] messageId = metadata.getFooter().getMessageId();
-            byte[] fileKey = metadata.getFileKey();
-
-            // Use frame-based decryption with derived file key
-            MemorySegmentDecryptor
-                .decryptInPlaceFrameBased(
-                    readBytes.address(),
-                    readBytes.byteSize(),
-                    fileKey,                                    // Derived file key (matches write path)
-                    masterKey,                                  // Master key for IV computation
-                    messageId,                                  // Message ID from footer
-                    org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
-                    startOffset,                                 // File offset
-                    filePath.toAbsolutePath().normalize().toString(),
-                    encryptionMetadataCache
-                );
+//            String normalizedPath = filePath.toAbsolutePath().normalize().toString();
+//            byte[] masterKey = keyResolver.getDataKey().getEncoded();
+//
+//            // Get footer from disk and load metadata (footer + derived key) atomically into cache
+//            EncryptionFooter footer = readFooterFromDisk(filePath, masterKey);
+//
+//            // Get or create metadata atomically - ensures footer and key are always consistent
+//            var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, masterKey);
+//            byte[] messageId = metadata.getFooter().getMessageId();
+//            byte[] fileKey = metadata.getFileKey();
+//
+//            // Use frame-based decryption with derived file key
+//            MemorySegmentDecryptor
+//                .decryptInPlaceFrameBased(
+//                    readBytes.address(),
+//                    readBytes.byteSize(),
+//                    fileKey,                                    // Derived file key (matches write path)
+//                    masterKey,                                  // Master key for IV computation
+//                    messageId,                                  // Message ID from footer
+//                    org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
+//                    startOffset,                                 // File offset
+//                    filePath.toAbsolutePath().normalize().toString(),
+//                    encryptionMetadataCache
+//                );
 
             if (bytesRead == 0) {
                 throw new java.io.EOFException("Unexpected EOF or empty read at offset " + startOffset + " for file " + filePath);
