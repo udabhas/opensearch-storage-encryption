@@ -72,7 +72,8 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
      * @return true if the file should use Direct I/O, false for NIO
      */
     private boolean delegeteBufferPool(String extension) {
-        return !extension.isEmpty() && !nioExtensions.contains(extension);
+        return true;
+//        return !extension.isEmpty() && !nioExtensions.contains(extension);
     }
 
     @Override
