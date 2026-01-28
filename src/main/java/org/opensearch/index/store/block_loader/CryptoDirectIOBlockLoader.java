@@ -89,11 +89,15 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         RefCountedMemorySegment[] result = new RefCountedMemorySegment[(int) blockCount];
         long readLength = blockCount << CACHE_BLOCK_SIZE_POWER;
 
+        // Get filesystem block size for Direct I/O alignment
+        // EBS: typically 4KB-8KB, EFS/NFS: typically 1MB
+        int blockSize = Math.toIntExact(Files.getFileStore(filePath).getBlockSize());
+
         try (
             Arena arena = Arena.ofConfined();
             FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ, DirectIOReaderUtil.getDirectOpenOption())
         ) {
-            MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena);
+            MemorySegment readBytes = directIOReadAligned(channel, startOffset, readLength, arena, blockSize);
             long bytesRead = readBytes.byteSize();
 
             String normalizedPath = filePath.toAbsolutePath().normalize().toString();
