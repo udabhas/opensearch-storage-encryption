@@ -18,7 +18,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.NIOFSDirectory;
-import org.opensearch.common.util.io.IOUtils;
+import org.opensearch.index.store.cache.FileChannelCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
@@ -78,8 +78,11 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             ensureOpen();
             ensureCanRead(name);
             Path path = getDirectory().resolve(name);
-            FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
-            FileChannel fc = FileChannel.open(path, StandardOpenOption.READ);
+
+            FileChannel fc = FileChannelCache.getOrOpen(path, StandardOpenOption.READ);
+
+            // FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
+            // FileChannel fc = FileChannel.open(path, StandardOpenOption.READ);
             boolean success = false;
 
             try {
@@ -95,7 +98,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
                 return indexInput;
             } finally {
                 if (!success) {
-                    IOUtils.closeWhileHandlingException(fc);
+                    // IOUtils.closeWhileHandlingException(fc);
                 }
             }
         } catch (Exception e) {
@@ -180,16 +183,17 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         }
 
         // read footer from disk with OSEF validation
-        FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
-        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
-            try {
-                EncryptionFooter footer = EncryptionFooter
-                    .readViaFileChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
-                return fileSize - footer.getFooterLength();
-            } catch (EncryptionFooter.NotOSEFFileException e) {
-                return fileSize;
-            }
+        FileChannel channel = FileChannelCache.getOrOpen(path, StandardOpenOption.READ);
+        // FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
+        // try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+        try {
+            EncryptionFooter footer = EncryptionFooter
+                .readViaFileChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
+            return fileSize - footer.getFooterLength();
+        } catch (EncryptionFooter.NotOSEFFileException e) {
+            return fileSize;
         }
+        // }
     }
 
     @Override
@@ -201,6 +205,9 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public void deleteFile(String name) throws IOException {
+        Path path = dirPath.resolve(name);
+        FileChannelCache.invalidate(path);
+
         super.deleteFile(name);
         encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(name)));
     }

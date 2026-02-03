@@ -30,6 +30,7 @@ import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.block_loader.BlockLoader;
+import org.opensearch.index.store.cache.FileChannelCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
@@ -243,6 +244,10 @@ public class BufferPoolDirectory extends FSDirectory {
                 LOGGER.warn("Failed to get file size for clearing cache for deleting shard", e);
             }
         }
+
+        Path filePath = directory.resolve(name);
+        FileChannelCache.invalidate(filePath);
+
         super.deleteFile(name);
         encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(file));
     }
@@ -265,8 +270,10 @@ public class BufferPoolDirectory extends FSDirectory {
         }
 
         // Cache miss - read footer from disk (happens during file open before cache populated)
-        FileOpenTracker.trackOpen(file.toAbsolutePath().toString());
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+        // FileOpenTracker.trackOpen(file.toAbsolutePath().toString());
+        FileChannel channel = FileChannelCache.getOrOpen(file, StandardOpenOption.READ);
+        // try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+        try {
             EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedPath, channel, masterKeyBytes, encryptionMetadataCache);
 
             // Metadata is already cached by readViaFileChannel
