@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -17,7 +18,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import java.security.AccessController;
 
 public class FileOpenTracker {
     private static final Logger LOGGER = LogManager.getLogger(FileOpenTracker.class);
@@ -47,12 +47,13 @@ public class FileOpenTracker {
                 sb.append("Total unique files: ").append(OPENS.size()).append("\n");
                 sb.append("Total opens: ").append(totalOpens).append("\n");
                 sb.append("path,count\n");
-                OPENS.entrySet().stream()
-                        .sorted((a, b) -> Long.compare(b.getValue().get(), a.getValue().get()))
-                        .forEach(e -> sb.append(e.getKey()).append(",").append(e.getValue().get()).append("\n"));
+                OPENS
+                    .entrySet()
+                    .stream()
+                    .sorted((a, b) -> Long.compare(b.getValue().get(), a.getValue().get()))
+                    .forEach(e -> sb.append(e.getKey()).append(",").append(e.getValue().get()).append("\n"));
 
-                Files.writeString(Paths.get(OUTPUT_FILE), sb.toString(),
-                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                Files.writeString(Paths.get(OUTPUT_FILE), sb.toString(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
                 LOGGER.info("File open stats appended to: {}", OUTPUT_FILE);
             } catch (IOException e) {
                 LOGGER.warn("Failed to write file open stats to file", e);
@@ -60,9 +61,6 @@ public class FileOpenTracker {
             return null;
         });
     }
-
-
-
 
     public static void reset() {
         OPENS.clear();
