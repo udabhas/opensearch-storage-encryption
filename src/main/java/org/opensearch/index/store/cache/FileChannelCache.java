@@ -10,6 +10,7 @@ package org.opensearch.index.store.cache;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.index.store.metrics.FileOpenTracker;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -31,6 +32,7 @@ public class FileChannelCache {
             return cached;
         }
         try {
+            FileOpenTracker.trackOpen(key);
             FileChannel channel = FileChannel.open(path, options);
             FileChannel existing = CACHE.putIfAbsent(key, channel);
             if (existing != null && existing.isOpen()) {
