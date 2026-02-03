@@ -25,6 +25,7 @@ import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
+import org.opensearch.index.store.metrics.FileOpenTracker;
 
 /**
  * A NioFS directory implementation that encrypts files to be stored based on a
@@ -77,6 +78,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             ensureOpen();
             ensureCanRead(name);
             Path path = getDirectory().resolve(name);
+            FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
             FileChannel fc = FileChannel.open(path, StandardOpenOption.READ);
             boolean success = false;
 
@@ -112,6 +114,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             ensureOpen();
             Path path = directory.resolve(name);
 
+            FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
             OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
             return new CryptoOutputStreamIndexOutput(
@@ -139,6 +142,8 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         ensureOpen();
         String name = getTempFileName(prefix, suffix, nextTempFileCounter.getAndIncrement());
         Path path = directory.resolve(name);
+
+        FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new CryptoOutputStreamIndexOutput(
@@ -175,6 +180,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         }
 
         // read footer from disk with OSEF validation
+        FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
             try {
                 EncryptionFooter footer = EncryptionFooter

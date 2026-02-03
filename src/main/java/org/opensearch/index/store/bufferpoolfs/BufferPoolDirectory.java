@@ -36,6 +36,7 @@ import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
+import org.opensearch.index.store.metrics.FileOpenTracker;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
@@ -158,6 +159,8 @@ public class BufferPoolDirectory extends FSDirectory {
 
             ensureOpen();
             Path path = directory.resolve(name);
+
+            FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
             OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
             return new BufferIOWithCaching(
@@ -185,6 +188,8 @@ public class BufferPoolDirectory extends FSDirectory {
         ensureOpen();
         String name = getTempFileName(prefix, suffix, nextTempFileCounter.getAndIncrement());
         Path path = directory.resolve(name);
+
+        FileOpenTracker.trackOpen(path.toAbsolutePath().toString());
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
         return new BufferIOWithCaching(
@@ -260,6 +265,7 @@ public class BufferPoolDirectory extends FSDirectory {
         }
 
         // Cache miss - read footer from disk (happens during file open before cache populated)
+        FileOpenTracker.trackOpen(file.toAbsolutePath().toString());
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
             EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedPath, channel, masterKeyBytes, encryptionMetadataCache);
 

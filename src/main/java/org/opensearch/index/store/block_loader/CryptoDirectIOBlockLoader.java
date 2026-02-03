@@ -28,6 +28,7 @@ import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.FileOpenTracker;
 import org.opensearch.index.store.pool.Pool;
 
 /**
@@ -89,6 +90,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         RefCountedMemorySegment[] result = new RefCountedMemorySegment[(int) blockCount];
         long readLength = blockCount << CACHE_BLOCK_SIZE_POWER;
 
+        FileOpenTracker.trackOpen(filePath.toAbsolutePath().toString());
         try (
             Arena arena = Arena.ofConfined();
             FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ, DirectIOReaderUtil.getDirectOpenOption())
@@ -183,6 +185,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         }
 
         // Cache miss - read from disk
+        FileOpenTracker.trackOpen(filePath.toAbsolutePath().toString());
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
             long fileSize = channel.size();
             if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
