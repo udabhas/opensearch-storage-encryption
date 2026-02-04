@@ -26,11 +26,7 @@ public class FileChannelCache {
         if (options == null || options.length == 0) {
             return pathKey;
         }
-        String optionsKey = Arrays.stream(options)
-                .map(Object::toString)
-                .sorted()
-                .reduce((a, b) -> a + "," + b)
-                .orElse("");
+        String optionsKey = Arrays.stream(options).map(Object::toString).sorted().reduce((a, b) -> a + "," + b).orElse("");
         return pathKey + "|" + optionsKey;
     }
 
@@ -60,7 +56,9 @@ public class FileChannelCache {
         String pathPrefix = path.toAbsolutePath().normalize().toString();
         CACHE.entrySet().removeIf(entry -> {
             if (entry.getKey().startsWith(pathPrefix)) {
-                try { entry.getValue().close(); } catch (IOException ignored) {}
+                try {
+                    entry.getValue().close();
+                } catch (IOException ignored) {}
                 return true;
             }
             return false;
@@ -69,7 +67,9 @@ public class FileChannelCache {
 
     public static void closeAll() {
         CACHE.forEach((k, v) -> {
-            try { v.close(); } catch (IOException ignored) {}
+            try {
+                v.close();
+            } catch (IOException ignored) {}
         });
         CACHE.clear();
     }

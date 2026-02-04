@@ -4,15 +4,13 @@
  */
 package org.opensearch.index.store.block_loader;
 
-import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.DIRECT_IO_ALIGNMENT;
-
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.file.Files;
 import java.nio.file.FileStore;
+import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -102,7 +100,8 @@ public class DirectIOReaderUtil {
      * @return a memory segment containing the read data
      * @throws IOException if the read operation fails
      */
-    public static MemorySegment directIOReadAligned(FileChannel channel, long offset, long length, Arena arena, int blockSize) throws IOException {
+    public static MemorySegment directIOReadAligned(FileChannel channel, long offset, long length, Arena arena, int blockSize)
+        throws IOException {
         int alignment = Math.max(blockSize, PanamaNativeAccess.getPageSize());
 
         // Require alignment to be a power of 2
@@ -173,7 +172,7 @@ public class DirectIOReaderUtil {
     public static boolean supportsDirectIO(Path path) throws IOException {
         FileStore store = Files.getFileStore(path);
         String fsType = store.type().toLowerCase();
-        
+
         // NFS-based filesystems report large block sizes that cause alignment errors
         // Common network filesystem types: nfs, nfs4, cifs, smb
         return !fsType.contains("nfs") && !fsType.contains("cifs") && !fsType.contains("smb");
