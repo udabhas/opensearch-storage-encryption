@@ -20,7 +20,7 @@ import com.github.benmanes.caffeine.cache.RemovalCause;
 
 public class FileChannelCache {
     private static final Logger LOGGER = LogManager.getLogger(FileChannelCache.class);
-    private static final int MAX_ENTRIES = 100_000;
+    private static final int MAX_ENTRIES = 10_000;
     private static final Duration EXPIRE_AFTER_ACCESS = Duration.ofMinutes(30);
 
     private static final Cache<String, FileChannel> CACHE = Caffeine
@@ -32,23 +32,16 @@ public class FileChannelCache {
                 try {
                     channel.close();
                 } catch (IOException ignored) {}
-                LOGGER.info("Evicted FileChannel for {} due to {}, cache size: {}", key, cause, CACHE.estimatedSize());
+                LOGGER.debug("Closed FileChannel for {} due to {}", key, cause);
             }
         })
         .build();
 
     public static FileChannel getOrOpen(Path path, OpenOption... options) {
         String key = path.toAbsolutePath().normalize().toString();
-        FileChannel channel = CACHE.getIfPresent(key);
-        if (channel != null && channel.isOpen()) {
-            LOGGER.debug("Cache hit for {}", key);
-            return channel;
-        }
-
         return CACHE.get(key, k -> {
             try {
                 FileOpenTracker.trackOpen(k);
-                LOGGER.info("Opening new FileChannel for {}, cache size: {}", k, CACHE.estimatedSize());
                 return FileChannel.open(path, options);
             } catch (IOException e) {
                 LOGGER.error("Failed to open FileChannel for path: {}", path, e);
@@ -59,12 +52,10 @@ public class FileChannelCache {
 
     public static void invalidate(Path path) {
         String key = path.toAbsolutePath().normalize().toString();
-        LOGGER.info("Invalidating FileChannel for {}", key);
         CACHE.invalidate(key);
     }
 
     public static void closeAll() {
-        LOGGER.info("Closing all FileChannels, cache size: {}", CACHE.estimatedSize());
         CACHE.invalidateAll();
     }
 
