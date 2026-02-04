@@ -42,7 +42,8 @@ import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
 import org.opensearch.index.store.read_ahead.Worker;
-import org.opensearch.index.store.read_ahead.impl.ReadaheadManagerImpl;
+import org.opensearch.index.store.read_ahead.impl.NoOpReadaheadContext;
+import org.opensearch.index.store.read_ahead.impl.NoOpReadaheadManager;
 
 /**
  * A high-performance FSDirectory implementation that combines Direct I/O operations with encryption.
@@ -131,8 +132,11 @@ public class BufferPoolDirectory extends FSDirectory {
             // Calculate content length with OSEF validation
             long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
 
-            ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker, blockCache);
-            ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
+            // ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker, blockCache);
+            // ReadaheadContext readAheadContext = readAheadManager.register(file, contentLength);
+            ReadaheadManager readAheadManager = NoOpReadaheadManager.INSTANCE;
+            ReadaheadContext readAheadContext = NoOpReadaheadContext.INSTANCE;
+
             BlockSlotTinyCache pinRegistry = new BlockSlotTinyCache(blockCache, file, contentLength);
 
             return CachedMemorySegmentIndexInput
