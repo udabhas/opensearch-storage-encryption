@@ -32,7 +32,7 @@ public class FileChannelCache {
                 try {
                     channel.close();
                 } catch (IOException ignored) {}
-                LOGGER.info("Evicted FileChannel for {} due to {}, cache size: {}", key, cause, CACHE.estimatedSize());
+                LOGGER.info("Evicted FileChannel for {} due to {}", key, cause);
             }
         })
         .build();
