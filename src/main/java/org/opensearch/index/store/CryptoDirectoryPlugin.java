@@ -236,7 +236,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         }
 
         FileOpenTracker.logStats();
-        LOGGER.info("FileChannelCache stats: {}", FileChannelCache.stats());
+        log.info("FileChannelCache stats: {}", FileChannelCache.stats());
         FileChannelCache.closeAll();
 
         MasterKeyHealthMonitor.shutdown();
