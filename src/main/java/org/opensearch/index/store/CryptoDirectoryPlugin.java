@@ -39,6 +39,7 @@ import org.opensearch.index.store.key.MasterKeyHealthMonitor;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.cache.FileChannelCache;
 import org.opensearch.index.store.metrics.FileOpenTracker;
 import org.opensearch.index.store.pool.PoolSizeCalculator;
 import org.opensearch.index.store.rest.RestGetIndexCountForKeyAction;
@@ -235,6 +236,8 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         }
 
         FileOpenTracker.logStats();
+        LOGGER.info("FileChannelCache stats: {}", FileChannelCache.stats());
+        FileChannelCache.closeAll();
 
         MasterKeyHealthMonitor.shutdown();
         // Close shared pool resources if they were initialized
