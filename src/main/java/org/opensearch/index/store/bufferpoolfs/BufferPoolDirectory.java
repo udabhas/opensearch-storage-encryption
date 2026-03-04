@@ -222,6 +222,8 @@ public class BufferPoolDirectory extends FSDirectory {
         if (blockCache != null) {
             blockCache.invalidateByPathPrefix(dirPath);
         }
+
+        FileChannelCache.invalidateDirectory(dirPath);
     }
 
     @Override
