@@ -34,7 +34,8 @@ public class FileChannelCache {
     private static final Logger LOGGER = LogManager.getLogger(FileChannelCache.class);
     private static final int MAX_ENTRIES = 100_000;
 
-    private static final Cache<String, FileChannel> CACHE = Caffeine.newBuilder()
+    private static final Cache<String, FileChannel> CACHE = Caffeine
+        .newBuilder()
         .maximumSize(MAX_ENTRIES)
         .recordStats()
         .removalListener((String key, FileChannel channel, RemovalCause cause) -> {
@@ -86,11 +87,7 @@ public class FileChannelCache {
      */
     public static void invalidate(Path path) {
         String pathPrefix = path.toAbsolutePath().normalize().toString();
-        List<String> keysToRemove = CACHE.asMap()
-            .keySet()
-            .stream()
-            .filter(k -> k.startsWith(pathPrefix))
-            .toList();
+        List<String> keysToRemove = CACHE.asMap().keySet().stream().filter(k -> k.startsWith(pathPrefix)).toList();
         if (!keysToRemove.isEmpty()) {
             CACHE.invalidateAll(keysToRemove);
         }
@@ -112,14 +109,15 @@ public class FileChannelCache {
      */
     public static String stats() {
         var s = CACHE.stats();
-        return String.format(
-            "FileChannelCache[size=%d, hits=%d, misses=%d, hitRate=%.2f%%, evictions=%d, avgLoadMs=%.2f]",
-            CACHE.estimatedSize(),
-            s.hitCount(),
-            s.missCount(),
-            s.hitRate() * 100,
-            s.evictionCount(),
-            s.averageLoadPenalty() / 1_000_000.0
-        );
+        return String
+            .format(
+                "FileChannelCache[size=%d, hits=%d, misses=%d, hitRate=%.2f%%, evictions=%d, avgLoadMs=%.2f]",
+                CACHE.estimatedSize(),
+                s.hitCount(),
+                s.missCount(),
+                s.hitRate() * 100,
+                s.evictionCount(),
+                s.averageLoadPenalty() / 1_000_000.0
+            );
     }
 }
