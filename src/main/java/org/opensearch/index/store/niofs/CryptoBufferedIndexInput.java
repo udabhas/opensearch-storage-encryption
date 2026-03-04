@@ -138,7 +138,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         // Channel is managed by FileChannelCache — do NOT close it here.
         // FileChannelCache closes channels on invalidate() (file deletion) and closeAll() (shutdown).
         if (!isClone) {
-            LOGGER.debug("close() called for file: {}", normalizedFilePath);
+            LOGGER.info("close() called for file: {}", normalizedFilePath);
         }
     }
 
