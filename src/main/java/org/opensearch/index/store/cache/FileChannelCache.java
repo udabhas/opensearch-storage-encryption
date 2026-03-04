@@ -40,11 +40,13 @@ public class FileChannelCache {
         .recordStats()
         .removalListener((String key, FileChannel channel, RemovalCause cause) -> {
             if (channel != null) {
+                boolean wasOpen = channel.isOpen();
                 try {
                     channel.close();
                 } catch (IOException e) {
                     LOGGER.warn("Failed to close FileChannel on {}: key={}", cause, key, e);
                 }
+                LOGGER.info("FileChannelCache removal: cause={}, wasOpen={}, key={}", cause, wasOpen, key);
             }
         })
         .build();
