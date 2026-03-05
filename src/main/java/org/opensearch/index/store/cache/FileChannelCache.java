@@ -37,8 +37,7 @@ import com.github.benmanes.caffeine.cache.RemovalCause;
 public class FileChannelCache {
     private static final Logger LOGGER = LogManager.getLogger(FileChannelCache.class);
     private static final int MAX_ENTRIES = 100_000;
-    // private static final Duration EXPIRE_AFTER_ACCESS = Duration.ofMinutes(10);
-    private static final Duration EXPIRE_AFTER_ACCESS = Duration.ofSeconds(10);
+    private static final Duration EXPIRE_AFTER_ACCESS = Duration.ofMinutes(10);
 
     /** Primary cache: cacheKey → FileChannel */
     private static final Cache<String, FileChannel> CACHE = Caffeine
