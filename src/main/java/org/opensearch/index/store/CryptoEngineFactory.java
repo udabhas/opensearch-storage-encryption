@@ -20,6 +20,8 @@ import org.opensearch.index.remote.RemoteTranslogTransferTracker;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.translog.CryptoTranslogFactory;
+import org.opensearch.index.engine.NRTReplicationEngine;
+import org.opensearch.index.translog.RemoteBlobStoreInternalTranslogFactory;
 
 /**
  * A factory that creates engines with crypto-enabled translogs for cryptofs indices.
@@ -46,12 +48,17 @@ public class CryptoEngineFactory implements EngineFactory {
             CryptoTranslogFactory cryptoTranslogFactory;
 
             if (isRemoteTranslogEnabled) {
+
+                 RemoteBlobStoreInternalTranslogFactory remoteFactory =
+                         (RemoteBlobStoreInternalTranslogFactory) config.getTranslogFactory();
+
                 cryptoTranslogFactory = new CryptoTranslogFactory(
                     keyResolver,
                     CryptoDirectoryPlugin.getRepositoriesServiceSupplier(),
                     config.getThreadPool(),
                     config.getIndexSettings().getRemoteStoreTranslogRepository(),
-                    new RemoteTranslogTransferTracker(config.getShardId(), 100),
+                    remoteFactory.getRemoteTranslogTransferTracker(),
+//                    new RemoteTranslogTransferTracker(config.getShardId(), 100),
                     CryptoDirectoryPlugin.getRemoteStoreSettings()
                 );
             } else {
@@ -64,6 +71,11 @@ public class CryptoEngineFactory implements EngineFactory {
                 .toBuilder()
                 .translogFactory(cryptoTranslogFactory)  // <- Replace with our crypto factory
                 .build();
+
+            // in case of replica only we use NRT Replication translog
+            if (cryptoConfig.isReadOnlyReplica()) {
+                return new NRTReplicationEngine(cryptoConfig);
+            }
 
             // Return the default engine with crypto-enabled translog
             return new InternalEngine(cryptoConfig);
