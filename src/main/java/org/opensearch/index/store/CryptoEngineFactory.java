@@ -20,8 +20,8 @@ import org.opensearch.index.remote.RemoteTranslogTransferTracker;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.translog.CryptoTranslogFactory;
-import org.opensearch.index.engine.NRTReplicationEngine;
 import org.opensearch.index.translog.RemoteBlobStoreInternalTranslogFactory;
+import org.opensearch.index.engine.NRTReplicationEngine;
 
 /**
  * A factory that creates engines with crypto-enabled translogs for cryptofs indices.
@@ -49,17 +49,19 @@ public class CryptoEngineFactory implements EngineFactory {
 
             if (isRemoteTranslogEnabled) {
 
-                 RemoteBlobStoreInternalTranslogFactory remoteFactory =
-                         (RemoteBlobStoreInternalTranslogFactory) config.getTranslogFactory();
-
+                RemoteTranslogTransferTracker tracker;
+                if(config.getTranslogFactory() instanceof RemoteBlobStoreInternalTranslogFactory remoteFactory) {
+                    tracker = remoteFactory.getRemoteTranslogTransferTracker();
+                } else {
+                    tracker = new RemoteTranslogTransferTracker(config.getShardId(), 100);
+                }
                 cryptoTranslogFactory = new CryptoTranslogFactory(
-                    keyResolver,
-                    CryptoDirectoryPlugin.getRepositoriesServiceSupplier(),
-                    config.getThreadPool(),
-                    config.getIndexSettings().getRemoteStoreTranslogRepository(),
-                    remoteFactory.getRemoteTranslogTransferTracker(),
-//                    new RemoteTranslogTransferTracker(config.getShardId(), 100),
-                    CryptoDirectoryPlugin.getRemoteStoreSettings()
+                        keyResolver,
+                        CryptoDirectoryPlugin.getRepositoriesServiceSupplier(),
+                        config.getThreadPool(),
+                        config.getIndexSettings().getRemoteStoreTranslogRepository(),
+                        tracker,
+                        CryptoDirectoryPlugin.getRemoteStoreSettings()
                 );
             } else {
                 cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
@@ -68,9 +70,14 @@ public class CryptoEngineFactory implements EngineFactory {
             // Create new engine config by copying all fields from existing config
             // but replace the translog factory with our crypto version
             EngineConfig cryptoConfig = config
-                .toBuilder()
-                .translogFactory(cryptoTranslogFactory)  // <- Replace with our crypto factory
-                .build();
+                    .toBuilder()
+                    .translogFactory(cryptoTranslogFactory)
+                    .build();
+
+            // in case of replica only we use NRT Replication translog
+            if (cryptoConfig.isReadOnlyReplica()) {
+                return new NRTReplicationEngine(cryptoConfig);
+            }
 
             // in case of replica only we use NRT Replication translog
             if (cryptoConfig.isReadOnlyReplica()) {
