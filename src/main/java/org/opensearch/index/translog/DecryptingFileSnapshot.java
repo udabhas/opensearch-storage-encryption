@@ -7,6 +7,7 @@ package org.opensearch.index.translog;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
+import java.util.zip.CRC32;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -26,6 +27,7 @@ public class DecryptingFileSnapshot extends FileSnapshot.TranslogFileSnapshot {
     private final KeyResolver keyResolver;
     private final String translogUUID;
     private final Long decryptedLength;
+    private final Long decryptedChecksum;
 
     /**
      * Creates a new DecryptingFileSnapshot wrapping the provided snapshot.
@@ -49,9 +51,11 @@ public class DecryptingFileSnapshot extends FileSnapshot.TranslogFileSnapshot {
         Path path = delegate.getPath();
 
         if (path != null && path.getFileName().toString().endsWith(".tlog")) {
-            // For encrypted (.tlog) files, count actual decrypted bytes
+            // For encrypted (.tlog) files, count actual decrypted bytes and compute checksum
             try {
-                this.decryptedLength = measureDecryptedSize(path);
+                long[] result = measureDecryptedSizeAndChecksum(path);
+                this.decryptedLength = result[0];
+                this.decryptedChecksum = result[1];
             } catch (Exception e) {
                 logger.error("Error measuring decrypted size for {}", path.getFileName(), e);
                 throw e;
@@ -59,31 +63,34 @@ public class DecryptingFileSnapshot extends FileSnapshot.TranslogFileSnapshot {
         } else {
             // For plaintext (.ckp) files, use actual size
             this.decryptedLength = delegate.getContentLength();
+            this.decryptedChecksum = delegate.getChecksum();
         }
     }
 
     /**
-     * Measure the actual decrypted size by reading through the entire file.
+     * Measure the actual decrypted size and compute CRC32 checksum by reading through the entire file.
      * 
      * @param path the path to the encrypted translog file
-     * @return the exact number of decrypted bytes
+     * @return array of [decryptedSize, crc32Checksum]
      * @throws IOException if file cannot be read or decryption fails
      */
-    private long measureDecryptedSize(Path path) throws IOException {
+    private long[] measureDecryptedSizeAndChecksum(Path path) throws IOException {
         long totalBytes = 0;
+        CRC32 crc32 = new CRC32();
         byte[] buffer = new byte[8192];
 
         try (CryptoDecryptingInputStream measuringStream = new CryptoDecryptingInputStream(path, keyResolver, translogUUID)) {
             int bytesRead;
             while ((bytesRead = measuringStream.read(buffer)) != -1) {
                 totalBytes += bytesRead;
+                crc32.update(buffer, 0, bytesRead);
             }
         } catch (Exception e) {
             logger.error("Error reading/decrypting file {}", path.getFileName(), e);
             throw e;
         }
 
-        return totalBytes;
+        return new long[] { totalBytes, crc32.getValue() };
     }
 
     /**
@@ -122,11 +129,11 @@ public class DecryptingFileSnapshot extends FileSnapshot.TranslogFileSnapshot {
     }
 
     /**
-     * Returns null checksum since decrypted content has different checksum than encrypted file.
-     **/
+     * Returns the CRC32 checksum of the decrypted content.
+     */
     @Override
     public Long getChecksum() {
-        return null;
+        return decryptedChecksum;
     }
 
     @Override
