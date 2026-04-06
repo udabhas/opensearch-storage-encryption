@@ -42,9 +42,9 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private static final int CHUNK_SIZE = 16_384;
 
     private final FileChannel channel;
-    private final boolean isClone;
+    private boolean isClone;
     private final long off;
-    private final long end;
+    private  long end;
     private final KeyResolver keyResolver;
     private final SecretKeySpec keySpec;
     private final byte[] masterKey;
@@ -140,7 +140,9 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     @Override
     public CryptoBufferedIndexInput clone() {
         CryptoBufferedIndexInput clone = (CryptoBufferedIndexInput) super.clone();
+        clone.isClone = true;
         clone.tmpBuffer = EMPTY_BYTEBUFFER;
+        end = off + length();
         return clone;
     }
 
