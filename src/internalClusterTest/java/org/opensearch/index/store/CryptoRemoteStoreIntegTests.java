@@ -6,6 +6,7 @@ package org.opensearch.index.store;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 
 import java.util.Collection;
 import java.util.stream.Collectors;
@@ -106,19 +107,45 @@ public class CryptoRemoteStoreIntegTests extends RemoteStoreBaseIntegTestCase {
             }
         });
 
-        // Verify remote store stats show successful uploads from primary
+        // Verify per-shard doc counts (equivalent to _cat/shards doc count check)
+        IndicesStatsResponse shardStats = client().admin().indices().prepareStats("test-crypto-rs").get();
+        long primaryDocs = -1;
+        long replicaDocs = -1;
+        for (var shard : shardStats.getShards()) {
+            long docs = shard.getStats().getDocs().getCount();
+            if (shard.getShardRouting().primary()) {
+                primaryDocs = docs;
+            } else {
+                replicaDocs = docs;
+            }
+        }
+        assertThat("Primary shard doc count", primaryDocs, equalTo((long) expectedDocs));
+        assertThat("Replica shard doc count", replicaDocs, equalTo((long) expectedDocs));
+        assertThat("Replica doc count should match primary", replicaDocs, equalTo(primaryDocs));
+
+        // Verify remote store stats: upload/download counts and bytes
         var remoteStoreStats = client().admin().cluster().prepareRemoteStoreStats("test-crypto-rs", "0").get();
         for (var remoteShard : remoteStoreStats.getRemoteStoreStats()) {
+            var segStats = remoteShard.getSegmentStats();
             if (remoteShard.getShardRouting().primary()) {
+                assertThat("Primary uploads started", segStats.totalUploadsStarted, greaterThan(0L));
+                assertThat("Primary uploads succeeded", segStats.totalUploadsSucceeded, greaterThan(0L));
                 assertThat(
-                    "Primary should have successful segment uploads",
-                    remoteShard.getSegmentStats().totalUploadsStarted,
-                    greaterThan(0L)
+                    "Primary uploads succeeded should equal started",
+                    segStats.totalUploadsSucceeded,
+                    greaterThanOrEqualTo(segStats.totalUploadsStarted)
                 );
+                assertThat("Primary upload failures", segStats.totalUploadsFailed, equalTo(0L));
+                assertThat("Primary upload bytes succeeded", segStats.uploadBytesSucceeded, greaterThan(0L));
             } else {
                 assertThat(
-                    "Replica should have successful segment downloads",
-                    remoteShard.getSegmentStats().directoryFileTransferTrackerStats.transferredBytesStarted,
+                    "Replica download bytes started",
+                    segStats.directoryFileTransferTrackerStats.transferredBytesStarted,
+                    greaterThan(0L)
+                );
+                assertThat(
+                    "Replica download bytes succeeded",
+                    segStats.directoryFileTransferTrackerStats.transferredBytesSucceeded,
                     greaterThan(0L)
                 );
             }
