@@ -96,12 +96,25 @@ public class DecryptingTransferSnapshot implements TransferSnapshot {
             if (snapshot instanceof TranslogFileSnapshot) {
                 TranslogFileSnapshot translogSnapshot = (TranslogFileSnapshot) snapshot;
                 java.nio.file.Path path = translogSnapshot.getPath();
+                logger.info("ILE DEBUG wrapTranslogSnapshots: file={}, size={}, isTranslogFileSnapshot=true",
+                    path.getFileName(), java.nio.file.Files.size(path));
 
                 // This writes authentication tags so the file can be decrypted during upload
+                logger.info("ILE DEBUG wrapTranslogSnapshots: BEFORE finalizeForPath {}", path.getFileName());
                 cryptoFactory.finalizeForPath(path);
+                logger.info("ILE DEBUG wrapTranslogSnapshots: AFTER finalizeForPath {}", path.getFileName());
 
-                wrapped.add(new DecryptingFileSnapshot(translogSnapshot, keyResolver, translogUUID));
+                logger.info("ILE DEBUG wrapTranslogSnapshots: BEFORE DecryptingFileSnapshot creation {}", path.getFileName());
+                try {
+                    DecryptingFileSnapshot dfs = new DecryptingFileSnapshot(translogSnapshot, keyResolver, translogUUID);
+                    wrapped.add(dfs);
+                    logger.info("ILE DEBUG wrapTranslogSnapshots: SUCCESS wrapping {}", path.getFileName());
+                } catch (Exception e) {
+                    logger.info("ILE DEBUG wrapTranslogSnapshots: FAILURE wrapping {}", path.getFileName(), e);
+                    throw e;
+                }
             } else {
+                logger.info("ILE DEBUG wrapTranslogSnapshots: file={}, isTranslogFileSnapshot=false", snapshot.getName());
                 wrapped.add(snapshot);
             }
         }

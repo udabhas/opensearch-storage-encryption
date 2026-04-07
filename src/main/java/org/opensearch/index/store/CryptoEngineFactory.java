@@ -9,6 +9,8 @@ import java.nio.file.Path;
 import java.security.Provider;
 import java.security.Security;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.opensearch.common.crypto.MasterKeyProvider;
@@ -27,6 +29,8 @@ import org.opensearch.index.translog.RemoteBlobStoreInternalTranslogFactory;
  * A factory that creates engines with crypto-enabled translogs for cryptofs indices.
  */
 public class CryptoEngineFactory implements EngineFactory {
+    private static final Logger logger = LogManager.getLogger(CryptoEngineFactory.class);
+
     /**
      * Default constructor.
      */
@@ -39,12 +43,18 @@ public class CryptoEngineFactory implements EngineFactory {
     public Engine newReadWriteEngine(EngineConfig config) {
 
         try {
+            boolean isRemoteTranslogEnabled = config.getIndexSettings().isRemoteTranslogStoreEnabled();
+            logger.info("ILE DEBUG CryptoEngineFactory.newReadWriteEngine: shard={}, index={}, isRemoteTranslog={}, isReadOnlyReplica={}, existingTranslogFactory={}, downloadRemoteTranslogOnInit={}",
+                config.getShardId(), config.getIndexSettings().getIndex().getName(), isRemoteTranslogEnabled, config.isReadOnlyReplica(),
+                config.getTranslogFactory() != null ? config.getTranslogFactory().getClass().getSimpleName() : "null",
+                config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null"));
+            logger.info("ILE DEBUG CryptoEngineFactory.newReadWriteEngine stack trace", new Exception("ILE DEBUG stack trace"));
+
             // Create a separate KeyResolver for translog encryption
             KeyResolver keyResolver = createTranslogKeyResolver(config);
+            logger.info("ILE DEBUG CryptoEngineFactory keyResolver created, keyLen={}", keyResolver.getKey().length);
 
             // Check if remote translog is enabled
-            boolean isRemoteTranslogEnabled = config.getIndexSettings().isRemoteTranslogStoreEnabled();
-
             CryptoTranslogFactory cryptoTranslogFactory;
 
             if (isRemoteTranslogEnabled) {
@@ -66,6 +76,7 @@ public class CryptoEngineFactory implements EngineFactory {
             } else {
                 cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
             }
+            logger.info("ILE DEBUG CryptoEngineFactory created CryptoTranslogFactory, mode={}", isRemoteTranslogEnabled ? "REMOTE" : "LOCAL");
 
             // Create new engine config by copying all fields from existing config
             // but replace the translog factory with our crypto version

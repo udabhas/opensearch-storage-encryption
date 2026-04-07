@@ -10,6 +10,8 @@ import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.index.remote.RemoteTranslogTransferTracker;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.indices.RemoteStoreSettings;
@@ -29,6 +31,8 @@ import org.opensearch.threadpool.ThreadPool;
  * - When remote store is enabled: creates CryptoRemoteFsTranslog (with remote sync)
  */
 public class CryptoTranslogFactory implements TranslogFactory {
+
+    private static final Logger logger = LogManager.getLogger(CryptoTranslogFactory.class);
 
     private final KeyResolver keyResolver;
     private final Repository repository;
@@ -120,6 +124,9 @@ public class CryptoTranslogFactory implements TranslogFactory {
 
         // Check if remote translog is enabled
         boolean isRemoteTranslogEnabled = config.getIndexSettings().isRemoteTranslogStoreEnabled();
+        logger.info("ILE DEBUG CryptoTranslogFactory.newTranslog: isRemoteTranslogEnabled={}, repoType={}, translogUUID={}, translogPath={}, downloadRemoteTranslogOnInit={}",
+            isRemoteTranslogEnabled, repository != null ? repository.getClass().getSimpleName() : "null", translogUUID,
+            config.getTranslogPath(), config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null"));
 
         if (isRemoteTranslogEnabled && repository != null) {
             // Create remote translog with encryption

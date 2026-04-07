@@ -10,6 +10,11 @@ import static org.opensearch.index.remote.RemoteStoreEnums.DataType.METADATA;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
@@ -71,13 +76,22 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             remoteTranslogTransferTracker,
             remoteStoreSettings,
             translogOperationHelper,
-            createCryptoChannelFactory(keyResolver, translogUUID),
+            logAndCreateFactory(config, translogUUID, keyResolver),
             true // isServerSideEncryptionEnabled
         );
 
         this.keyResolver = keyResolver;
         this.translogUUID = translogUUID;
         this.cryptoFactory = (CryptoChannelFactory) this.channelFactory;
+
+        // ILE DEBUG: after super() returns
+        logger.info("ILE DEBUG CryptoRemoteFsTranslog AFTER super() files on disk: {}", listFilesWithSizes(config.getTranslogPath()));
+        try (DirectoryStream<java.nio.file.Path> stream = Files.newDirectoryStream(config.getTranslogPath(), "*.tlog")) {
+            for (java.nio.file.Path p : stream) {
+                logger.info("ILE DEBUG CryptoRemoteFsTranslog hex dump {}: {}", p.getFileName(), hexDumpFirst64(p));
+            }
+        } catch (Exception e) { logger.warn("ILE DEBUG hex dump failed", e); }
+        logger.info("ILE DEBUG CryptoRemoteFsTranslog readers.size={}, current.generation={}", readers.size(), current.getGeneration());
 
         try {
             TranslogTransferManager decryptingManager = createDecryptingTranslogTransferManager(
@@ -98,6 +112,7 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             Field transferManagerField = RemoteFsTranslog.class.getDeclaredField("translogTransferManager");
             transferManagerField.setAccessible(true);
             transferManagerField.set(this, decryptingManager);
+            logger.info("ILE DEBUG CryptoRemoteFsTranslog reflection replacement of translogTransferManager succeeded");
         } catch (Exception e) {
             logger.error("Failed to replace TranslogTransferManager with decrypting version", e);
             throw new IOException("Failed to initialize decrypt-before-upload capability", e);
@@ -163,6 +178,35 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             translogUUID,
             cryptoFactory
         );
+    }
+
+    private static String listFilesWithSizes(java.nio.file.Path dir) {
+        StringBuilder sb = new StringBuilder();
+        try (DirectoryStream<java.nio.file.Path> stream = Files.newDirectoryStream(dir)) {
+            for (java.nio.file.Path p : stream) {
+                sb.append(p.getFileName()).append("=").append(Files.size(p)).append(" ");
+            }
+        } catch (Exception e) { sb.append("ERROR: ").append(e.getMessage()); }
+        return sb.toString();
+    }
+
+    private static String hexDumpFirst64(java.nio.file.Path file) {
+        try (FileChannel fc = FileChannel.open(file, StandardOpenOption.READ)) {
+            int toRead = (int) Math.min(64, fc.size());
+            ByteBuffer buf = ByteBuffer.allocate(toRead);
+            fc.read(buf);
+            buf.flip();
+            StringBuilder sb = new StringBuilder();
+            while (buf.hasRemaining()) sb.append(String.format("%02x", buf.get()));
+            return sb.toString();
+        } catch (Exception e) { return "ERROR: " + e.getMessage(); }
+    }
+
+    private static CryptoChannelFactory logAndCreateFactory(TranslogConfig config, String translogUUID, KeyResolver keyResolver) throws IOException {
+        logger.info("ILE DEBUG CryptoRemoteFsTranslog constructor: translogUUID={}, downloadRemoteTranslogOnInit={}, keyLen={}",
+            translogUUID, config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null"), keyResolver.getKey().length);
+        logger.info("ILE DEBUG CryptoRemoteFsTranslog BEFORE super() files on disk: {}", listFilesWithSizes(config.getTranslogPath()));
+        return createCryptoChannelFactory(keyResolver, translogUUID);
     }
 
     /**

@@ -49,6 +49,8 @@ public class DecryptingFileSnapshot extends FileSnapshot.TranslogFileSnapshot {
         this.keyResolver = keyResolver;
         this.translogUUID = translogUUID;
         Path path = delegate.getPath();
+        logger.info("ILE DEBUG DecryptingFileSnapshot constructor: path={}, fileSize={}", path != null ? path.getFileName() : "null",
+            path != null ? java.nio.file.Files.size(path) : -1);
 
         if (path != null && path.getFileName().toString().endsWith(".tlog")) {
             // For encrypted (.tlog) files, count actual decrypted bytes and compute checksum
@@ -75,6 +77,7 @@ public class DecryptingFileSnapshot extends FileSnapshot.TranslogFileSnapshot {
      * @throws IOException if file cannot be read or decryption fails
      */
     private long[] measureDecryptedSizeAndChecksum(Path path) throws IOException {
+        long encryptedSize = java.nio.file.Files.size(path);
         long totalBytes = 0;
         CRC32 crc32 = new CRC32();
         byte[] buffer = new byte[8192];
@@ -90,6 +93,7 @@ public class DecryptingFileSnapshot extends FileSnapshot.TranslogFileSnapshot {
             throw e;
         }
 
+        logger.info("ILE DEBUG measureDecryptedSizeAndChecksum: path={}, encryptedSize={}, decryptedSize={}", path.getFileName(), encryptedSize, totalBytes);
         return new long[] { totalBytes, crc32.getValue() };
     }
 
@@ -105,8 +109,20 @@ public class DecryptingFileSnapshot extends FileSnapshot.TranslogFileSnapshot {
         Path path = delegate.getPath();
 
         if (path != null && path.getFileName().toString().endsWith(".tlog")) {
-            return new CryptoDecryptingInputStream(path, keyResolver, translogUUID);
+            logger.info("ILE DEBUG DecryptingFileSnapshot.inputStream: path={}, returning DECRYPTING stream", path.getFileName());
+            CryptoDecryptingInputStream dis = new CryptoDecryptingInputStream(path, keyResolver, translogUUID);
+            // Log first 16 bytes hex
+            byte[] peek = new byte[16];
+            int n = dis.read(peek);
+            if (n > 0) {
+                StringBuilder hex = new StringBuilder();
+                for (int i = 0; i < n; i++) hex.append(String.format("%02x", peek[i]));
+                logger.info("ILE DEBUG DecryptingFileSnapshot.inputStream first {} bytes hex: {}", n, hex);
+            }
+            // We need to return a stream that includes those bytes, so wrap
+            return new java.io.SequenceInputStream(new java.io.ByteArrayInputStream(peek, 0, Math.max(n, 0)), dis);
         } else {
+            logger.info("ILE DEBUG DecryptingFileSnapshot.inputStream: path={}, returning PASSTHROUGH stream", path != null ? path.getFileName() : "null");
             // .ckp files are not encrypted, return normal stream
             return delegate.inputStream();
         }

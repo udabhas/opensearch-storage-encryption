@@ -13,6 +13,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Set;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -26,10 +28,13 @@ import org.opensearch.index.store.key.KeyResolver;
  */
 public class CryptoDecryptingInputStream extends InputStream {
 
+    private static final Logger logger = LogManager.getLogger(CryptoDecryptingInputStream.class);
+
     private final FileChannel encryptedChannel;
     private final CryptoFileChannelWrapper decryptingChannel;
     private final ByteBuffer buffer;
     private boolean eof = false;
+    private boolean firstRead = true;
 
     /**
      * Creates a new CryptoDecryptingInputStream for the specified encrypted file.
@@ -40,6 +45,8 @@ public class CryptoDecryptingInputStream extends InputStream {
      * @throws IOException if the file cannot be opened or decryption setup fails
      */
     public CryptoDecryptingInputStream(Path filePath, KeyResolver keyResolver, String translogUUID) throws IOException {
+        logger.info("ILE DEBUG CryptoDecryptingInputStream constructor: path={}, fileSize={}, keyLen={}",
+            filePath.getFileName(), java.nio.file.Files.size(filePath), keyResolver.getKey().length);
         Set<OpenOption> openOptions = Set.of(StandardOpenOption.READ);
         this.encryptedChannel = FileChannel.open(filePath, StandardOpenOption.READ);
 
@@ -99,6 +106,16 @@ public class CryptoDecryptingInputStream extends InputStream {
             }
 
             buffer.flip();
+            if (firstRead && buffer.remaining() >= 16) {
+                firstRead = false;
+                int pos = buffer.position();
+                byte[] peek = new byte[16];
+                buffer.get(peek);
+                buffer.position(pos);
+                StringBuilder hex = new StringBuilder();
+                for (byte b2 : peek) hex.append(String.format("%02x", b2));
+                logger.info("ILE DEBUG CryptoDecryptingInputStream first 16 bytes: {}", hex);
+            }
         }
         return buffer.remaining();
     }

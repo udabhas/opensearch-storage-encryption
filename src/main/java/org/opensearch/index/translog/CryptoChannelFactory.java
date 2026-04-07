@@ -11,7 +11,10 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -31,6 +34,8 @@ import org.opensearch.index.store.key.KeyResolver;
  * @opensearch.internal
  */
 public class CryptoChannelFactory implements ChannelFactory {
+
+    private static final Logger logger = LogManager.getLogger(CryptoChannelFactory.class);
 
     private final KeyResolver keyResolver;
     private final String translogUUID;
@@ -55,10 +60,12 @@ public class CryptoChannelFactory implements ChannelFactory {
         FileChannel baseChannel = FileChannel.open(path, options);
 
         if (!path.getFileName().toString().endsWith(".tlog")) {
+            logger.info("ILE DEBUG CryptoChannelFactory.open: path={}, options={}, PASSTHROUGH, size={}", path.getFileName(), Set.of(options), baseChannel.size());
             return baseChannel;
         }
 
         Set<OpenOption> optionsSet = Set.of(options);
+        logger.info("ILE DEBUG CryptoChannelFactory.open: path={}, options={}, CRYPTO wrap, size={}", path.getFileName(), optionsSet, baseChannel.size());
         CryptoFileChannelWrapper wrapper = new CryptoFileChannelWrapper(baseChannel, keyResolver, path, optionsSet, translogUUID);
 
         // Track wrapper by path for later finalization
@@ -80,6 +87,8 @@ public class CryptoChannelFactory implements ChannelFactory {
      */
     public void finalizeForPath(Path path) throws IOException {
         CryptoFileChannelWrapper wrapper = wrappers.get(path);
+        logger.info("ILE DEBUG CryptoChannelFactory.finalizeForPath: path={}, found={}, mapSize={}, keys={}",
+            path.getFileName(), wrapper != null, wrappers.size(), wrappers.keySet().stream().map(p -> p.getFileName().toString()).collect(Collectors.joining(",")));
         if (wrapper != null) {
             wrapper.getChunkManager().close();
         }

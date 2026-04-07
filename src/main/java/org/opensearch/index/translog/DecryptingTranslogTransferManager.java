@@ -6,6 +6,8 @@ package org.opensearch.index.translog;
 
 import java.io.IOException;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.metadata.CryptoMetadata;
 import org.opensearch.common.blobstore.BlobPath;
 import org.opensearch.core.index.shard.ShardId;
@@ -27,6 +29,8 @@ import org.opensearch.indices.RemoteStoreSettings;
  * @opensearch.internal
  */
 public class DecryptingTranslogTransferManager extends TranslogTransferManager {
+
+    private static final Logger logger = LogManager.getLogger(DecryptingTranslogTransferManager.class);
 
     private final KeyResolver keyResolver;
     private final String translogUUID;
@@ -90,6 +94,8 @@ public class DecryptingTranslogTransferManager extends TranslogTransferManager {
         TranslogTransferListener translogTransferListener,
         CryptoMetadata cryptoMetadata
     ) throws IOException {
+        logger.info("ILE DEBUG DecryptingTranslogTransferManager.transferSnapshot called, snapshot={}, translogFiles={}",
+            transferSnapshot.getClass().getSimpleName(), transferSnapshot.getTranslogFileSnapshots().size());
         TransferSnapshot decryptingSnapshot = new DecryptingTransferSnapshot(transferSnapshot, keyResolver, translogUUID, cryptoFactory);
 
         // Call parent with decryption wrapper
