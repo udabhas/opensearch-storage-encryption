@@ -52,7 +52,7 @@ public class CryptoEngineFactory implements EngineFactory {
 
             // Create a separate KeyResolver for translog encryption
             KeyResolver keyResolver = createTranslogKeyResolver(config);
-            logger.info("ILE DEBUG CryptoEngineFactory keyResolver created, keyLen={}", keyResolver.getKey().length);
+            logger.info("ILE DEBUG CryptoEngineFactory keyResolver created, key={}", keyResolver.getDataKey());
 
             // Check if remote translog is enabled
             CryptoTranslogFactory cryptoTranslogFactory;

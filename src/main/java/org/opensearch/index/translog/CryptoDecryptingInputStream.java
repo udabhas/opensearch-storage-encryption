@@ -45,8 +45,8 @@ public class CryptoDecryptingInputStream extends InputStream {
      * @throws IOException if the file cannot be opened or decryption setup fails
      */
     public CryptoDecryptingInputStream(Path filePath, KeyResolver keyResolver, String translogUUID) throws IOException {
-        logger.info("ILE DEBUG CryptoDecryptingInputStream constructor: path={}, fileSize={}, keyLen={}",
-            filePath.getFileName(), java.nio.file.Files.size(filePath), keyResolver.getKey().length);
+        logger.info("ILE DEBUG CryptoDecryptingInputStream constructor: path={}, fileSize={}, key={}",
+            filePath.getFileName(), java.nio.file.Files.size(filePath), keyResolver.getDataKey());
         Set<OpenOption> openOptions = Set.of(StandardOpenOption.READ);
         this.encryptedChannel = FileChannel.open(filePath, StandardOpenOption.READ);
 

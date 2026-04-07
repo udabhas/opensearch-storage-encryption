@@ -203,8 +203,8 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
     }
 
     private static CryptoChannelFactory logAndCreateFactory(TranslogConfig config, String translogUUID, KeyResolver keyResolver) throws IOException {
-        logger.info("ILE DEBUG CryptoRemoteFsTranslog constructor: translogUUID={}, downloadRemoteTranslogOnInit={}, keyLen={}",
-            translogUUID, config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null"), keyResolver.getKey().length);
+        logger.info("ILE DEBUG CryptoRemoteFsTranslog constructor: translogUUID={}, downloadRemoteTranslogOnInit={}, key={}",
+            translogUUID, config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null"), keyResolver.getDataKey());
         logger.info("ILE DEBUG CryptoRemoteFsTranslog BEFORE super() files on disk: {}", listFilesWithSizes(config.getTranslogPath()));
         return createCryptoChannelFactory(keyResolver, translogUUID);
     }
