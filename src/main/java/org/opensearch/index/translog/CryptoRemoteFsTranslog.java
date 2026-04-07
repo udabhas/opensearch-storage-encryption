@@ -219,11 +219,25 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
                 byte[] header = java.util.Arrays.copyOf(plainBytes, headerSize);
                 byte[] data = java.util.Arrays.copyOfRange(plainBytes, headerSize, plainBytes.length);
 
-                // Encrypt the data portion using the same IV derivation as TranslogChunkManager
+                // Check if file is already encrypted by attempting decryption.
+                // If decryption succeeds, the file is already encrypted → skip.
+                // If it fails (AEADBadTagException), the file is plaintext → re-encrypt.
                 byte[] baseIV = org.opensearch.index.store.key.HkdfKeyDerivation.deriveTranslogBaseIV(
                     keyResolver.getDataKey().getEncoded(), translogUUID
                 );
                 byte[] chunkIV = org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted(baseIV, 0);
+
+                try {
+                    org.opensearch.index.store.cipher.AesGcmCipherFactory.decryptWithTag(keyResolver.getDataKey(), chunkIV, data);
+                    // Decryption succeeded → file is already encrypted with current key, skip
+                    logger.info("ILE DEBUG reEncrypt: skipping {} (already encrypted, size={})", name, fileSize);
+                    continue;
+                } catch (org.opensearch.index.store.cipher.AesGcmCipherFactory.JavaCryptoException e) {
+                    // Decryption failed → file is plaintext, proceed with re-encryption
+                    logger.info("ILE DEBUG reEncrypt: {} is plaintext (decrypt failed), will re-encrypt", name);
+                }
+
+                // Encrypt the data portion (IV already derived above)
                 byte[] encrypted;
                 try {
                     encrypted = org.opensearch.index.store.cipher.AesGcmCipherFactory.encryptWithTag(
