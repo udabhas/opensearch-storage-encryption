@@ -93,6 +93,14 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
         } catch (Exception e) { logger.warn("ILE DEBUG hex dump failed", e); }
         logger.info("ILE DEBUG CryptoRemoteFsTranslog readers.size={}, current.generation={}", readers.size(), current.getGeneration());
 
+        // Re-encrypt downloaded plaintext translog files with the new key.
+        // After remote store restore, S3 has plaintext translog data (AES-GCM was stripped
+        // during upload by DecryptingTranslogTransferManager). The download writes these raw
+        // plaintext bytes to disk. But CryptoChannelFactory expects AES-GCM encrypted files
+        // on disk. We re-encrypt old generation files so the decrypt-before-upload path works
+        // and the encryption-at-rest invariant is maintained.
+        reEncryptDownloadedTranslogFiles(config.getTranslogPath(), current.getGeneration());
+
         try {
             TranslogTransferManager decryptingManager = createDecryptingTranslogTransferManager(
                 blobStoreRepository,
@@ -178,6 +186,68 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             translogUUID,
             cryptoFactory
         );
+    }
+
+    /**
+     * Re-encrypts downloaded plaintext translog files with the current key.
+     * Only processes old generation .tlog files (not the current writer).
+     * Files that are already encrypted (size doesn't match plaintext expectations) are skipped.
+     */
+    private void reEncryptDownloadedTranslogFiles(java.nio.file.Path translogDir, long currentGeneration) {
+        try (DirectoryStream<java.nio.file.Path> stream = Files.newDirectoryStream(translogDir, "*.tlog")) {
+            for (java.nio.file.Path file : stream) {
+                String name = file.getFileName().toString();
+                // Extract generation number from filename like "translog-4.tlog"
+                String genStr = name.replace("translog-", "").replace(".tlog", "");
+                long gen;
+                try { gen = Long.parseLong(genStr); } catch (NumberFormatException e) { continue; }
+
+                // Skip current writer generation (already created encrypted by CryptoChannelFactory)
+                if (gen >= currentGeneration) continue;
+
+                long fileSize = Files.size(file);
+                int headerSize = TranslogChunkManager.calculateTranslogHeaderSizeStatic(translogUUID);
+
+                // Skip header-only files (no data to re-encrypt)
+                if (fileSize <= headerSize) {
+                    logger.info("ILE DEBUG reEncrypt: skipping {} (header-only, size={})", name, fileSize);
+                    continue;
+                }
+
+                // Read the entire plaintext file
+                byte[] plainBytes = Files.readAllBytes(file);
+                byte[] header = java.util.Arrays.copyOf(plainBytes, headerSize);
+                byte[] data = java.util.Arrays.copyOfRange(plainBytes, headerSize, plainBytes.length);
+
+                // Encrypt the data portion using the same IV derivation as TranslogChunkManager
+                byte[] baseIV = org.opensearch.index.store.key.HkdfKeyDerivation.deriveTranslogBaseIV(
+                    keyResolver.getDataKey().getEncoded(), translogUUID
+                );
+                byte[] chunkIV = org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted(baseIV, 0);
+                byte[] encrypted;
+                try {
+                    encrypted = org.opensearch.index.store.cipher.AesGcmCipherFactory.encryptWithTag(
+                        keyResolver.getDataKey(), chunkIV, data, data.length
+                    );
+                } catch (org.opensearch.index.store.cipher.AesGcmCipherFactory.JavaCryptoException e) {
+                    throw new IOException("Failed to encrypt translog data for " + name, e);
+                }
+
+                // Write header + encrypted data back to file
+                java.nio.file.Path tempFile = file.resolveSibling(name + ".tmp");
+                try (FileChannel out = FileChannel.open(tempFile,
+                        StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                    out.write(ByteBuffer.wrap(header));
+                    out.write(ByteBuffer.wrap(encrypted));
+                }
+                Files.move(tempFile, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+
+                logger.info("ILE DEBUG reEncrypt: re-encrypted {} (plaintext={}B → encrypted={}B)",
+                    name, fileSize, headerSize + encrypted.length);
+            }
+        } catch (Exception e) {
+            logger.error("ILE DEBUG reEncrypt: failed to re-encrypt translog files", e);
+        }
     }
 
     private static String listFilesWithSizes(java.nio.file.Path dir) {

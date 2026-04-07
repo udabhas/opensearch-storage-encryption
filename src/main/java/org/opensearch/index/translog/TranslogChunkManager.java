@@ -133,6 +133,13 @@ public class TranslogChunkManager {
     }
 
     /**
+     * Static version of calculateTranslogHeaderSize for use outside of TranslogChunkManager instances.
+     */
+    public static int calculateTranslogHeaderSizeStatic(String translogUUID) {
+        return calculateTranslogHeaderSize(translogUUID);
+    }
+
+    /**
      * Local implementation of TranslogHeader.headerSizeInBytes() to avoid cross-classloader access issues.
      * This replicates the exact same calculation as the original method.
      *
