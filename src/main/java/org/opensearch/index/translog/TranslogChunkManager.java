@@ -289,9 +289,17 @@ public class TranslogChunkManager {
 
         int headerSize = determineHeaderSize();
 
-        // Header reads remain unchanged
+        // Header reads: limit to only header bytes so the next sequential read
+        // enters the chunk decryption path. Without this limit, a large buffer
+        // (e.g. 8192 bytes from CryptoDecryptingInputStream) would read past the
+        // header into encrypted data via the raw delegate, bypassing decryption.
         if (position < headerSize) {
-            return delegate.read(dst, position);
+            int headerRemaining = (int) (headerSize - position);
+            int originalLimit = dst.limit();
+            dst.limit(dst.position() + Math.min(dst.remaining(), headerRemaining));
+            int bytesRead = delegate.read(dst, position);
+            dst.limit(originalLimit);
+            return bytesRead;
         }
 
         // Chunk-based reading for encrypted data
