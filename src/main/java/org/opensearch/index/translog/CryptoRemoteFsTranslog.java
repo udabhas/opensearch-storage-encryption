@@ -90,7 +90,9 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             for (java.nio.file.Path p : stream) {
                 logger.info("ILE DEBUG CryptoRemoteFsTranslog hex dump {}: {}", p.getFileName(), hexDumpFirst64(p));
             }
-        } catch (Exception e) { logger.warn("ILE DEBUG hex dump failed", e); }
+        } catch (Exception e) {
+            logger.warn("ILE DEBUG hex dump failed", e);
+        }
         logger.info("ILE DEBUG CryptoRemoteFsTranslog readers.size={}, current.generation={}", readers.size(), current.getGeneration());
 
         // Re-encrypt downloaded plaintext translog files with the new key.
@@ -200,10 +202,15 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
                 // Extract generation number from filename like "translog-4.tlog"
                 String genStr = name.replace("translog-", "").replace(".tlog", "");
                 long gen;
-                try { gen = Long.parseLong(genStr); } catch (NumberFormatException e) { continue; }
+                try {
+                    gen = Long.parseLong(genStr);
+                } catch (NumberFormatException e) {
+                    continue;
+                }
 
                 // Skip current writer generation (already created encrypted by CryptoChannelFactory)
-                if (gen >= currentGeneration) continue;
+                if (gen >= currentGeneration)
+                    continue;
 
                 long fileSize = Files.size(file);
                 int headerSize = TranslogChunkManager.calculateTranslogHeaderSizeStatic(translogUUID);
@@ -222,9 +229,8 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
                 // Check if file is already encrypted by attempting decryption.
                 // If decryption succeeds, the file is already encrypted → skip.
                 // If it fails (AEADBadTagException), the file is plaintext → re-encrypt.
-                byte[] baseIV = org.opensearch.index.store.key.HkdfKeyDerivation.deriveTranslogBaseIV(
-                    keyResolver.getDataKey().getEncoded(), translogUUID
-                );
+                byte[] baseIV = org.opensearch.index.store.key.HkdfKeyDerivation
+                    .deriveTranslogBaseIV(keyResolver.getDataKey().getEncoded(), translogUUID);
                 byte[] chunkIV = org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted(baseIV, 0);
 
                 try {
@@ -240,24 +246,30 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
                 // Encrypt the data portion (IV already derived above)
                 byte[] encrypted;
                 try {
-                    encrypted = org.opensearch.index.store.cipher.AesGcmCipherFactory.encryptWithTag(
-                        keyResolver.getDataKey(), chunkIV, data, data.length
-                    );
+                    encrypted = org.opensearch.index.store.cipher.AesGcmCipherFactory
+                        .encryptWithTag(keyResolver.getDataKey(), chunkIV, data, data.length);
                 } catch (org.opensearch.index.store.cipher.AesGcmCipherFactory.JavaCryptoException e) {
                     throw new IOException("Failed to encrypt translog data for " + name, e);
                 }
 
                 // Write header + encrypted data back to file
                 java.nio.file.Path tempFile = file.resolveSibling(name + ".tmp");
-                try (FileChannel out = FileChannel.open(tempFile,
-                        StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                try (
+                    FileChannel out = FileChannel
+                        .open(tempFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+                ) {
                     out.write(ByteBuffer.wrap(header));
                     out.write(ByteBuffer.wrap(encrypted));
                 }
                 Files.move(tempFile, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
 
-                logger.info("ILE DEBUG reEncrypt: re-encrypted {} (plaintext={}B → encrypted={}B)",
-                    name, fileSize, headerSize + encrypted.length);
+                logger
+                    .info(
+                        "ILE DEBUG reEncrypt: re-encrypted {} (plaintext={}B → encrypted={}B)",
+                        name,
+                        fileSize,
+                        headerSize + encrypted.length
+                    );
             }
         } catch (Exception e) {
             logger.error("ILE DEBUG reEncrypt: failed to re-encrypt translog files", e);
@@ -270,7 +282,9 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             for (java.nio.file.Path p : stream) {
                 sb.append(p.getFileName()).append("=").append(Files.size(p)).append(" ");
             }
-        } catch (Exception e) { sb.append("ERROR: ").append(e.getMessage()); }
+        } catch (Exception e) {
+            sb.append("ERROR: ").append(e.getMessage());
+        }
         return sb.toString();
     }
 
@@ -281,14 +295,23 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             fc.read(buf);
             buf.flip();
             StringBuilder sb = new StringBuilder();
-            while (buf.hasRemaining()) sb.append(String.format("%02x", buf.get()));
+            while (buf.hasRemaining())
+                sb.append(String.format("%02x", buf.get()));
             return sb.toString();
-        } catch (Exception e) { return "ERROR: " + e.getMessage(); }
+        } catch (Exception e) {
+            return "ERROR: " + e.getMessage();
+        }
     }
 
-    private static CryptoChannelFactory logAndCreateFactory(TranslogConfig config, String translogUUID, KeyResolver keyResolver) throws IOException {
-        logger.info("ILE DEBUG CryptoRemoteFsTranslog constructor: translogUUID={}, downloadRemoteTranslogOnInit={}, key={}",
-            translogUUID, config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null"), keyResolver.getDataKey());
+    private static CryptoChannelFactory logAndCreateFactory(TranslogConfig config, String translogUUID, KeyResolver keyResolver)
+        throws IOException {
+        logger
+            .info(
+                "ILE DEBUG CryptoRemoteFsTranslog constructor: translogUUID={}, downloadRemoteTranslogOnInit={}, key={}",
+                translogUUID,
+                config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null"),
+                keyResolver.getDataKey()
+            );
         logger.info("ILE DEBUG CryptoRemoteFsTranslog BEFORE super() files on disk: {}", listFilesWithSizes(config.getTranslogPath()));
         return createCryptoChannelFactory(keyResolver, translogUUID);
     }

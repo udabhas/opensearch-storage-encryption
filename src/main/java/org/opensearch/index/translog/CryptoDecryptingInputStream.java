@@ -45,8 +45,13 @@ public class CryptoDecryptingInputStream extends InputStream {
      * @throws IOException if the file cannot be opened or decryption setup fails
      */
     public CryptoDecryptingInputStream(Path filePath, KeyResolver keyResolver, String translogUUID) throws IOException {
-        logger.info("ILE DEBUG CryptoDecryptingInputStream constructor: path={}, fileSize={}, key={}",
-            filePath.getFileName(), java.nio.file.Files.size(filePath), keyResolver.getDataKey());
+        logger
+            .info(
+                "ILE DEBUG CryptoDecryptingInputStream constructor: path={}, fileSize={}, key={}",
+                filePath.getFileName(),
+                java.nio.file.Files.size(filePath),
+                keyResolver.getDataKey()
+            );
         Set<OpenOption> openOptions = Set.of(StandardOpenOption.READ);
         this.encryptedChannel = FileChannel.open(filePath, StandardOpenOption.READ);
 
@@ -113,7 +118,8 @@ public class CryptoDecryptingInputStream extends InputStream {
                 buffer.get(peek);
                 buffer.position(pos);
                 StringBuilder hex = new StringBuilder();
-                for (byte b2 : peek) hex.append(String.format("%02x", b2));
+                for (byte b2 : peek)
+                    hex.append(String.format("%02x", b2));
                 logger.info("ILE DEBUG CryptoDecryptingInputStream first 16 bytes: {}", hex);
             }
         }

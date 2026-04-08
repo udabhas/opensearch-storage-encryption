@@ -44,10 +44,16 @@ public class CryptoEngineFactory implements EngineFactory {
 
         try {
             boolean isRemoteTranslogEnabled = config.getIndexSettings().isRemoteTranslogStoreEnabled();
-            logger.info("ILE DEBUG CryptoEngineFactory.newReadWriteEngine: shard={}, index={}, isRemoteTranslog={}, isReadOnlyReplica={}, existingTranslogFactory={}, downloadRemoteTranslogOnInit={}",
-                config.getShardId(), config.getIndexSettings().getIndex().getName(), isRemoteTranslogEnabled, config.isReadOnlyReplica(),
-                config.getTranslogFactory() != null ? config.getTranslogFactory().getClass().getSimpleName() : "null",
-                config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null"));
+            logger
+                .info(
+                    "ILE DEBUG CryptoEngineFactory.newReadWriteEngine: shard={}, index={}, isRemoteTranslog={}, isReadOnlyReplica={}, existingTranslogFactory={}, downloadRemoteTranslogOnInit={}",
+                    config.getShardId(),
+                    config.getIndexSettings().getIndex().getName(),
+                    isRemoteTranslogEnabled,
+                    config.isReadOnlyReplica(),
+                    config.getTranslogFactory() != null ? config.getTranslogFactory().getClass().getSimpleName() : "null",
+                    config.getIndexSettings().getIndexMetadata().getSettings().get("index.remote_store.translog.download_on_init", "null")
+                );
             logger.info("ILE DEBUG CryptoEngineFactory.newReadWriteEngine stack trace", new Exception("ILE DEBUG stack trace"));
 
             // Create a separate KeyResolver for translog encryption
@@ -76,7 +82,8 @@ public class CryptoEngineFactory implements EngineFactory {
             } else {
                 cryptoTranslogFactory = new CryptoTranslogFactory(keyResolver);
             }
-            logger.info("ILE DEBUG CryptoEngineFactory created CryptoTranslogFactory, mode={}", isRemoteTranslogEnabled ? "REMOTE" : "LOCAL");
+            logger
+                .info("ILE DEBUG CryptoEngineFactory created CryptoTranslogFactory, mode={}", isRemoteTranslogEnabled ? "REMOTE" : "LOCAL");
 
             // Create new engine config by copying all fields from existing config
             // but replace the translog factory with our crypto version

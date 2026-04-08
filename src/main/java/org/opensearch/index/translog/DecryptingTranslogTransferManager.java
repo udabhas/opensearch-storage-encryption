@@ -94,8 +94,12 @@ public class DecryptingTranslogTransferManager extends TranslogTransferManager {
         TranslogTransferListener translogTransferListener,
         CryptoMetadata cryptoMetadata
     ) throws IOException {
-        logger.info("ILE DEBUG DecryptingTranslogTransferManager.transferSnapshot called, snapshot={}, translogFiles={}",
-            transferSnapshot.getClass().getSimpleName(), transferSnapshot.getTranslogFileSnapshots().size());
+        logger
+            .info(
+                "ILE DEBUG DecryptingTranslogTransferManager.transferSnapshot called, snapshot={}, translogFiles={}",
+                transferSnapshot.getClass().getSimpleName(),
+                transferSnapshot.getTranslogFileSnapshots().size()
+            );
         TransferSnapshot decryptingSnapshot = new DecryptingTransferSnapshot(transferSnapshot, keyResolver, translogUUID, cryptoFactory);
 
         // Call parent with decryption wrapper
