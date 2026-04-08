@@ -258,4 +258,188 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
 
         assertFalse("Data should be encrypted on disk", rawContent.contains("sensitive document data"));
     }
+
+    /**
+     * Verifies sequential read from position 0 with a large buffer only returns
+     * header bytes first, then decrypted data on the next read.
+     */
+    public void testSequentialReadLimitsHeaderPassthrough() throws IOException {
+        String uuid = "test-header-limit-uuid";
+        CryptoChannelFactory factory = new CryptoChannelFactory(keyResolver, uuid);
+        Path tlogPath = tempDir.resolve("test-header-limit.tlog");
+
+        String testData = "{\"message\": \"test data for header limit verification\"}";
+        byte[] dataBytes = testData.getBytes(StandardCharsets.UTF_8);
+        int headerSize;
+
+        try (FileChannel ch = factory.open(tlogPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.READ)) {
+            TranslogHeader header = new TranslogHeader(uuid, 1L);
+            header.write(ch, false);
+            headerSize = header.sizeInBytes();
+            ch.write(ByteBuffer.wrap(dataBytes), headerSize);
+        }
+
+        assertTrue("File should be larger than header+data due to GCM tag", Files.size(tlogPath) > headerSize + dataBytes.length);
+
+        try (FileChannel ch = factory.open(tlogPath, StandardOpenOption.READ)) {
+            ByteBuffer buf = ByteBuffer.allocate(8192);
+            int firstRead = ch.read(buf);
+            assertEquals("First sequential read should return exactly headerSize bytes", headerSize, firstRead);
+
+            buf.clear();
+            int secondRead = ch.read(buf);
+            assertEquals("Second read should return original plaintext data length", dataBytes.length, secondRead);
+
+            buf.flip();
+            byte[] decrypted = new byte[secondRead];
+            buf.get(decrypted);
+            assertEquals("Decrypted data should match original", testData, new String(decrypted, StandardCharsets.UTF_8));
+        }
+    }
+
+    /**
+     * Verifies CryptoDecryptingInputStream produces decryptedSize < encryptedSize
+     * (GCM tag stripped), confirming decryption actually happens.
+     */
+    public void testDecryptingInputStreamStripsGcmTag() throws IOException {
+        String uuid = "test-decrypt-size-uuid";
+        CryptoChannelFactory factory = new CryptoChannelFactory(keyResolver, uuid);
+        Path tlogPath = tempDir.resolve("test-decrypt-size.tlog");
+
+        byte[] dataBytes = "{\"key\": \"value\"}".getBytes(StandardCharsets.UTF_8);
+        int headerSize;
+
+        try (FileChannel ch = factory.open(tlogPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.READ)) {
+            TranslogHeader header = new TranslogHeader(uuid, 1L);
+            header.write(ch, false);
+            headerSize = header.sizeInBytes();
+            ch.write(ByteBuffer.wrap(dataBytes), headerSize);
+        }
+
+        long encryptedSize = Files.size(tlogPath);
+        long decryptedSize = 0;
+        try (CryptoDecryptingInputStream stream = new CryptoDecryptingInputStream(tlogPath, keyResolver, uuid)) {
+            byte[] buf = new byte[8192];
+            int read;
+            while ((read = stream.read(buf)) != -1) decryptedSize += read;
+        }
+
+        assertEquals("Decrypted = header + plaintext", headerSize + dataBytes.length, (int) decryptedSize);
+        assertEquals("Difference should be GCM tag (16 bytes)", 16, encryptedSize - decryptedSize);
+    }
+
+    /**
+     * Header-only files (no data) should pass through with same size.
+     */
+    public void testHeaderOnlyFileUnchangedThroughDecryptingStream() throws IOException {
+        String uuid = "test-header-only-uuid";
+        CryptoChannelFactory factory = new CryptoChannelFactory(keyResolver, uuid);
+        Path tlogPath = tempDir.resolve("test-header-only.tlog");
+
+        try (FileChannel ch = factory.open(tlogPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.READ)) {
+            new TranslogHeader(uuid, 1L).write(ch, false);
+        }
+
+        long fileSize = Files.size(tlogPath);
+        long decryptedSize = 0;
+        try (CryptoDecryptingInputStream stream = new CryptoDecryptingInputStream(tlogPath, keyResolver, uuid)) {
+            byte[] buf = new byte[8192];
+            int read;
+            while ((read = stream.read(buf)) != -1) decryptedSize += read;
+        }
+        assertEquals("Header-only: decrypted size should equal file size", fileSize, decryptedSize);
+    }
+
+    /**
+     * Plaintext translog file (simulating S3 download) is detected as plaintext
+     * when decryption fails, and can be re-encrypted successfully.
+     */
+    public void testPlaintextFileDetectedAndReEncryptable() throws Exception {
+        String uuid = "test-reencrypt-uuid";
+        int headerSize = TranslogChunkManager.calculateTranslogHeaderSizeStatic(uuid);
+
+        // Create plaintext translog (simulating S3 download after restore)
+        Path tlogPath = tempDir.resolve("translog-5.tlog");
+        byte[] header = createRawHeader(uuid, 1L);
+        byte[] plainData = "{\"@timestamp\":\"2099-01-01\",\"msg\":\"test\"}".getBytes(StandardCharsets.UTF_8);
+        try (FileChannel ch = FileChannel.open(tlogPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            ch.write(ByteBuffer.wrap(header));
+            ch.write(ByteBuffer.wrap(plainData));
+        }
+
+        // Derive IV (same as TranslogChunkManager/reEncrypt logic)
+        byte[] baseIV = org.opensearch.index.store.key.HkdfKeyDerivation.deriveTranslogBaseIV(
+            keyResolver.getDataKey().getEncoded(), uuid
+        );
+        byte[] chunkIV = org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted(baseIV, 0);
+
+        // Decrypt should FAIL on plaintext
+        try {
+            org.opensearch.index.store.cipher.AesGcmCipherFactory.decryptWithTag(keyResolver.getDataKey(), chunkIV, plainData);
+            fail("Decryption of plaintext should throw");
+        } catch (org.opensearch.index.store.cipher.AesGcmCipherFactory.JavaCryptoException expected) {}
+
+        // Encrypt it (same as reEncryptDownloadedTranslogFiles)
+        byte[] encrypted = org.opensearch.index.store.cipher.AesGcmCipherFactory.encryptWithTag(
+            keyResolver.getDataKey(), chunkIV, plainData, plainData.length
+        );
+        try (FileChannel out = FileChannel.open(tlogPath, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+            out.write(ByteBuffer.wrap(header));
+            out.write(ByteBuffer.wrap(encrypted));
+        }
+
+        assertEquals("Re-encrypted file = header + data + 16B tag", headerSize + plainData.length + 16, (int) Files.size(tlogPath));
+
+        // CryptoDecryptingInputStream should now read it correctly
+        long streamSize = 0;
+        try (CryptoDecryptingInputStream stream = new CryptoDecryptingInputStream(tlogPath, keyResolver, uuid)) {
+            byte[] buf = new byte[8192];
+            int read;
+            while ((read = stream.read(buf)) != -1) streamSize += read;
+        }
+        assertEquals("After re-encrypt: stream returns header + plaintext", headerSize + plainData.length, (int) streamSize);
+    }
+
+    /**
+     * Already-encrypted file is detected (decrypt succeeds) and should NOT be re-encrypted.
+     */
+    public void testAlreadyEncryptedFileDetectedByDecrypt() throws Exception {
+        String uuid = "test-already-enc-uuid";
+        CryptoChannelFactory factory = new CryptoChannelFactory(keyResolver, uuid);
+        Path tlogPath = tempDir.resolve("translog-3.tlog");
+
+        byte[] testData = "{\"already\":\"encrypted\"}".getBytes(StandardCharsets.UTF_8);
+        int headerSize;
+        try (FileChannel ch = factory.open(tlogPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.READ)) {
+            TranslogHeader h = new TranslogHeader(uuid, 1L);
+            h.write(ch, false);
+            headerSize = h.sizeInBytes();
+            ch.write(ByteBuffer.wrap(testData), headerSize);
+        }
+
+        // Read data portion from disk
+        byte[] fileBytes = Files.readAllBytes(tlogPath);
+        byte[] data = java.util.Arrays.copyOfRange(fileBytes, headerSize, fileBytes.length);
+
+        byte[] baseIV = org.opensearch.index.store.key.HkdfKeyDerivation.deriveTranslogBaseIV(
+            keyResolver.getDataKey().getEncoded(), uuid
+        );
+        byte[] chunkIV = org.opensearch.index.store.cipher.AesCipherFactory.computeOffsetIVForAesGcmEncrypted(baseIV, 0);
+
+        // Decrypt should SUCCEED — file is already encrypted
+        byte[] decrypted = org.opensearch.index.store.cipher.AesGcmCipherFactory.decryptWithTag(
+            keyResolver.getDataKey(), chunkIV, data
+        );
+        assertEquals("Decrypted matches original", new String(testData, StandardCharsets.UTF_8), new String(decrypted, StandardCharsets.UTF_8));
+    }
+
+    private byte[] createRawHeader(String uuid, long primaryTerm) throws IOException {
+        Path tmp = tempDir.resolve("tmp-header.tlog");
+        try (FileChannel ch = FileChannel.open(tmp, StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            new TranslogHeader(uuid, primaryTerm).write(ch, false);
+        }
+        byte[] bytes = Files.readAllBytes(tmp);
+        Files.delete(tmp);
+        return bytes;
+    }
 }
