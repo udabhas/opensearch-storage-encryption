@@ -101,7 +101,7 @@ public class CryptoIndexSettingsValidatorTests extends OpenSearchTestCase {
             "key1=value1,key2 =value2", // space before =
             "=value1", // missing key
             "key1=", // missing value
-            "key1==value1", // double equals
+            // "key1==value1" is intentionally accepted: KMS encryption-context values (e.g. base64) may contain '='.
             "key1=value1,,key2=value2" // double comma
         };
 
@@ -131,7 +131,7 @@ public class CryptoIndexSettingsValidatorTests extends OpenSearchTestCase {
 
     public void testValidateValidEncryptionContext() {
         String[] validContexts = {
-            "domainARN=arn:aws:es:us-west-2:248189931838:domain/ile-testing-3-3-new-vfi-2",
+            "context-key=some:value:with:colons",
             "key1=value1",
             "key1=value1,key2=value2",
             "key-with-dash=value",

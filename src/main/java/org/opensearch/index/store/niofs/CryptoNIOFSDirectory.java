@@ -27,8 +27,12 @@ import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
 
 /**
- * A NioFS directory implementation that encrypts files to be stored based on a
- * user supplied key
+ * A NioFS directory implementation that encrypts all index files using a
+ * user supplied key.
+ *
+ * <p>All files (including .si and segments_*) are encrypted when the crypto plugin
+ * is enabled. The read path attempts decryption with a fallback to plaintext for
+ * backward compatibility with indices created before encryption was enabled.
  *
  * @opensearch.internal
  */
@@ -50,6 +54,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
      * @param location the directory path
      * @param provider the security provider for cryptographic operations
      * @param keyResolver resolver for encryption keys and initialization vectors
+     * @param encryptionMetadataCache cache for encryption metadata
      * @throws IOException if the directory cannot be created or accessed
      */
     public CryptoNIOFSDirectory(
@@ -70,10 +75,6 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
         try {
-            if (name.contains("segments_") || name.endsWith(".si")) {
-                return super.openInput(name, context);
-            }
-
             ensureOpen();
             ensureCanRead(name);
             Path path = getDirectory().resolve(name);
@@ -91,6 +92,11 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
                 );
                 success = true;
                 return indexInput;
+            } catch (EncryptionFooter.NotOSEFFileException e) {
+                // Plaintext file (no OSEF footer) — fall back to unencrypted read.
+                IOUtils.closeWhileHandlingException(fc);
+                success = true;
+                return super.openInput(name, context);
             } finally {
                 if (!success) {
                     IOUtils.closeWhileHandlingException(fc);
@@ -105,10 +111,6 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
         try {
-            if (name.contains("segments_") || name.endsWith(".si")) {
-                return super.createOutput(name, context);
-            }
-
             ensureOpen();
             Path path = directory.resolve(name);
 
@@ -132,10 +134,6 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
-        if (prefix.contains("segments_") || prefix.endsWith(".si")) {
-            return super.createTempOutput(prefix, suffix, context);
-        }
-
         ensureOpen();
         String name = getTempFileName(prefix, suffix, nextTempFileCounter.getAndIncrement());
         Path path = directory.resolve(name);
@@ -155,10 +153,6 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
-        if (name.contains("segments_") || name.endsWith(".si")) {
-            return super.fileLength(name);
-        }
-
         Path path = dirPath.resolve(name);
         long fileSize = super.fileLength(name);
 
@@ -191,6 +185,21 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         isOpen = false;
         deletePendingFiles();
         encryptionMetadataCache.invalidateDirectory();
+    }
+
+    @Override
+    public void rename(String source, String dest) throws IOException {
+        super.rename(source, dest);
+        // Invalidate BOTH source and destination paths in the encryption cache.
+        // Source (pending_segments_N): clears stale frameIV cached during the write —
+        // without this, the NEXT write to the same path reuses the old IV
+        // (derived from a previous messageId) producing ciphertext that can't be
+        // decrypted with the new messageId's IV.
+        // Destination (segments_N): clears stale footer/frameIV from prior reads so a
+        // recreated path is never served the previous inode's messageId/derived key
+        // (which under the unauthenticated AES-CTR read decrypts to silent garbage).
+        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(source)));
+        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(dest)));
     }
 
     @Override

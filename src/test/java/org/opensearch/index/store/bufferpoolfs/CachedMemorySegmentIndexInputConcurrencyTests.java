@@ -5,14 +5,13 @@
 package org.opensearch.index.store.bufferpoolfs;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
-import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -24,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Before;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheValue;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
@@ -43,22 +42,22 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
     private static final ValueLayout.OfByte LAYOUT_BYTE = ValueLayout.JAVA_BYTE;
     private static final ValueLayout.OfInt LAYOUT_LE_INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(java.nio.ByteOrder.LITTLE_ENDIAN);
 
-    private BlockCache<RefCountedMemorySegment> mockCache;
-    private BlockSlotTinyCache mockTinyCache;
+    private BlockCache<RefCountedByteBuffer> mockCache;
+    private RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>> radixBlockTable;
+    private RadixBlockTableRegistry radixBlockTableRegistry;
     private ReadaheadManager mockReadaheadManager;
     private ReadaheadContext mockReadaheadContext;
     private Path testPath;
-    private Arena arena;
 
     @Before
     public void setUp() throws Exception {
         super.setUp();
         mockCache = mock(BlockCache.class);
-        mockTinyCache = mock(BlockSlotTinyCache.class);
+        testPath = Paths.get("/test/concurrent.dat");
+        radixBlockTableRegistry = new RadixBlockTableRegistry();
+        radixBlockTable = radixBlockTableRegistry.acquire(testPath);
         mockReadaheadManager = mock(ReadaheadManager.class);
         mockReadaheadContext = mock(ReadaheadContext.class);
-        testPath = Paths.get("/test/concurrent.dat");
-        arena = Arena.ofAuto();
     }
 
     /**
@@ -72,7 +71,7 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
 
         // Setup blocks with unique patterns
         for (int i = 0; i < numBlocks; i++) {
-            MemorySegment block = createBlockWithPattern(i, (byte) (i + 1));
+            RefCountedByteBuffer block = createBlockWithPattern(i, (byte) (i + 1));
             setupBlock(i * BLOCK_SIZE, block);
         }
 
@@ -89,6 +88,8 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
         try {
             for (int t = 0; t < numThreads; t++) {
                 final int threadId = t;
+                // Lucene IndexInput is not thread-safe on a shared instance; each thread must clone.
+                final CachedMemorySegmentIndexInput threadInput = (CachedMemorySegmentIndexInput) input.clone();
                 executor.submit(() -> {
                     try {
                         startLatch.await();
@@ -99,7 +100,7 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
                             long offset = blockNum * BLOCK_SIZE + (i % 100);
 
                             if (offset < fileLength) {
-                                byte value = input.clone().readByte(offset);
+                                byte value = threadInput.readByte(offset);
                                 byte expected = (byte) (blockNum + 1);
 
                                 if (value != expected) {
@@ -144,7 +145,7 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
         long fileLength = BLOCK_SIZE * numBlocks;
 
         for (int i = 0; i < numBlocks; i++) {
-            MemorySegment block = createBlockWithPattern(i, (byte) (i * 10));
+            RefCountedByteBuffer block = createBlockWithPattern(i, (byte) (i * 10));
             setupBlock(i * BLOCK_SIZE, block);
         }
 
@@ -214,10 +215,11 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
         long fileLength = BLOCK_SIZE * numBlocks;
 
         for (int i = 0; i < numBlocks; i++) {
-            MemorySegment block = arena.allocate(BLOCK_SIZE);
+            RefCountedByteBuffer block = new RefCountedByteBuffer(ByteBuffer.allocateDirect(BLOCK_SIZE), BLOCK_SIZE);
             // Fill with sequential integers for verification
+            MemorySegment seg = block.segment();
             for (int j = 0; j < BLOCK_SIZE / 4; j++) {
-                block.set(LAYOUT_LE_INT, j * 4, i * 1000 + j);
+                seg.set(LAYOUT_LE_INT, j * 4, i * 1000 + j);
             }
             setupBlock(i * BLOCK_SIZE, block);
         }
@@ -235,6 +237,8 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
         try {
             for (int t = 0; t < numThreads; t++) {
                 final int threadId = t;
+                // Lucene IndexInput is not thread-safe on a shared instance; each thread must clone.
+                final CachedMemorySegmentIndexInput threadInput = (CachedMemorySegmentIndexInput) input.clone();
                 executor.submit(() -> {
                     try {
                         startLatch.await();
@@ -253,7 +257,7 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
                             long offset = boundaryPositions[i % boundaryPositions.length];
 
                             try {
-                                int value = input.readInt(offset);
+                                int value = threadInput.readInt(offset);
                                 // Value should be valid (non-zero for our test data)
                                 assertTrue("Read should return valid int", value >= 0);
                             } catch (Exception e) {
@@ -290,7 +294,7 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
         long fileLength = BLOCK_SIZE * numBlocks;
 
         for (int i = 0; i < numBlocks; i++) {
-            MemorySegment block = createBlockWithPattern(i, (byte) (i + 1));
+            RefCountedByteBuffer block = createBlockWithPattern(i, (byte) (i + 1));
             setupBlock(i * BLOCK_SIZE, block);
         }
 
@@ -369,7 +373,7 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
         long fileLength = BLOCK_SIZE * numBlocks;
 
         for (int i = 0; i < numBlocks; i++) {
-            MemorySegment block = createBlockWithPattern(i, (byte) (i * 20));
+            RefCountedByteBuffer block = createBlockWithPattern(i, (byte) (i * 20));
             setupBlock(i * BLOCK_SIZE, block);
         }
 
@@ -437,30 +441,40 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
         }
     }
 
-    private MemorySegment createBlockWithPattern(int blockIndex, byte pattern) {
-        MemorySegment segment = arena.allocate(BLOCK_SIZE);
+    private RefCountedByteBuffer createBlockWithPattern(int blockIndex, byte pattern) {
+        ByteBuffer buffer = ByteBuffer.allocateDirect(BLOCK_SIZE);
         for (int i = 0; i < BLOCK_SIZE; i++) {
-            segment.set(LAYOUT_BYTE, i, pattern);
+            buffer.put(i, pattern);
         }
-        return segment;
+        return new RefCountedByteBuffer(buffer, BLOCK_SIZE);
     }
 
-    private void setupBlock(long offset, MemorySegment segment) throws IOException {
-        RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, (int) segment.byteSize(), (seg) -> {
-            // No-op releaser for tests
-        });
-
-        BlockCacheValue<RefCountedMemorySegment> value = mock(BlockCacheValue.class);
+    /**
+     * Publishes a block at {@code offset} into both the real L1 (RadixBlockTable) and the mocked
+     * L2 ({@code mockCache.get}/{@code getOrLoad}) so the IndexInput resolves it on any path.
+     */
+    private void setupBlock(long offset, RefCountedByteBuffer refSegment) throws IOException {
+        BlockCacheValue<RefCountedByteBuffer> value = mock(BlockCacheValue.class);
         when(value.value()).thenReturn(refSegment);
         when(value.tryPin()).thenReturn(true);
 
-        when(mockTinyCache.acquireRefCountedValue(eq(offset), any())).thenReturn(value);
-        when(mockTinyCache.acquireRefCountedValue(eq(offset))).thenReturn(value);
+        long blockId = offset >>> 13; // CACHE_BLOCK_SIZE_POWER for 8 KiB blocks
+        radixBlockTable.put(blockId, value);
+        when(mockCache.get(any(FileBlockCacheKey.class))).thenReturn(value);
         when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenReturn(value);
     }
 
     private CachedMemorySegmentIndexInput createInput(long length) {
         return CachedMemorySegmentIndexInput
-            .newInstance("test", testPath, length, mockCache, mockReadaheadManager, mockReadaheadContext, mockTinyCache);
+            .newInstance(
+                "test",
+                testPath,
+                length,
+                mockCache,
+                mockReadaheadManager,
+                mockReadaheadContext,
+                radixBlockTable,
+                radixBlockTableRegistry
+            );
     }
 }

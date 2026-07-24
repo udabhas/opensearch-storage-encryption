@@ -9,14 +9,22 @@ import org.opensearch.common.SuppressForbidden;
 import com.carrotsearch.randomizedtesting.ThreadFilter;
 
 /**
- * Thread leak filter for Caffeine cache's ForkJoinPool worker threads.
- * Caffeine uses the ForkJoinPool.commonPool() for async operations,
- * which creates worker threads that the test framework may detect as leaks.
+ * Thread leak filter for Caffeine cache's ForkJoinPool worker threads
+ * and the plugin's daemon telemetry loggers, which the randomized-test
+ * framework may otherwise flag as leaks at test-class teardown.
+ *
+ * <p>The daemon telemetry threads have a JVM-static lifetime by design
+ * (they start once via CAS-guarded init and are never joined), so a
+ * per-test cleanup would just re-add the flakiness. Filtering them out
+ * is the right call.
  */
 @SuppressForbidden(reason = "Thread matching for test leak filtering")
 public class CaffeineThreadLeakFilter implements ThreadFilter {
     @Override
     public boolean reject(Thread t) {
-        return t.getName().startsWith("ForkJoinPool.commonPool-worker-");
+        String name = t.getName();
+        return name.startsWith("ForkJoinPool.commonPool-worker-")
+            || name.equals("DirectIOBufferPoolStatsLogger")
+            || name.equals("pool-gc-debt-monitor");
     }
 }

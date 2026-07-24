@@ -5,11 +5,13 @@
 package org.opensearch.index.store;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Provider;
 import java.security.Security;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -31,12 +33,11 @@ import org.opensearch.crypto.CryptoHandlerRegistry;
 import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.shard.ShardPath;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
-import org.opensearch.index.store.block_loader.FileChannelCache;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
@@ -73,20 +74,6 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectoryFactory.class);
 
     /**
-     * Controls whether recently written data is cached in the block cache.
-     * When enabled (default), plaintext blocks are cached during writes so that
-     * subsequent reads can be served from cache without re-reading and decrypting from disk.
-     * Disabling this can reduce memory pressure at the cost of higher read latency for recently written data.
-     */
-    public static final Setting<Boolean> WRITE_CACHE_ENABLED_SETTING = Setting
-        .boolSetting("node.store.crypto.write_cache_enabled", true, Property.NodeScope, Property.Dynamic);
-
-    /**
-     * Current value of the write cache enabled setting, updated dynamically via cluster settings.
-     */
-    private static volatile boolean writeCacheEnabled = true;
-
-    /**
      * Shared pool resources including pool, cache, and telemetry.
      * Lazily initialized on first cryptofs shard creation and shared across all CryptoBufferPoolFSDirectory instances.
      * This prevents resource allocation on dedicated master nodes which never create shards.
@@ -97,6 +84,31 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * Node settings used for lazy pool initialization.
      */
     private static volatile Settings nodeSettings;
+
+    /**
+     * Current value of {@code node.store.crypto.proactive_shrink_enabled} (dynamic cluster setting).
+     * Stored statically so it can (a) seed the monitor when the pool is lazily built, and (b) be flipped
+     * on the live pool at runtime via {@link #setProactiveShrinkEnabled(boolean)}. Default OFF.
+     */
+    private static volatile boolean proactiveShrinkEnabled = false;
+
+    /**
+     * Apply the proactive-shrink enabled flag: remember it (so a not-yet-built pool picks it up at init)
+     * and, if the shared pool already exists, flip its monitor live. Called from the plugin's dynamic
+     * settings update-consumer and once at pool build time.
+     */
+    public static void setProactiveShrinkEnabled(boolean enabled) {
+        proactiveShrinkEnabled = enabled;
+        PoolBuilder.PoolResources r = poolResources;
+        if (r != null && r.getSegmentPool() instanceof org.opensearch.index.store.pool.MemorySegmentPool msp) {
+            msp.proactiveMonitor().setEnabled(enabled);
+        }
+    }
+
+    /** @return the current proactive-shrink enabled flag (read by PoolBuilder to seed the monitor). */
+    public static boolean isProactiveShrinkEnabled() {
+        return proactiveShrinkEnabled;
+    }
 
     /**
      * Lock for thread-safe initialization of shared resources.
@@ -291,6 +303,8 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      */
     @Override
     public Directory newDirectory(IndexSettings indexSettings, ShardPath path) throws IOException {
+        validateNotS3VectorIndex(indexSettings);
+
         try {
             final Path location = path.resolveIndex();
             final LockFactory lockFactory = indexSettings.getValue(org.opensearch.index.store.FsDirectoryFactory.INDEX_LOCK_FACTOR_SETTING);
@@ -389,7 +403,6 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * @return the concrete implementation of the encrypted directory based on store type
      * @throws IOException if directory creation fails
      */
-    @Override
     public Directory newFSDirectory(Path location, LockFactory lockFactory, IndexSettings indexSettings) throws IOException {
         // Extract shardId from path structure: .../indices/{index-uuid}/{shard-id}/index/
         // location.getParent() gives us the shard directory
@@ -468,8 +481,10 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         *
         * Shared Resources:
         * -----------------
-        * - sharedSegmentPool: Pool of RefCountedMemorySegments (initialized in initializeSharedPool)
+        * - sharedSegmentPool: Pool of RefCountedByteBuffers (initialized in initializeSharedPool)
         * - sharedBlockCache: Caffeine cache storing decrypted blocks (initialized in initializeSharedPool)
+        * - sharedRadixBlockTableRegistry: per-file L1 RadixBlockTable registry, wired to the
+        *   shared cache's eviction listener so L2 evictions clear the corresponding L1 entry
         *
         * Per-Directory Resources:
         * ------------------------
@@ -477,30 +492,30 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         * - Cache Wrapper: Wraps the shared cache with directory-specific loader
         * - ReadAhead Worker: Asynchronous prefetching for sequential reads
         *
-        * Memory Lifecycle:
-        * -----------------
-        * 1. Cache miss: Loader reads encrypted data, decrypts it, stores in RefCountedMemorySegment
-        * 2. Initial refCount=1 (cache's reference)
-        * 3. Reader pins: refCount incremented via tryPin()
-        * 4. Reader unpins: refCount decremented via decRef()
-        * 5. Cache eviction: retired=true set (prevents new pins), then decRef() called
-        * 6. refCount=0: Segment returned to pool for reuse
+        * Memory Lifecycle (GC-managed RefCountedByteBuffer):
+        * ---------------------------------------------------
+        * 1. Cache miss: Loader reads encrypted data, decrypts it into a direct ByteBuffer wrapped
+        *    in a RefCountedByteBuffer (no refcount, no generation, no manual close).
+        * 2. The block is held strongly by the Caffeine L2 cache (and referenced from L1).
+        * 3. Readers access the buffer's MemorySegment directly; there is no pin/unpin.
+        * 4. On L2 eviction the entry loses its strong reference; the JVM Cleaner frees the
+        *    backing direct buffer once it becomes unreachable. There is no recycle/reset of a
+        *    wrapper, so the segment-recycle race class is structurally impossible.
         *
-        * Two-Phase Eviction (prevents stale reads):
-        * -------------------------------------------
-        * - evictionListener: Sets retired=true (marks stale for BlockSlotTinyCache)
-        * - removalListener: Calls decRef() (releases cache's reference)
+        * L1/L2 Coherence (prevents stale reads):
+        * ---------------------------------------
+        * - evictionListener: registry.onEviction() nulls the stale L1 (RadixBlockTable) slot
+        *   BEFORE the value is closed, so future reads see a clean L1 miss and re-resolve via L2.
         */
 
         // Ensure pool resources are initialized before creating directory
         PoolBuilder.PoolResources resources = ensurePoolInitialized();
 
         // Create a per-directory loader that uses this directory's keyIvResolver for decryption
-        BlockLoader<RefCountedMemorySegment> loader = new CryptoDirectIOBlockLoader(
+        BlockLoader<RefCountedByteBuffer> loader = new CryptoDirectIOBlockLoader(
             resources.getSegmentPool(),
             keyResolver,
-            encryptionMetadataCache,
-            resources.getFileChannelCache()
+            encryptionMetadataCache
         );
 
         // Cache architecture: One shared Caffeine cache storage, multiple wrapper instances
@@ -509,14 +524,16 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // This design allows:
         // * Shared cache capacity across all directories
         // * Per-directory decryption via directory-specific loaders with unique keyIvResolvers
-        // * Unified eviction policy managed by the shared cache
-        CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> sharedCaffeineCache =
-            (CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment>) resources.getBlockCache();
+        // * Unified eviction policy managed by the shared cache (incl. the L1 eviction listener,
+        // which is wired once on the shared cache in PoolBuilder.build())
+        CaffeineBlockCache<RefCountedByteBuffer, RefCountedByteBuffer> sharedCaffeineCache =
+            (CaffeineBlockCache<RefCountedByteBuffer, RefCountedByteBuffer>) resources.getBlockCache();
 
-        BlockCache<RefCountedMemorySegment> directoryCache = new CaffeineBlockCache<>(
+        BlockCache<RefCountedByteBuffer> directoryCache = new CaffeineBlockCache<>(
             sharedCaffeineCache.getCache(),
             loader,
-            resources.getMaxCacheBlocks()
+            resources.getMaxCacheBlocks(),
+            sharedCaffeineCache
         );
 
         // Use the shared node-wide read-ahead worker
@@ -533,7 +550,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             loader,
             readaheadWorker,
             encryptionMetadataCache,
-            resources.getFileChannelCache()
+            resources.getRadixBlockTableRegistry()
         );
     }
 
@@ -545,7 +562,6 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      */
     public static void setNodeSettings(Settings settings) {
         nodeSettings = settings;
-        writeCacheEnabled = WRITE_CACHE_ENABLED_SETTING.get(settings);
     }
 
     /**
@@ -557,24 +573,6 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     public static void setClusterService(ClusterService service) {
         // Initialize encryption context resolver
         encryptionContextResolver = EncryptionContextResolverFactory.create(service);
-
-        if (service.getClusterSettings() != null) {
-            // Register dynamic setting update consumer
-            service.getClusterSettings().addSettingsUpdateConsumer(WRITE_CACHE_ENABLED_SETTING, value -> {
-                LOGGER.info("Updating write_cache_enabled to {}", value);
-                writeCacheEnabled = value;
-            });
-        }
-    }
-
-    /**
-     * Returns whether write-through caching is currently enabled.
-     * This is read by the write path to decide whether to cache plaintext blocks during writes.
-     *
-     * @return true if write caching is enabled
-     */
-    public static boolean isWriteCacheEnabled() {
-        return writeCacheEnabled;
     }
 
     /**
@@ -610,6 +608,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         if (poolResources != null) {
             poolResources.close();
         }
+        closeFileChannelCache();
     }
 
     /**
@@ -623,9 +622,155 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     }
 
     /**
-     * Returns the shared node-level FileChannelCache, or null if not yet initialized.
+     * Node-level cache of read-only {@link FileChannel}s, keyed by absolute file path. Lets the
+     * Direct-I/O read path (see {@code CryptoDirectIOBlockLoader} / {@code FileChannelBackend}) reuse
+     * an open channel across block-cache misses instead of paying an {@code open()}/{@code close()}
+     * syscall pair per load. This is safe to share across threads because every read goes through the
+     * <em>positional</em> {@code FileChannel.read(buffer, position)} form in
+     * {@link org.opensearch.index.store.block_loader.DirectIOReaderUtil#directIOReadAligned} — positional
+     * reads do not touch the channel's shared position, so concurrent readers do not interfere.
+     *
+     * <p>The cache is size-bounded and the removal listener CLOSES the evicted channel — without that,
+     * evicting an entry would leak the file descriptor. Callers that hit a {@link java.nio.channels.ClosedChannelException}
+     * (entry evicted+closed mid-read, or after deleteFile) must fall back to a fresh one-shot channel.
      */
-    public static FileChannelCache getSharedFileChannelCache() {
-        return poolResources != null ? poolResources.getFileChannelCache() : null;
+    private static volatile com.github.benmanes.caffeine.cache.Cache<String, FileChannel> fileChannelCache;
+
+    /** Max number of open FileChannels to keep cached per node. Bounded to cap FD usage. */
+    private static final int FILE_CHANNEL_CACHE_MAX = 2048;
+
+    /**
+     * Lazily create (once) and return the node-level FileChannel cache. Double-checked locking on
+     * {@link #initLock} mirrors the other shared-resource accessors in this factory.
+     *
+     * @return the shared FileChannel cache
+     */
+    public static com.github.benmanes.caffeine.cache.Cache<String, FileChannel> getOrCreateFileChannelCache() {
+        com.github.benmanes.caffeine.cache.Cache<String, FileChannel> local = fileChannelCache;
+        if (local == null) {
+            synchronized (initLock) {
+                local = fileChannelCache;
+                if (local == null) {
+                    local = com.github.benmanes.caffeine.cache.Caffeine
+                        .newBuilder()
+                        .maximumSize(FILE_CHANNEL_CACHE_MAX)
+                        .removalListener((String key, FileChannel ch, com.github.benmanes.caffeine.cache.RemovalCause cause) -> {
+                            if (ch != null) {
+                                try {
+                                    ch.close();
+                                } catch (IOException e) {
+                                    LOGGER.debug("Failed to close evicted cached FileChannel for {}: {}", key, e.toString());
+                                }
+                            }
+                        })
+                        .build();
+                    fileChannelCache = local;
+                }
+            }
+        }
+        return local;
+    }
+
+    /**
+     * Close + drop all cached FileChannels (closes FDs via the removal listener).
+     * Called from {@link #closeSharedPool()} during node shutdown.
+     */
+    public static void closeFileChannelCache() {
+        com.github.benmanes.caffeine.cache.Cache<String, FileChannel> local = fileChannelCache;
+        if (local != null) {
+            local.invalidateAll();
+            local.cleanUp();
+        }
+    }
+
+    /**
+     * Cache key for a file's cached read {@link FileChannel}. MUST be the single source of truth for
+     * the key format so producers (the backend that populates the cache) and consumers (delete/rename
+     * invalidation) can never drift — a mismatch would silently leave a stale FD cached against a
+     * reused path, and because the data read path is unauthenticated AES-CTR that surfaces only later
+     * as corruption rather than failing fast.
+     *
+     * @param filePath the file path
+     * @return the cache key
+     */
+    public static String fileChannelCacheKey(Path filePath) {
+        return "dio:" + filePath.toAbsolutePath().normalize().toString();
+    }
+
+    /**
+     * Invalidate (and close, via the removal listener) the cached {@link FileChannel} for a single
+     * file. MUST be called whenever a file is deleted, renamed, or replaced at a path that may be
+     * reused — otherwise a later open of the reused path could read old-inode ciphertext through the
+     * stale cached FD while the footer/file-key is re-read from the new inode.
+     *
+     * @param filePath the file whose cached channel should be dropped
+     */
+    public static void invalidateFileChannel(Path filePath) {
+        com.github.benmanes.caffeine.cache.Cache<String, FileChannel> local = fileChannelCache;
+        if (local != null) {
+            local.invalidate(fileChannelCacheKey(filePath));
+        }
+    }
+
+    /**
+     * Invalidate (and close) every cached {@link FileChannel} whose file lives under {@code dirPath}.
+     * Used on directory close / index removal so deleted-index FDs do not pin unlinked inodes and
+     * cannot serve a later path reuse. Linear scan over the cached keys (bounded by the cache's max
+     * size); invalidation is rare relative to reads.
+     *
+     * @param dirPath the directory whose files' cached channels should be dropped
+     */
+    public static void invalidateFileChannelsByPrefix(Path dirPath) {
+        com.github.benmanes.caffeine.cache.Cache<String, FileChannel> local = fileChannelCache;
+        if (local == null) {
+            return;
+        }
+        // Reuse the single key builder so the "dio:" prefix + normalization can never drift from the
+        // producer/consumer key format.
+        String prefix = fileChannelCacheKey(dirPath);
+        for (String key : local.asMap().keySet()) {
+            // Match the directory prefix followed by the path separator (or exact), so e.g.
+            // ".../index" does not spuriously match ".../index2".
+            if (key.equals(prefix) || key.startsWith(prefix + java.io.File.separator)) {
+                local.invalidate(key);
+            }
+        }
+    }
+
+    /**
+     * Validates that the index is not an S3 vector index.
+     * S3 vector indices are not compatible with cryptofs encryption.
+     *
+     * @param indexSettings the index settings to validate
+     * @throws IllegalArgumentException if the index uses S3 vector engine
+     */
+    private void validateNotS3VectorIndex(IndexSettings indexSettings) {
+        if (indexSettings.getIndexMetadata() == null || indexSettings.getIndexMetadata().mapping() == null) {
+            return;
+        }
+        Map<String, Object> mapping = indexSettings.getIndexMetadata().mapping().getSourceAsMap();
+        if (mapping != null) {
+            validateMappingRecursive(mapping);
+        }
+    }
+
+    /**
+     * Recursively validates mapping structure to detect s3vector engine.
+     *
+     * @param map the mapping structure to validate
+     * @throws IllegalArgumentException if s3vector engine is found
+     */
+    @SuppressWarnings("unchecked")
+    void validateMappingRecursive(Map<String, Object> map) {
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof Map) {
+                Map<String, Object> child = (Map<String, Object>) value;
+                if ("method".equals(entry.getKey()) && "s3vector".equals(child.get("engine"))) {
+                    throw new IllegalArgumentException("S3 vector indices (engine=s3vector) are not compatible with cryptofs store type.");
+                }
+                validateMappingRecursive(child);
+            }
+        }
     }
 }

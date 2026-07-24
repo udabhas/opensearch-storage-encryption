@@ -342,6 +342,12 @@ public class EncryptionFooter {
             throw new NotOSEFFileException("File too small to contain encryption footer: " + normalizedFilePath);
         }
 
+        // TOCTOU guard: snapshot the path's inode BEFORE reading the footer so we can verify the path
+        // did not get recreated (new inode) while we were reading. FileChannel exposes no fstat, so this
+        // stat-read-stat brackets the read; if the inode changes across it (or is unknown), we do not persist
+        // a (footer, inode) pair that could be mismatched — see the stamp decision below.
+        Object inodeBeforeRead = EncryptionMetadataCache.inodeKey(java.nio.file.Paths.get(normalizedFilePath));
+
         // Read MAX_FOOTER_READ_SIZE or entire file if smaller
         int readSize = (int) Math.min(MAX_FOOTER_READ_SIZE, fileSize);
         long readPosition = fileSize - readSize;
@@ -389,7 +395,18 @@ public class EncryptionFooter {
 
         // Deserialize footer with file key for authentication
         EncryptionFooter footer = deserialize(footerBytes, fileKey);
-        encryptionMetadataCache.getOrLoadMetadata(normalizedFilePath, footer, masterKey);
+
+        // Stamp the cache entry with the inode this footer was read from (inode-aware): on a later
+        // recreate-at-same-path (new inode), the read-side inode re-check drops this entry rather than pairing
+        // a stale footer/key with the new inode's ciphertext (silent AES-CTR corruption). Close the stamp-time
+        // TOCTOU: only cache the (footer, inode) pair when the inode is known and UNCHANGED across the footer
+        // read (stat-read-stat). If it is unknown or shifted mid-read, skip caching — the footer is still
+        // returned to this caller, and the next read repopulates from disk — rather than persist a pair that
+        // could be mismatched and defeat the read-side guard.
+        Object inodeAfterRead = EncryptionMetadataCache.inodeKey(java.nio.file.Paths.get(normalizedFilePath));
+        if (inodeBeforeRead != null && inodeBeforeRead.equals(inodeAfterRead)) {
+            encryptionMetadataCache.getOrLoadMetadata(normalizedFilePath, footer, masterKey, inodeBeforeRead);
+        }
         return footer;
     }
 

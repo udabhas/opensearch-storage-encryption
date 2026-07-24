@@ -22,6 +22,8 @@ import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 
 /**
  * An IndexOutput implementation that encrypts data before writing using native
@@ -258,6 +260,10 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             try {
                 this.currentCipher = OpenSslNativeCipher.initGCMCipher(fileKey.getEncoded(), frameIV, offsetWithinFrame);
             } catch (Throwable t) {
+                // This throws RuntimeException (not IOException) and so bypasses INDEX_OUTPUT_ERROR entirely;
+                // meter it via the existing error flow (crypto.error.total{error_type=niofs_encrypt_init_failure})
+                // so a GCM/native cipher-init failure on the write path isn't silent.
+                CryptoMetricsService.getInstance().recordError(ErrorType.NIOFS_ENCRYPT_INIT_FAILURE);
                 throw new RuntimeException("Failed to initialize OpenSSL GCM cipher", t);
             }
         }
@@ -274,6 +280,10 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
                 footer.addGcmTag(tag);
                 currentCipher = null;
             } catch (Throwable t) {
+                // RuntimeException path (bypasses INDEX_OUTPUT_ERROR); a GCM tag-finalization failure here can
+                // silently corrupt the footer tags, so meter it via the existing error flow
+                // (crypto.error.total{error_type=niofs_encrypt_finalize_failure}).
+                CryptoMetricsService.getInstance().recordError(ErrorType.NIOFS_ENCRYPT_FINALIZE_FAILURE);
                 throw new RuntimeException("Failed to finalize frame " + currentFrameNumber, t);
             }
         }

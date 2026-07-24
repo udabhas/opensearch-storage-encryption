@@ -29,7 +29,10 @@ import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 
 /**
  * An IndexInput implementation that decrypts data for reading
@@ -80,19 +83,19 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         // Get master key first
         this.masterKey = keyResolver.getDataKey().getEncoded();
 
-        // Read footer and cache metadata atomically
+        // Read footer (readViaFileChannel caches an inode-stamped metadata entry when the inode is stable).
+        // Derive fields straight from THIS footer rather than re-fetching via the path-based
+        // getOrLoadMetadata: a re-fetch would re-stat the name and could bind this reader's footer to a
+        // concurrently-recreated inode (TOCTOU). The footer is authoritative for this open channel.
         EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedFilePath, channel, masterKey, encryptionMetadataCache);
-
-        // Get metadata (already cached by readViaFileChannel)
-        var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedFilePath, footer, masterKey);
-        this.messageId = metadata.getFooter().getMessageId();
-        this.frameSize = metadata.getFooter().getFrameSize();
-        this.frameSizePower = metadata.getFooter().getFrameSizePower();
-        this.algorithm = EncryptionAlgorithm.fromId(metadata.getFooter().getAlgorithmId());
-        this.keySpec = new SecretKeySpec(metadata.getFileKey(), ALGORITHM);
+        this.messageId = footer.getMessageId();
+        this.frameSize = footer.getFrameSize();
+        this.frameSizePower = footer.getFrameSizePower();
+        this.algorithm = EncryptionAlgorithm.fromId(footer.getAlgorithmId());
+        this.keySpec = new SecretKeySpec(HkdfKeyDerivation.deriveFileKey(masterKey, this.messageId), ALGORITHM);
 
         // Calculate footer length
-        this.footerLength = metadata.getFooter().getFooterLength();
+        this.footerLength = footer.getFooterLength();
     }
 
     public CryptoBufferedIndexInput(
@@ -214,6 +217,10 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             return (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
         } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException
             | InvalidKeyException ex) {
+            // A cipher failure on the niofs read path (per-frame decrypt) — meter it via the existing error flow
+            // (crypto.error.total{error_type=niofs_decrypt_failure}) so a systemic decrypt fault surfaces as a
+            // signal rather than only an IOException that Lucene may surface later as a CorruptIndexException.
+            CryptoMetricsService.getInstance().recordError(ErrorType.NIOFS_DECRYPT_FAILURE);
             throw new IOException("Failed to decrypt block at position " + position, ex);
         }
     }

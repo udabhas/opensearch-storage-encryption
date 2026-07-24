@@ -20,13 +20,13 @@ public class CryptoIndexSettingsValidator {
      * Accepts standard AWS, China (aws-cn), and GovCloud (aws-us-gov) partitions.
      * Limits content after "kms:" to 1-2000 (just a safe limit) characters.
      */
-    private static final Pattern KMS_ARN_PATTERN = Pattern.compile("^arn:aws(-[^:]+)?:kms:.{1,2000}$");
+    public static final Pattern KMS_ARN_PATTERN = Pattern.compile("^arn:aws(-[^:]+)?:kms:.{1,2000}$");
 
     /**
      * Pattern for validating encryption context format.
-     * Format: key1=value1,key2=value2 (no spaces around = or ,)
+     * Format: key1=value1,key2=value2 (values may contain '=', no commas or spaces)
      */
-    private static final Pattern ENCRYPTION_CONTEXT_PATTERN = Pattern.compile("^[a-zA-Z0-9_-]+=[^,=]+(,[a-zA-Z0-9_-]+=[^,=]+)*$");
+    public static final Pattern ENCRYPTION_CONTEXT_PATTERN = Pattern.compile("^[a-zA-Z0-9_-]+=[^,]+(,[a-zA-Z0-9_-]+=[^,]+)*$");
 
     private static final String AWS_KMS_PROVIDER = "aws-kms";
 

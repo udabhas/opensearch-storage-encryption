@@ -5,7 +5,6 @@
 package org.opensearch.index.store.bufferpoolfs;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -22,7 +21,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 import org.junit.Before;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheValue;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
@@ -40,8 +39,9 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
     private static final ValueLayout.OfLong LAYOUT_LE_LONG = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat LAYOUT_LE_FLOAT = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
-    private BlockCache<RefCountedMemorySegment> mockCache;
-    private BlockSlotTinyCache mockTinyCache;
+    private BlockCache<RefCountedByteBuffer> mockCache;
+    private RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>> radixBlockTable;
+    private RadixBlockTableRegistry radixBlockTableRegistry;
     private ReadaheadManager mockReadaheadManager;
     private ReadaheadContext mockReadaheadContext;
     private Path testPath;
@@ -51,10 +51,11 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
     public void setUp() throws Exception {
         super.setUp();
         mockCache = mock(BlockCache.class);
-        mockTinyCache = mock(BlockSlotTinyCache.class);
+        testPath = Paths.get("/test/exhaustive.dat");
+        radixBlockTableRegistry = new RadixBlockTableRegistry();
+        radixBlockTable = radixBlockTableRegistry.acquire(testPath);
         mockReadaheadManager = mock(ReadaheadManager.class);
         mockReadaheadContext = mock(ReadaheadContext.class);
-        testPath = Paths.get("/test/exhaustive.dat");
         arena = Arena.ofAuto();
     }
 
@@ -909,6 +910,106 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
     }
 
     /**
+     * Regression test: for a file whose logical length is NOT a multiple of the 8KB block size,
+     * the final pooled block is still a full 8KB buffer whose tail past {@code length} is zero-fill (or footer
+     * ciphertext). Reads at or past {@code length} within that block MUST throw EOFException, not silently
+     * return the fabricated tail bytes — under the unauthenticated AES-CTR read path that would otherwise
+     * surface only later as a Lucene CRC / CorruptIndexException. Covers every read family (the bug left
+     * readBytes, the array reads, and the positional multi-byte variants unguarded).
+     */
+    public void testReadPastEofOnNonBlockMultipleLengthThrows() throws IOException {
+        // length falls inside the second (final) block, not on an 8192 boundary.
+        final long fileLength = BLOCK_SIZE + 100; // 8292
+        MemorySegment block0 = createBlockWithPattern(0, (byte) 1);
+        MemorySegment block1 = arena.allocate(BLOCK_SIZE); // full 8KB; only first 100 bytes are "valid"
+        for (int i = 0; i < 100; i++) {
+            block1.set(LAYOUT_BYTE, i, (byte) (i + 2));
+        }
+        setupTwoBlocks(block0, block1);
+
+        // Sequential reads exactly at EOF must throw for every width.
+        expectThrows(java.io.EOFException.class, () -> {
+            var in = createInput(fileLength);
+            in.seek(fileLength);
+            in.readByte();
+        });
+        expectThrows(java.io.EOFException.class, () -> {
+            var in = createInput(fileLength);
+            in.seek(fileLength - 1);
+            in.readShort();
+        });
+        expectThrows(java.io.EOFException.class, () -> {
+            var in = createInput(fileLength);
+            in.seek(fileLength - 3);
+            in.readInt();
+        });
+        expectThrows(java.io.EOFException.class, () -> {
+            var in = createInput(fileLength);
+            in.seek(fileLength - 7);
+            in.readLong();
+        });
+
+        // Bulk byte read whose span runs past EOF must throw (not copy zero-fill tail).
+        expectThrows(java.io.EOFException.class, () -> {
+            var in = createInput(fileLength);
+            in.seek(fileLength - 10);
+            in.readBytes(new byte[20], 0, 20);
+        });
+
+        // Array reads whose span runs past EOF must throw.
+        expectThrows(java.io.EOFException.class, () -> {
+            var in = createInput(fileLength);
+            in.seek(fileLength - 4);
+            in.readInts(new int[2], 0, 2);
+        });
+        expectThrows(java.io.EOFException.class, () -> {
+            var in = createInput(fileLength);
+            in.seek(fileLength - 8);
+            in.readLongs(new long[2], 0, 2);
+        });
+        expectThrows(java.io.EOFException.class, () -> {
+            var in = createInput(fileLength);
+            in.seek(fileLength - 4);
+            in.readFloats(new float[2], 0, 2);
+        });
+
+        // Positional multi-byte reads past EOF must throw (bug: only readByte(long) was guarded).
+        expectThrows(java.io.EOFException.class, () -> createInput(fileLength).readShort(fileLength - 1));
+        expectThrows(java.io.EOFException.class, () -> createInput(fileLength).readInt(fileLength - 3));
+        expectThrows(java.io.EOFException.class, () -> createInput(fileLength).readLong(fileLength - 7));
+    }
+
+    /**
+     * Companion to {@link #testReadPastEofOnNonBlockMultipleLengthThrows}: the EOF guard must NOT break
+     * legitimate reads of the last valid bytes right up to {@code length}.
+     */
+    public void testReadLastValidBytesOnNonBlockMultipleLengthSucceeds() throws IOException {
+        final long fileLength = BLOCK_SIZE + 100; // 8292
+        MemorySegment block0 = createBlockWithPattern(0, (byte) 1);
+        MemorySegment block1 = arena.allocate(BLOCK_SIZE);
+        for (int i = 0; i < 100; i++) {
+            block1.set(LAYOUT_BYTE, i, (byte) (i + 2));
+        }
+        setupTwoBlocks(block0, block1);
+
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        // Last valid byte (at length-1) reads fine and leaves the pointer at EOF.
+        input.seek(fileLength - 1);
+        assertEquals("last valid byte", (byte) (99 + 2), input.readByte());
+        assertEquals("pointer at EOF", fileLength, input.getFilePointer());
+
+        // Reading the final valid long (ending exactly at length) must succeed.
+        input.seek(fileLength - Long.BYTES);
+        input.readLong(); // no throw
+
+        // Bulk read of exactly the remaining valid bytes (ending at length) must succeed.
+        input.seek(fileLength - 20);
+        input.readBytes(new byte[20], 0, 20); // no throw
+        assertEquals("pointer at EOF after bulk", fileLength, input.getFilePointer());
+    }
+
+    /**
      * Tests seek past EOF throws exception.
      */
     public void testSeekPastEOF() throws IOException {
@@ -1142,12 +1243,12 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         // Close the input
         input.close();
 
-        // Verify that tiny cache was cleared (which indicates cleanup happened)
-        verify(mockTinyCache, times(1)).clear();
+        // Verify the L1 RadixBlockTable was released from the registry on master close
+        assertEquals("master close should release the L1 table", 0, radixBlockTableRegistry.getTableCount());
     }
 
     /**
-     * Tests that close clears the block slot tiny cache.
+     * Tests that close releases the L1 RadixBlockTable from the registry.
      */
     public void testCloseClearsBlockSlotCache() throws IOException {
         long fileLength = BLOCK_SIZE * 2;
@@ -1163,12 +1264,12 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         // Close the input
         input.close();
 
-        // Verify that tiny cache clear was called
-        verify(mockTinyCache, times(1)).clear();
+        // Verify the L1 RadixBlockTable was released from the registry on master close
+        assertEquals("master close should release the L1 table", 0, radixBlockTableRegistry.getTableCount());
     }
 
     /**
-     * Tests that close on master instance clears tiny cache but slice does not.
+     * Tests that close on master instance releases the L1 table but slice close does not.
      */
     public void testCloseOnSliceDoesNotClearTinyCache() throws IOException {
         long fileLength = BLOCK_SIZE * 2;
@@ -1183,20 +1284,17 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         // Read from slice
         slice.readByte();
 
-        // Reset mock to clear any previous interactions
-        clearInvocations(mockTinyCache);
-
         // Close the slice (not the master)
         slice.close();
 
-        // Verify that tiny cache clear was NOT called for slice
-        verify(mockTinyCache, never()).clear();
+        // Slice close must NOT release the shared L1 RadixBlockTable from the registry.
+        assertEquals("slice close must not release the L1 table", 1, radixBlockTableRegistry.getTableCount());
 
         // Now close the master
         input.close();
 
-        // Verify that tiny cache clear WAS called for master
-        verify(mockTinyCache, times(1)).clear();
+        // Master close releases the L1 table; refCount hits 0 so it is removed from the registry.
+        assertEquals("master close should release the L1 table", 0, radixBlockTableRegistry.getTableCount());
     }
 
     /**
@@ -1264,8 +1362,8 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         input.close();
         input.close();
 
-        // Verify tiny cache clear was called only once (idempotent)
-        verify(mockTinyCache, times(1)).clear();
+        // Verify the L1 RadixBlockTable was released from the registry (idempotent across close)
+        assertEquals("master close should release the L1 table", 0, radixBlockTableRegistry.getTableCount());
 
         // Verify readahead manager close was called only once
         verify(mockReadaheadManager, times(1)).close();
@@ -1293,8 +1391,8 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         // Close should unpin the current block
         input.close();
 
-        // Verify tiny cache was cleared
-        verify(mockTinyCache, times(1)).clear();
+        // Verify the L1 RadixBlockTable was released from the registry
+        assertEquals("master close should release the L1 table", 0, radixBlockTableRegistry.getTableCount());
     }
 
     /**
@@ -1312,7 +1410,7 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         input.close();
 
         // Should still clear cache and close readahead manager
-        verify(mockTinyCache, times(1)).clear();
+        assertEquals("master close should release the L1 table", 0, radixBlockTableRegistry.getTableCount());
         verify(mockReadaheadManager, times(1)).close();
     }
 
@@ -1371,7 +1469,7 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         input.close();
 
         // Verify cache clear was called
-        verify(mockTinyCache, times(1)).clear();
+        assertEquals("master close should release the L1 table", 0, radixBlockTableRegistry.getTableCount());
         verify(mockReadaheadManager, times(1)).close();
     }
 
@@ -1406,76 +1504,42 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         setupBlock(BLOCK_SIZE * 3, block3);
     }
 
+    /**
+     * Publishes a block at {@code offset} into both the real L1 (RadixBlockTable) and the mocked
+     * L2 ({@code mockCache.get}/{@code getOrLoad}) so the IndexInput resolves it on any path.
+     *
+     * <p>The arena-backed {@link MemorySegment} is exposed to {@link RefCountedByteBuffer} via its
+     * {@code asByteBuffer()} view, preserving the pattern bytes written by the test helpers.
+     */
     private void setupBlock(long offset, MemorySegment segment) throws IOException {
-        // Create a real RefCountedMemorySegment with a no-op releaser
-        RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, (int) segment.byteSize(), (seg) -> {
-            // No-op releaser for tests
-        });
+        RefCountedByteBuffer refSegment = new RefCountedByteBuffer(segment.asByteBuffer(), (int) segment.byteSize());
 
-        BlockCacheValue<RefCountedMemorySegment> value = mock(BlockCacheValue.class);
+        BlockCacheValue<RefCountedByteBuffer> value = mock(BlockCacheValue.class);
         when(value.value()).thenReturn(refSegment);
         when(value.tryPin()).thenReturn(true);
 
-        when(mockTinyCache.acquireRefCountedValue(eq(offset), any())).thenReturn(value);
-        when(mockTinyCache.acquireRefCountedValue(eq(offset))).thenReturn(value);
+        long blockId = offset >>> 13; // CACHE_BLOCK_SIZE_POWER for 8 KiB blocks
+        radixBlockTable.put(blockId, value);
+        when(mockCache.get(any(FileBlockCacheKey.class))).thenReturn(value);
         when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenReturn(value);
     }
 
     private CachedMemorySegmentIndexInput createInput(long length) {
         return CachedMemorySegmentIndexInput
-            .newInstance("test", testPath, length, mockCache, mockReadaheadManager, mockReadaheadContext, mockTinyCache);
+            .newInstance(
+                "test",
+                testPath,
+                length,
+                mockCache,
+                mockReadaheadManager,
+                mockReadaheadContext,
+                radixBlockTable,
+                radixBlockTableRegistry
+            );
     }
 
     /**
-     * Tests that consecutive reads within the same block reuse the cached block
-     * without calling acquireRefCountedValue again (fast path).
-     */
-    public void testFastPathReusesCurrentBlock() throws IOException {
-        long fileLength = BLOCK_SIZE * 2;
-        MemorySegment block0 = createBlockWithPattern(0, (byte) 0xAB);
-        setupOneBlock(block0);
-        CachedMemorySegmentIndexInput input = createInput(fileLength);
-        // First read triggers slow path — acquires from L1/L2
-        byte b1 = input.readByte();
-        assertEquals((byte) 0xAB, b1);
-        verify(mockTinyCache, times(1)).acquireRefCountedValue(eq(0L), any());
-        // Subsequent reads within same block should NOT call acquireRefCountedValue again
-        byte b2 = input.readByte();
-        assertEquals((byte) 0xAB, b2);
-        byte b3 = input.readByte();
-        assertEquals((byte) 0xAB, b3);
-        // Still only 1 call — fast path reused currentBlock
-        verify(mockTinyCache, times(1)).acquireRefCountedValue(eq(0L), any());
-        input.close();
-    }
-
-    /**
-     * Tests that reading across a block boundary triggers the slow path
-     * (acquireRefCountedValue called for the new block).
-     */
-    public void testSlowPathOnBlockTransition() throws IOException {
-        long fileLength = BLOCK_SIZE * 2;
-        MemorySegment block0 = createBlockWithPattern(0, (byte) 0x11);
-        MemorySegment block1 = createBlockWithPattern(1, (byte) 0x22);
-        setupTwoBlocks(block0, block1);
-        CachedMemorySegmentIndexInput input = createInput(fileLength);
-        // Read from block 0
-        input.readByte();
-        verify(mockTinyCache, times(1)).acquireRefCountedValue(eq(0L), any());
-        // Seek to block 1
-        input.seek(BLOCK_SIZE);
-        input.readByte();
-        // Now acquireRefCountedValue called for block 1 offset
-        verify(mockTinyCache, times(1)).acquireRefCountedValue(eq((long) BLOCK_SIZE), any());
-        // Read more from block 1 — should reuse (no additional calls)
-        input.readByte();
-        input.readByte();
-        verify(mockTinyCache, times(1)).acquireRefCountedValue(eq((long) BLOCK_SIZE), any());
-        input.close();
-    }
-
-    /**
-     * Test for the bug that caused negative file offsets in production.
+     * Test for the bug that caused negative file offsets.
      *
      * The old MultiSegmentImpl implementation would double-count offsets when creating slices,
      * leading to negative overflow in the block cache key calculation.

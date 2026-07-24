@@ -4,8 +4,6 @@
  */
 package org.opensearch.index.store.bufferpoolfs;
 
-import java.nio.file.Path;
-
 import org.opensearch.index.store.PanamaNativeAccess;
 
 /**
@@ -32,12 +30,10 @@ public class StaticConfigs {
     }
 
     /** 
-     * Default alignment for Direct I/O operations in bytes.
-     * This is a safe fallback (512 bytes) used when the filesystem block size
-     * cannot be determined. Callers that have a path available should prefer
-     * {@link #getDirectIOAlignment(Path)} for the actual filesystem block size.
+     * Alignment requirement for Direct I/O operations in bytes.
+     * Must be at least 512 bytes or the system page size, whichever is larger.
      */
-    public static final int DIRECT_IO_ALIGNMENT = 512;
+    public static final int DIRECT_IO_ALIGNMENT = Math.max(512, getPageSizeSafe());
 
     /** 
      * Power of 2 for Direct I/O write buffer size (2^18 = 256KB).
@@ -60,29 +56,42 @@ public class StaticConfigs {
     public static final long CACHE_BLOCK_MASK = CACHE_BLOCK_SIZE - 1;
 
     /**
-     * Default maximum number of cached FileChannels in the node-level FileChannelCache.
+     * Feature flag for read-path CPU optimizations. Gates:
+     * <ul>
+     *   <li>{@link org.opensearch.index.store.block.RefCountedByteBuffer} segment construction
+     *       (global-arena reinterpret vs buffer-scoped {@code MemorySegment.ofBuffer}).</li>
+     *   <li>{@code CachedMemorySegmentIndexInput} slice path-normalize skip.</li>
+     * </ul>
+     *
+     * <p>Defaults to {@code false}: the optimization is opt-in and is wired (if at all)
+     * once at plugin startup from a cluster setting. The buffer-scoped {@code MemorySegment.ofBuffer}
+     * path is the safe default and matches prior behavior.
      */
-    public static final int DEFAULT_MAX_FILE_CHANNELS = 256;
+    private static volatile boolean memorySegmentGlobalArenaAndNormalizePathOptimEnabled = false;
 
     /**
-     * Default expiry time in seconds for idle FileChannels in the FileChannelCache.
-     * Channels not accessed within this duration are evicted. 300s (5 min) balances
-     * FD reuse for active shards with timely cleanup for idle ones.
+     * Returns whether read-path CPU optimizations are enabled.
+     * See {@link #memorySegmentGlobalArenaAndNormalizePathOptimEnabled} field docs.
      */
-    public static final long DEFAULT_FD_CACHE_EXPIRE_AFTER_ACCESS_SECONDS = 300;
+    public static boolean memorySegmentGlobalArenaAndNormalizePathOptimEnabled() {
+        return memorySegmentGlobalArenaAndNormalizePathOptimEnabled;
+    }
 
     /**
-     * Returns the correct Direct I/O alignment for the filesystem containing the given path.
-     *
-     * <p>Direct I/O requires buffers and offsets to be aligned to the filesystem's logical
-     * block size, not the kernel's virtual memory page size. Using the page size (e.g., 4096
-     * or 64KB on ARM) instead of the filesystem block size (typically 512 or 4096) can waste
-     * memory and cause incorrect alignment on systems with non-standard page sizes.
-     *
-     * @param path a path on the target filesystem
-     * @return the filesystem block size in bytes (guaranteed to be a power of 2)
+     * Sets the read-path CPU optimization feature flag. Intended to be called once at plugin
+     * startup (e.g. from {@code CryptoDirectoryPlugin.createComponents()}).
      */
-    public static int getDirectIOAlignment(Path path) {
-        return Math.max(DIRECT_IO_ALIGNMENT, PanamaNativeAccess.getFileSystemBlockSize(path));
+    public static void setMemorySegmentGlobalArenaAndNormalizePathOptimEnabled(boolean value) {
+        memorySegmentGlobalArenaAndNormalizePathOptimEnabled = value;
+    }
+
+    private static int getPageSizeSafe() {
+        try {
+            return PanamaNativeAccess.getPageSize();
+        } catch (Throwable e) {
+            // Native access not available (class initialization failed, native library not found, etc.)
+            // Fall back to common page size
+            return 4096;
+        }
     }
 }

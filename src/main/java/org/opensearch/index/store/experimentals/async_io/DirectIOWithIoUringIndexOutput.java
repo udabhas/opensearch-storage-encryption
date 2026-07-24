@@ -7,8 +7,8 @@ package org.opensearch.index.store.experimentals.async_io;
 import static org.opensearch.index.store.block_loader.DirectIOReaderUtil.getDirectOpenOption;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_MASK;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE;
+import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.DIRECT_IO_ALIGNMENT;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.DIRECT_IO_WRITE_BUFFER_SIZE_POWER;
-import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.getDirectIOAlignment;
 
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
@@ -33,7 +33,7 @@ import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.BufferedChecksum;
 import org.apache.lucene.store.IndexOutput;
 import org.opensearch.common.SuppressForbidden;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheKey;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
@@ -74,8 +74,8 @@ public class DirectIOWithIoUringIndexOutput extends IndexOutput {
     private static final Logger LOGGER = LogManager.getLogger(DirectIOWithIoUringIndexOutput.class);
 
     private static final int BUFFER_SIZE = 1 << DIRECT_IO_WRITE_BUFFER_SIZE_POWER;
-    private final Pool<RefCountedMemorySegment> memorySegmentPool;
-    private final BlockCache<RefCountedMemorySegment> blockCache;
+    private final Pool<RefCountedByteBuffer> memorySegmentPool;
+    private final BlockCache<RefCountedByteBuffer> blockCache;
     private final FileChannel channel;          // for sync operations (truncate)
     private final IoUringFile ioUringFile;      // for async write operations
     private final ByteBuffer buffer;            // logical data buffer
@@ -83,7 +83,6 @@ public class DirectIOWithIoUringIndexOutput extends IndexOutput {
     private final Checksum digest;
     private final Path path;
     private final IoEventLoopGroup group;
-    private final int alignment;
 
     // Async write management
     private final ConcurrentLinkedQueue<CompletableFuture<Integer>> pendingWrites = new ConcurrentLinkedQueue<>();
@@ -108,8 +107,8 @@ public class DirectIOWithIoUringIndexOutput extends IndexOutput {
     public DirectIOWithIoUringIndexOutput(
         Path path,
         String name,
-        Pool<RefCountedMemorySegment> memorySegmentPool,
-        BlockCache<RefCountedMemorySegment> blockCache,
+        Pool<RefCountedByteBuffer> memorySegmentPool,
+        BlockCache<RefCountedByteBuffer> blockCache,
         IoEventLoopGroup group
     )
         throws IOException {
@@ -122,8 +121,6 @@ public class DirectIOWithIoUringIndexOutput extends IndexOutput {
         if (path.getParent() != null) {
             Files.createDirectories(path.getParent());
         }
-
-        this.alignment = getDirectIOAlignment(path);
 
         this.channel = FileChannel
             .open(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, getDirectOpenOption());
@@ -140,10 +137,10 @@ public class DirectIOWithIoUringIndexOutput extends IndexOutput {
             .join(); // Block on initialization
 
         // Main logical buffer
-        this.buffer = ByteBuffer.allocateDirect(BUFFER_SIZE + alignment - 1).alignedSlice(alignment);
+        this.buffer = ByteBuffer.allocateDirect(BUFFER_SIZE + DIRECT_IO_ALIGNMENT - 1).alignedSlice(DIRECT_IO_ALIGNMENT);
 
         // Zero padding buffer
-        this.zeroPaddingBuffer = ByteBuffer.allocateDirect(alignment + alignment - 1).alignedSlice(alignment);
+        this.zeroPaddingBuffer = ByteBuffer.allocateDirect(DIRECT_IO_ALIGNMENT + DIRECT_IO_ALIGNMENT - 1).alignedSlice(DIRECT_IO_ALIGNMENT);
 
         this.digest = new BufferedChecksum(new CRC32());
     }
@@ -197,11 +194,11 @@ public class DirectIOWithIoUringIndexOutput extends IndexOutput {
         buffer.flip(); // position = 0, limit = size
 
         // Create a dedicated buffer for this async operation to avoid races
-        int rem = size % alignment;
-        int pad = (rem == 0) ? 0 : (alignment - rem);
+        int rem = size % DIRECT_IO_ALIGNMENT;
+        int pad = (rem == 0) ? 0 : (DIRECT_IO_ALIGNMENT - rem);
         int totalWriteLen = size + pad;
 
-        ByteBuffer dedicatedBuffer = ByteBuffer.allocateDirect(totalWriteLen + alignment - 1).alignedSlice(alignment);
+        ByteBuffer dedicatedBuffer = ByteBuffer.allocateDirect(totalWriteLen + DIRECT_IO_ALIGNMENT - 1).alignedSlice(DIRECT_IO_ALIGNMENT);
         dedicatedBuffer.put(buffer); // Copy actual content
 
         // Prepare smaller cache segments within the large write
@@ -266,7 +263,7 @@ public class DirectIOWithIoUringIndexOutput extends IndexOutput {
 
     private void tryCachePlaintextSegment(MemorySegment cacheSegment, int size, long offset) {
         try {
-            final RefCountedMemorySegment refSegment = memorySegmentPool.tryAcquire(10, TimeUnit.MILLISECONDS);
+            final RefCountedByteBuffer refSegment = memorySegmentPool.tryAcquire(10, TimeUnit.MILLISECONDS);
 
             final MemorySegment pooledSlice = refSegment.segment().asSlice(0, size);
             MemorySegment.copy(cacheSegment, 0, pooledSlice, 0, size);

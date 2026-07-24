@@ -24,10 +24,7 @@ import org.opensearch.common.unit.TimeValue;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
-import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
-
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST)
-@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class IndexTemplateIntegTests extends OpenSearchIntegTestCase {
 
     @Override
@@ -42,8 +39,6 @@ public class IndexTemplateIntegTests extends OpenSearchIntegTestCase {
             .put(super.nodeSettings(nodeOrdinal))
             .put("plugins.crypto.enabled", true)
             .put("node.store.crypto.pool_size_percentage", 0.05)
-            .put("node.store.crypto.warmup_percentage", 0.0)
-            .put("node.store.crypto.cache_to_pool_ratio", 0.8)
             .put("node.store.crypto.key_refresh_interval", "30s")
             .build();
     }

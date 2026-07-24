@@ -4,7 +4,6 @@
  */
 package org.opensearch.index.store.block_loader;
 
-import static org.opensearch.index.store.block_loader.DirectIOReaderUtil.directIOReadAligned;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_MASK;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE_POWER;
@@ -22,12 +21,14 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.index.store.pool.Pool;
 
 /**
@@ -44,42 +45,55 @@ import org.opensearch.index.store.pool.Pool;
  * <li>Automatic in-place decryption of loaded blocks</li>
  * <li>Memory pool integration for efficient buffer management</li>
  * <li>Block-aligned operations for optimal storage performance</li>
- * <li>Cached FileChannels via {@link FileChannelCache} to avoid per-load open/close overhead</li>
  * </ul>
  *
  * @opensearch.internal
  */
 @SuppressWarnings("preview")
-public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySegment> {
+public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuffer> {
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectIOBlockLoader.class);
 
     private final KeyResolver keyResolver;
-    private final Pool<RefCountedMemorySegment> segmentPool;
+    private final Pool<RefCountedByteBuffer> segmentPool;
     private final EncryptionMetadataCache encryptionMetadataCache;
-    private final FileChannelCache fileChannelCache;
+
+    /** Direct-I/O backend with the node-level cached FileChannel (avoids open()/close() per block load). */
+    private static final FileChannelBackend IO_BACKEND = new FileChannelBackend();
+
+    /**
+     * Bounded retry for a zero-byte Direct-I/O read. A valid, non-empty file can transiently return
+     * 0 bytes on a network filesystem (NFS/EFS client data-cache staleness right after a metadata change);
+     * a single attempt would surface that as a spurious EOFException and fail (RED) the shard. Local
+     * EBS/NVMe does not exhibit this, so in practice the first attempt succeeds and the retry
+     * loop is never entered — it is cheap insurance for denser / shared-storage configurations.
+     */
+    private static final int ZERO_BYTE_READ_MAX_ATTEMPTS = 3;
+    private static final long ZERO_BYTE_READ_INITIAL_DELAY_MS = 5L;
+
+    /** Rate-limit window for the degraded-read WARN so a sustained pool-exhaustion incident does not flood the log. */
+    private static final long DEGRADED_WARN_INTERVAL_MS = 60_000L;
+    /** Last-WARN timestamp (epoch ms) used as a CAS gate so only one thread WARNs per window. */
+    private static final java.util.concurrent.atomic.AtomicLong DEGRADED_WARN_GATE = new java.util.concurrent.atomic.AtomicLong(0L);
 
     /**
      * Constructs a new CryptoDirectIOBlockLoader with the specified memory pool and key resolver.
      *
      * @param segmentPool the memory segment pool for acquiring buffer space
      * @param keyResolver the resolver for obtaining encryption keys and initialization vectors
-     * @param encryptionMetadataCache cache for encryption metadata
-     * @param fileChannelCache node-level cache of FileChannels bounded by max open FDs
+     * @param encryptionMetadataCache the per-file encryption metadata (footer + derived key) cache
      */
     public CryptoDirectIOBlockLoader(
-        Pool<RefCountedMemorySegment> segmentPool,
+        Pool<RefCountedByteBuffer> segmentPool,
         KeyResolver keyResolver,
-        EncryptionMetadataCache encryptionMetadataCache,
-        FileChannelCache fileChannelCache
+        EncryptionMetadataCache encryptionMetadataCache
     ) {
         this.segmentPool = segmentPool;
         this.keyResolver = keyResolver;
         this.encryptionMetadataCache = encryptionMetadataCache;
-        this.fileChannelCache = fileChannelCache;
     }
 
     @Override
-    public RefCountedMemorySegment[] load(Path filePath, long startOffset, long blockCount, long poolTimeoutMs) throws Exception {
+    public RefCountedByteBuffer[] load(Path filePath, long startOffset, long blockCount, long poolTimeoutMs) throws Exception {
         if (!Files.exists(filePath)) {
             throw new NoSuchFileException(filePath.toString());
         }
@@ -92,35 +106,41 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             throw new IllegalArgumentException("blockCount must be positive: " + blockCount);
         }
 
-        RefCountedMemorySegment[] result = new RefCountedMemorySegment[(int) blockCount];
+        RefCountedByteBuffer[] result = new RefCountedByteBuffer[(int) blockCount];
         long readLength = blockCount << CACHE_BLOCK_SIZE_POWER;
-        String normalizedPath = filePath.toAbsolutePath().normalize().toString();
 
-        try (Arena arena = Arena.ofConfined(); RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
-            MemorySegment readBytes = directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
+        // Filesystem block size for Direct I/O alignment (local disk).
+        int fsBlockSize = Math.toIntExact(Files.getFileStore(filePath).getBlockSize());
+
+        try (Arena arena = Arena.ofConfined()) {
+            // Read via the shared FileChannel backend (node-level cached, positional Direct I/O reads).
+            // Reusing the open channel across block-cache misses avoids an open()/close() syscall per load.
+            MemorySegment readBytes = readWithZeroByteRetry(filePath, startOffset, readLength, arena, fsBlockSize);
             long bytesRead = readBytes.byteSize();
 
+            String normalizedPath = filePath.toAbsolutePath().normalize().toString();
             byte[] masterKey = keyResolver.getDataKey().getEncoded();
 
-            // Get footer from disk and load metadata (footer + derived key) atomically into cache
-            EncryptionFooter footer = readFooterFromDisk(normalizedPath, filePath, masterKey);
-
-            // Get or create metadata atomically - ensures footer and key are always consistent
-            var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, masterKey);
-            byte[] messageId = metadata.getFooter().getMessageId();
-            byte[] fileKey = metadata.getFileKey();
+            // Get footer from disk (readFooterFromDisk populates the metadata cache with an inode-stamped
+            // entry when the inode is stable — see EncryptionFooter.readViaFileChannel). Derive messageId/key
+            // straight from THIS footer rather than re-fetching via the path-based getOrLoadMetadata: a
+            // re-fetch would re-stat the name and could bind this read's footer to a concurrently-recreated
+            // inode (TOCTOU). The footer here is authoritative for the bytes we just read.
+            EncryptionFooter footer = readFooterFromDisk(filePath, masterKey);
+            byte[] messageId = footer.getMessageId();
+            byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveFileKey(masterKey, messageId);
 
             // Use frame-based decryption with derived file key
             MemorySegmentDecryptor
                 .decryptInPlaceFrameBased(
                     readBytes.address(),
                     readBytes.byteSize(),
-                    fileKey,
-                    masterKey,
-                    messageId,
-                    EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE,
-                    startOffset,
-                    normalizedPath,
+                    fileKey,                                    // Derived file key (matches write path)
+                    masterKey,                                  // Master key for IV computation
+                    messageId,                                  // Message ID from footer
+                    org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
+                    startOffset,                                 // File offset
+                    filePath.toAbsolutePath().normalize().toString(),
                     encryptionMetadataCache
                 );
 
@@ -133,29 +153,89 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
             try {
                 while (blockIndex < blockCount && bytesCopied < bytesRead) {
-                    RefCountedMemorySegment handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
-                    MemorySegment pooled = handle.segment();
-
                     int remaining = (int) (bytesRead - bytesCopied);
                     int toCopy = Math.min(CACHE_BLOCK_SIZE, remaining);
 
-                    if (toCopy > 0) {
-                        MemorySegment.copy(readBytes, bytesCopied, pooled, 0, toCopy);
+                    // Acquire a pooled buffer (5s for critical loads, 50ms for prefetch). If the pool
+                    // is exhausted/throttled and the timeout elapses, DEGRADE rather than fail the read:
+                    // back this block with a transient, non-pooled, non-cacheable buffer so the read
+                    // completes uncached instead of turning a memory-pressure throttle into a fatal
+                    // RecoveryFailedException (shard RED). The decrypted bytes are already in
+                    // {@code readBytes}; only the cache-warm of this block is sacrificed.
+                    //
+                    // The fallback MUST use a HEAP buffer (ByteBuffer.allocate), NOT allocateDirect: the
+                    // throttle/exhaustion we are recovering from means the -XX:MaxDirectMemorySize budget
+                    // is the scarce resource, so allocating MORE direct memory here would (a) add to the
+                    // pressure and (b) risk an OutOfMemoryError — an Error, not an IOException, which would
+                    // escape every catch on this path and propagate fatally through Caffeine to recovery,
+                    // re-creating the exact RED this fallback exists to prevent. Heap allocation draws from
+                    // the GC heap and cannot raise the direct-memory OOM. (This differs from the write path,
+                    // which on pool-acquire failure allocates nothing and simply skips the cache-warm.)
+                    RefCountedByteBuffer handle;
+                    try {
+                        handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException e) {
+                        releaseHandles(result, blockIndex);
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted while acquiring pool segment", e);
+                    } catch (IOException | OutOfMemoryError e) {
+                        // Degraded fallback: serve the block from a transient HEAP buffer that is NOT
+                        // pool-accounted and MUST NOT be cached (see RefCountedByteBuffer.transientFallback).
+                        // We also catch OutOfMemoryError defensively: if the pool's own allocateDirect
+                        // exhausted direct memory and rethrew the OOM, we degrade here rather than let the
+                        // Error fail the shard.
+                        // Count every degraded read (always — cheap) and WARN on the first occurrence in
+                        // each rate-limit window. DEBUG alone (off in prod) made a node silently serving
+                        // uncached reads under memory pressure look identical to a healthy one, hiding the
+                        // exact saturation signal needed during an incident.
+                        // Bare call — the metrics singleton is initialized at node startup.
+                        CryptoMetricsService.getInstance().recordDegradedRead();
+                        long nowMs = System.currentTimeMillis();
+                        long lastWarn = DEGRADED_WARN_GATE.get();
+                        if (nowMs - lastWarn >= DEGRADED_WARN_INTERVAL_MS && DEGRADED_WARN_GATE.compareAndSet(lastWarn, nowMs)) {
+                            LOGGER
+                                .warn(
+                                    "Pool exhausted/throttled — serving DEGRADED (uncached, heap-fallback) read for path={} "
+                                        + "offset={} block={}: {}. Node is shedding cache under memory pressure "
+                                        + "(see crypto.read.degraded.total).",
+                                    filePath,
+                                    startOffset,
+                                    blockIndex,
+                                    e.toString()
+                                );
+                        } else {
+                            LOGGER
+                                .debug(
+                                    "Pool acquire failed (degraded, uncached, heap fallback) for path={} offset={} block={}: {}",
+                                    filePath,
+                                    startOffset,
+                                    blockIndex,
+                                    e.toString()
+                                );
+                        }
+                        handle = RefCountedByteBuffer
+                            .transientFallback(
+                                java.nio.ByteBuffer.allocate(CACHE_BLOCK_SIZE).order(java.nio.ByteOrder.LITTLE_ENDIAN),
+                                CACHE_BLOCK_SIZE
+                            );
                     }
 
-                    result[blockIndex++] = handle;
+                    if (toCopy > 0) {
+                        MemorySegment.copy(readBytes, bytesCopied, handle.segment(), 0, toCopy);
+                    }
+
+                    result[blockIndex++] = handle;  // Store the handle, not the segment
                     bytesCopied += toCopy;
                 }
-            } catch (InterruptedException e) {
-                releaseHandles(result, blockIndex);
-                Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while acquiring pool segment", e);
             } catch (IOException e) {
+                // Only reached for the genuinely-fatal interrupt path above; pool exhaustion no longer
+                // reaches here (it degrades). Release any handles acquired so far, then propagate.
                 releaseHandles(result, blockIndex);
                 throw e;
             }
 
             return result;
+
         } catch (NoSuchFileException e) {
             throw e;
         } catch (Exception e) {
@@ -164,22 +244,100 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         }
     }
 
-    private void releaseHandles(RefCountedMemorySegment[] handles, int upTo) {
+    /**
+     * Read via the cached FileChannel Direct-I/O backend, retrying a SHORT read (zero-byte OR
+     * partial-then-stalled) up to {@link #ZERO_BYTE_READ_MAX_ATTEMPTS} times with a short linear
+     * backoff, and failing loudly if the full expected length is still not read.
+     *
+     * <p>Correctness contract: a non-EOF read must return exactly the expected number of bytes, where
+     * {@code expected = min(readLength, fileSize - startOffset)}. The previous guard accepted ANY
+     * non-empty read ({@code byteSize() > 0}) as complete, so a partial-then-transient-zero read (some
+     * bytes, then a 0-byte return before the full request was satisfied) was accepted and the block's
+     * unread tail was decrypted/served as uninitialized or stale bytes. Because the data read path is
+     * unauthenticated AES-CTR, that does not fail fast — it surfaces later as a Lucene CRC /
+     * {@code CorruptIndexException}. Verifying the full expected length covers both the all-zero and the
+     * partial-then-zero cases, and never returns an under-filled non-final block. See
+     * {@link #ZERO_BYTE_READ_MAX_ATTEMPTS} for why transient short reads can occur on network filesystems
+     * (latent on local EBS/NVMe, but cheap insurance for denser/shared-storage configs).
+     */
+    private MemorySegment readWithZeroByteRetry(Path filePath, long startOffset, long readLength, Arena arena, int fsBlockSize)
+        throws IOException {
+        // Bytes the file can actually supply for this range; a read shorter than this (when not at true
+        // EOF) is a transient short read to be retried, NOT a legitimate end-of-file short read.
+        long fileSize = Files.size(filePath);
+        long expected = Math.max(0L, Math.min(readLength, fileSize - startOffset));
+
+        MemorySegment readBytes = IO_BACKEND.read(filePath, startOffset, readLength, arena, fsBlockSize);
+        if (readLength == 0 || readBytes.byteSize() >= expected) {
+            return readBytes;  // got everything the file can give for this range (incl. legit EOF short read)
+        }
+        for (int attempt = 1; attempt < ZERO_BYTE_READ_MAX_ATTEMPTS; attempt++) {
+            // Meter the retry via the existing error flow (crypto.error.total{error_type=read_short_read_retry}):
+            // a sub-full read on a network filesystem (NFS/EFS cache staleness) is a silent-corruption precursor
+            // under unauthenticated AES-CTR. Bare call — the metrics
+            // singleton is initialized at node startup.
+            CryptoMetricsService.getInstance().recordError(ErrorType.READ_SHORT_READ_RETRY);
+            LOGGER
+                .warn(
+                    "Short read at offset {} for {} (got {} of expected {} bytes; possible fs cache staleness or "
+                        + "partial Direct-I/O read), retrying ({}/{})",
+                    startOffset,
+                    filePath,
+                    readBytes.byteSize(),
+                    expected,
+                    attempt,
+                    ZERO_BYTE_READ_MAX_ATTEMPTS - 1
+                );
+            try {
+                Thread.sleep(ZERO_BYTE_READ_INITIAL_DELAY_MS * attempt);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted during short-read retry for " + filePath, ie);
+            }
+            readBytes = IO_BACKEND.read(filePath, startOffset, readLength, arena, fsBlockSize);
+            if (readBytes.byteSize() >= expected) {
+                return readBytes;
+            }
+        }
+        // Still short after retries: fail loudly rather than decrypt/serve an under-filled block as
+        // valid plaintext (silent corruption under AES-CTR). The block cache load propagates this.
+        throw new IOException(
+            "Short read after "
+                + (ZERO_BYTE_READ_MAX_ATTEMPTS - 1)
+                + " retries: got "
+                + readBytes.byteSize()
+                + " of expected "
+                + expected
+                + " bytes at offset "
+                + startOffset
+                + " for "
+                + filePath
+        );
+    }
+
+    private void releaseHandles(RefCountedByteBuffer[] handles, int upTo) {
+        // close() is a no-op on the GC-managed RefCountedByteBuffer; dropping the references
+        // here lets the JVM Cleaner reclaim the backing direct buffers (and decrement the
+        // pool's buffersInUse counter) once they become unreachable. Retained for clarity
+        // of partial-failure cleanup intent.
         for (int i = 0; i < upTo; i++) {
             if (handles[i] != null) {
                 handles[i].close();
+                handles[i] = null;
             }
         }
     }
 
-    private EncryptionFooter readFooterFromDisk(String normalizedPath, Path filePath, byte[] masterKey) throws IOException {
+    private EncryptionFooter readFooterFromDisk(Path filePath, byte[] masterKey) throws IOException {
+        String normalizedPath = filePath.toAbsolutePath().normalize().toString();
+
         // Check cache first for fast path
         EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
         if (cachedFooter != null) {
             return cachedFooter;
         }
 
-        // Cache miss - read from disk using a buffered channel (footer reads are small, no O_DIRECT needed)
+        // Cache miss - read from disk
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
             long fileSize = channel.size();
             if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
@@ -193,6 +351,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
             // Check if this is an OSEF file
             if (!isValidOSEFFile(minFooterBytes)) {
+                // Not an OSEF file
                 throw new IOException("Not an OSEF file -" + filePath);
             }
 

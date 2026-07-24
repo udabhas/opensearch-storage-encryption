@@ -252,10 +252,17 @@ public class MemorySegmentDecryptor {
             long frameEnd = frameStart + frameSize;
             long bytesInFrame = Math.min(remaining, frameEnd - currentOffset);
 
-            byte[] frameIV = AesCipherFactory
-                .computeFrameIV(directoryKey, messageId, frameNumber, currentOffset - frameStart, filePath, cache);
+            // Counter must be WITHIN-FRAME, matching the write path: each frame is GCM-encrypted with a
+            // cipher (re)initialized at its own frame boundary (CryptoOutputStreamIndexOutput.initializeFrameCipher),
+            // so the CTR counter for frame N restarts at ((offsetWithinFrame>>4)+2), NOT the absolute file offset.
+            // Passing the absolute currentOffset here would let computeOffsetIVForAesGcmEncrypted overwrite the
+            // frame IV's counter with (currentOffset>>4)+2, which is wrong for every frame N>=1 (differs by
+            // N*2^31 mod 2^32) -> wrong keystream -> silent garbage plaintext under unauthenticated AES-CTR.
+            offsetWithinFrame = currentOffset - frameStart;
 
-            decryptInPlace(addr + bufferOffset, bytesInFrame, fileKey, frameIV, currentOffset);
+            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame, filePath, cache);
+
+            decryptInPlace(addr + bufferOffset, bytesInFrame, fileKey, frameIV, offsetWithinFrame);
 
             currentOffset += bytesInFrame;
             bufferOffset += bytesInFrame;

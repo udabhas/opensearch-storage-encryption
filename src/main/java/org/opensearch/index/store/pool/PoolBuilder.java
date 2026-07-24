@@ -15,11 +15,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.common.settings.Settings;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheBuilder;
-import org.opensearch.index.store.block_loader.DirectIOReaderUtil;
-import org.opensearch.index.store.block_loader.FileChannelCache;
+import org.opensearch.index.store.bufferpoolfs.RadixBlockTableRegistry;
 import org.opensearch.index.store.read_ahead.Worker;
 import org.opensearch.index.store.read_ahead.impl.QueuingWorker;
 import org.opensearch.index.store.read_ahead.impl.ReadAheadSizingPolicy;
@@ -47,26 +46,26 @@ public final class PoolBuilder {
      * providing proper cleanup when closed.
      */
     public static class PoolResources implements Closeable {
-        private final Pool<RefCountedMemorySegment> segmentPool;
-        private final BlockCache<RefCountedMemorySegment> blockCache;
+        private final Pool<RefCountedByteBuffer> segmentPool;
+        private final BlockCache<RefCountedByteBuffer> blockCache;
         private final long maxCacheBlocks;
         private final int readAheadQueueSize;
         private final Worker sharedReadaheadWorker;
         private final TelemetryThread telemetry;
         private final java.util.concurrent.ThreadPoolExecutor removalExecutor;
         private final ExecutorService readAheadExecutor;
-        private final FileChannelCache fileChannelCache;
+        private final RadixBlockTableRegistry radixBlockTableRegistry;
 
         PoolResources(
-            Pool<RefCountedMemorySegment> segmentPool,
-            BlockCache<RefCountedMemorySegment> blockCache,
+            Pool<RefCountedByteBuffer> segmentPool,
+            BlockCache<RefCountedByteBuffer> blockCache,
             long maxCacheBlocks,
             int readAheadQueueSize,
             Worker sharedReadaheadWorker,
             TelemetryThread telemetry,
             java.util.concurrent.ThreadPoolExecutor removalExecutor,
             ExecutorService readAheadExecutor,
-            FileChannelCache fileChannelCache
+            RadixBlockTableRegistry radixBlockTableRegistry
         ) {
             this.segmentPool = segmentPool;
             this.blockCache = blockCache;
@@ -76,7 +75,17 @@ public final class PoolBuilder {
             this.telemetry = telemetry;
             this.removalExecutor = removalExecutor;
             this.readAheadExecutor = readAheadExecutor;
-            this.fileChannelCache = fileChannelCache;
+            this.radixBlockTableRegistry = radixBlockTableRegistry;
+        }
+
+        /**
+         * Returns the node-shared registry of per-file L1 RadixBlockTables. Wired to the shared
+         * block cache's eviction listener so L2 evictions clear the corresponding L1 entry.
+         *
+         * @return the shared RadixBlockTableRegistry
+         */
+        public RadixBlockTableRegistry getRadixBlockTableRegistry() {
+            return radixBlockTableRegistry;
         }
 
         /**
@@ -84,7 +93,7 @@ public final class PoolBuilder {
          *
          * @return the segment pool
          */
-        public Pool<RefCountedMemorySegment> getSegmentPool() {
+        public Pool<RefCountedByteBuffer> getSegmentPool() {
             return segmentPool;
         }
 
@@ -93,7 +102,7 @@ public final class PoolBuilder {
          *
          * @return the block cache
          */
-        public BlockCache<RefCountedMemorySegment> getBlockCache() {
+        public BlockCache<RefCountedByteBuffer> getBlockCache() {
             return blockCache;
         }
 
@@ -136,23 +145,10 @@ public final class PoolBuilder {
         }
 
         /**
-         * Returns the shared FileChannel cache.
-         * Node-level cache of FileChannels bounded by max open FDs.
-         *
-         * @return the file channel cache
-         */
-        public FileChannelCache getFileChannelCache() {
-            return fileChannelCache;
-        }
-
-        /**
          * Closes the shared pool resources, stops the telemetry thread, and shuts down executors.
          */
         @Override
         public void close() {
-            if (fileChannelCache != null) {
-                fileChannelCache.close();
-            }
             if (telemetry != null) {
                 telemetry.close();
             }
@@ -193,18 +189,18 @@ public final class PoolBuilder {
      */
     private static class TelemetryThread implements Closeable {
         private final Thread thread;
-        private final Pool<RefCountedMemorySegment> pool;
-        private final BlockCache<RefCountedMemorySegment> blockCache;
-        private final FileChannelCache fileChannelCache;
+        private final Pool<RefCountedByteBuffer> pool;
+        private final BlockCache<RefCountedByteBuffer> blockCache;
+        private final RadixBlockTableRegistry radixBlockTableRegistry;
 
         TelemetryThread(
-            Pool<RefCountedMemorySegment> pool,
-            BlockCache<RefCountedMemorySegment> blockCache,
-            FileChannelCache fileChannelCache
+            Pool<RefCountedByteBuffer> pool,
+            BlockCache<RefCountedByteBuffer> blockCache,
+            RadixBlockTableRegistry radixBlockTableRegistry
         ) {
             this.pool = pool;
             this.blockCache = blockCache;
-            this.fileChannelCache = fileChannelCache;
+            this.radixBlockTableRegistry = radixBlockTableRegistry;
             this.thread = new Thread(this::run);
             this.thread.setDaemon(true);
             this.thread.setName("DirectIOBufferPoolStatsLogger");
@@ -229,8 +225,8 @@ public final class PoolBuilder {
             try {
                 pool.recordStats();
                 blockCache.recordStats();
-                if (fileChannelCache != null) {
-                    fileChannelCache.recordStats();
+                if (radixBlockTableRegistry != null) {
+                    radixBlockTableRegistry.recordStats();
                 }
             } catch (Exception e) {
                 LOGGER.warn("Failed to log cache/pool stats", e);
@@ -260,31 +256,23 @@ public final class PoolBuilder {
         reservedPoolSizeInBytes = (reservedPoolSizeInBytes / CACHE_BLOCK_SIZE) * CACHE_BLOCK_SIZE;
         long maxBlocks = reservedPoolSizeInBytes / CACHE_BLOCK_SIZE;
 
-        // Calculate off-heap memory for tiered cache ratio and warmup
-        long maxHeap = Runtime.getRuntime().maxMemory();
-        long totalPhysical = org.opensearch.monitor.os.OsProbe.getInstance().getTotalPhysicalMemorySize();
-        if (totalPhysical <= 0) {
-            throw new IllegalStateException("Failed to calculate instance's physical memory, bailing out...: " + totalPhysical);
-        }
-        long offHeap = Math.max(0, totalPhysical - maxHeap);
+        // GC headroom fraction drives the pool's allocation limit (zombie-buffer tolerance).
+        double gcHeadroomFraction = PoolSizeCalculator.getGcHeadroomFraction(settings);
 
-        double cacheToPoolRatio = PoolSizeCalculator.calculateCacheToPoolRatio(offHeap, settings);
-        double warmupPercentage = PoolSizeCalculator.calculateWarmupPercentage(offHeap, settings);
-
-        Pool<RefCountedMemorySegment> segmentPool = new MemorySegmentPool(reservedPoolSizeInBytes, CACHE_BLOCK_SIZE);
+        MemorySegmentPool segmentPool = new MemorySegmentPool(reservedPoolSizeInBytes, CACHE_BLOCK_SIZE, gcHeadroomFraction);
         LOGGER
             .info(
-                "Creating shared pool with sizeBytes={}, segmentSize={}, totalSegments={}",
+                "Creating shared pool with sizeBytes={}, segmentSize={}, totalSegments={}, gcHeadroomFraction={}",
                 reservedPoolSizeInBytes,
                 CACHE_BLOCK_SIZE,
-                maxBlocks
+                maxBlocks,
+                gcHeadroomFraction
             );
 
-        // Calculate cache size: cache = pool * ratio
-        long maxCacheBlocks = (long) (maxBlocks * cacheToPoolRatio);
-        long warmupBlocks = (long) (maxCacheBlocks * warmupPercentage);
-        segmentPool.warmUp(warmupBlocks);
-        LOGGER.info("Warmed up {} blocks ({}% of {} cache blocks)", warmupBlocks, warmupPercentage * 100, maxCacheBlocks);
+        // 1:1 cache:pool sizing for the GC-managed pool — the cache holds as many blocks as the
+        // pool can allocate (cache evictions are what release pool memory via GC). No warmup:
+        // direct ByteBuffers are allocated on demand and reclaimed by the Cleaner.
+        long maxCacheBlocks = maxBlocks;
 
         // Calculate read-ahead queue size based on cache capacity
         // Pool constraint not needed since cache evictions automatically release pool memory
@@ -292,11 +280,38 @@ public final class PoolBuilder {
         LOGGER.info("Calculated read-ahead queue size={} (cache={} blocks)", readAheadQueueSize, maxCacheBlocks);
 
         // Initialize shared cache with removal listener and get its executor
-        BlockCacheBuilder.CacheWithExecutor<RefCountedMemorySegment, RefCountedMemorySegment> cacheWithExecutor = BlockCacheBuilder
+        BlockCacheBuilder.CacheWithExecutor<RefCountedByteBuffer, RefCountedByteBuffer> cacheWithExecutor = BlockCacheBuilder
             .build(CACHE_INITIAL_SIZE, maxCacheBlocks);
-        BlockCache<RefCountedMemorySegment> blockCache = cacheWithExecutor.getCache();
+        BlockCache<RefCountedByteBuffer> blockCache = cacheWithExecutor.getCache();
         java.util.concurrent.ThreadPoolExecutor removalExecutor = cacheWithExecutor.getExecutor();
         LOGGER.info("Creating shared block cache with blocks={}", maxCacheBlocks);
+
+        // Wire the cache-size supplier so the pool's GC-debt monitor can compute the zombie
+        // (GC-pending) buffer count = buffersInUse - cacheEntries.
+        segmentPool.setCacheEntriesSupplier(blockCache::getCacheSize);
+
+        // Wire the throttle-engaged release hook: when the pool's memory-pressure throttle engages,
+        // shed ~10% of the coldest cached blocks so their pooled buffers become reclaimable and the
+        // throttle can clear. Without this the cache (which evicts by entry count, not memory) never
+        // releases memory under pressure, so the throttle stays stuck and every recovery retry fails
+        // → shard RED. Cooldown-gated inside the pool to avoid thrashing.
+        segmentPool.setOnThrottleEngagedHook(() -> blockCache.evictColdestFraction(0.10));
+
+        // Wire the PROACTIVE-shrink primitive (preventive, fires before the throttle when the pool is on a
+        // filling trajectory) to the same coldest-eviction mechanism, plus the original cache capacity for
+        // the monitor's slack floor. Gated by the (default-off) proactive_shrink_enabled cluster setting.
+        segmentPool.setProactiveShrink(blockCache::evictColdestFraction, maxCacheBlocks);
+        // Seed the proactive monitor from the current (default-off) cluster-setting value so a pool built
+        // AFTER the setting was already flipped picks up the right state; later runtime toggles go through
+        // CryptoDirectoryFactory.setProactiveShrinkEnabled to the live monitor.
+        segmentPool.proactiveMonitor().setEnabled(org.opensearch.index.store.CryptoDirectoryFactory.isProactiveShrinkEnabled());
+
+        // Node-shared registry of per-file L1 RadixBlockTables. Wire it to the shared cache's
+        // eviction listener so that when the Caffeine L2 cache evicts a block, the matching L1
+        // (RadixBlockTable) slot is cleared BEFORE the value is closed — keeping L1 coherent
+        // with L2 (RefCountedByteBuffer has no generation counter for the L1 to detect staleness).
+        RadixBlockTableRegistry radixBlockTableRegistry = new RadixBlockTableRegistry();
+        blockCache.setEvictionListener(radixBlockTableRegistry::onEviction);
 
         // Calculate worker threads using principled drain-time approach
         int threads = ReadAheadSizingPolicy.calculateWorkerThreads(readAheadQueueSize);
@@ -315,21 +330,8 @@ public final class PoolBuilder {
         Worker sharedReadaheadWorker = new QueuingWorker(readAheadQueueSize, readAheadExecutor);
         LOGGER.info("Created shared read-ahead worker: queueSize={} executorThreads={}", readAheadQueueSize, threads);
 
-        // Create node-level FileChannel cache with O_DIRECT support
-        int maxFileChannels = PoolSizeCalculator.NODE_MAX_FILE_CHANNELS_SETTING.get(settings);
-        long fdCacheExpireSeconds = PoolSizeCalculator.NODE_FD_CACHE_EXPIRE_SECONDS_SETTING.get(settings);
-        java.nio.file.OpenOption directOpenOption;
-        try {
-            directOpenOption = DirectIOReaderUtil.getDirectOpenOption();
-        } catch (UnsupportedOperationException e) {
-            LOGGER.warn("Direct I/O not available, FileChannelCache will use buffered I/O");
-            directOpenOption = null;
-        }
-        FileChannelCache fileChannelCache = new FileChannelCache(maxFileChannels, fdCacheExpireSeconds, directOpenOption);
-        LOGGER.info("Created shared FileChannel cache: maxOpenFDs={}, expireAfterAccessSeconds={}", maxFileChannels, fdCacheExpireSeconds);
-
         // Start telemetry
-        TelemetryThread telemetry = new TelemetryThread(segmentPool, blockCache, fileChannelCache);
+        TelemetryThread telemetry = new TelemetryThread(segmentPool, blockCache, radixBlockTableRegistry);
 
         return new PoolResources(
             segmentPool,
@@ -340,7 +342,7 @@ public final class PoolBuilder {
             telemetry,
             removalExecutor,
             readAheadExecutor,
-            fileChannelCache
+            radixBlockTableRegistry
         );
     }
 }

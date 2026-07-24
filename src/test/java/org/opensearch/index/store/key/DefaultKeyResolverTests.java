@@ -21,6 +21,8 @@ import java.util.concurrent.ConcurrentMap;
 
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSLockFactory;
+import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.junit.After;
 import org.junit.Before;
@@ -33,7 +35,6 @@ import org.opensearch.common.action.ActionFuture;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
-import org.opensearch.index.store.CaffeineThreadLeakFilter;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.test.OpenSearchTestCase;
@@ -41,12 +42,9 @@ import org.opensearch.transport.client.AdminClient;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.IndicesAdminClient;
 
-import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
-
 /**
  * Unit tests for {@link DefaultKeyResolver}
  */
-@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class DefaultKeyResolverTests extends OpenSearchTestCase {
 
     @Mock
@@ -363,5 +361,109 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         } catch (KeyCacheException e) {
             assertTrue(e.getMessage().contains("Error encountered for index"));
         }
+    }
+
+    /**
+     * Writes a raw "keyfile" with the given int length prefix followed by {@code payloadLen} bytes,
+     * bypassing {@link DefaultKeyResolver} so the on-disk length prefix can be corrupted independently
+     * of the actual payload — simulating a torn write, bit-flip, or bad snapshot/clone.
+     */
+    private void writeRawKeyFile(int declaredLength, int payloadLen) throws Exception {
+        // Remove any pre-existing keyfile; tolerate its absence (nothing has created one yet).
+        try {
+            directory.deleteFile("keyfile");
+        } catch (java.nio.file.NoSuchFileException ignored) {
+            // no prior keyfile — expected
+        }
+        try (IndexOutput out = directory.createOutput("keyfile", IOContext.DEFAULT)) {
+            out.writeInt(declaredLength);
+            for (int i = 0; i < payloadLen; i++) {
+                out.writeByte((byte) i);
+            }
+        }
+    }
+
+    /**
+     * A length prefix larger than the bytes actually present (e.g. a bit-flip to ~2GB) must be rejected
+     * as corruption BEFORE the {@code new byte[size]} allocation, rather than attempting a huge allocation
+     * that OOM-kills the node. Regression test.
+     */
+    public void testReadCorruptKeyFileHugeLengthRejected() throws Exception {
+        // No prior keyfile: prevent the constructor from generating a valid one.
+        writeRawKeyFile(Integer.MAX_VALUE, 32);
+
+        try {
+            new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, TEST_SHARD_ID);
+            fail("Expected KeyCacheException for corrupt (huge length) key file");
+        } catch (KeyCacheException e) {
+            // The IOException from the bounds check is wrapped; its message must reach the surface.
+            assertTrue(
+                "Expected corrupt-key-file cause, got: " + e.getMessage(),
+                e.getMessage().contains("Corrupt key file") || e.getMessage().contains("out of bounds")
+            );
+        }
+    }
+
+    /**
+     * A negative length prefix must be rejected with a clean corruption error rather than a
+     * {@link NegativeArraySizeException}. Regression test.
+     */
+    public void testReadCorruptKeyFileNegativeLengthRejected() throws Exception {
+        writeRawKeyFile(-5, 32);
+
+        try {
+            new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, TEST_SHARD_ID);
+            fail("Expected KeyCacheException for corrupt (negative length) key file");
+        } catch (KeyCacheException e) {
+            assertTrue(
+                "Expected corrupt-key-file cause, got: " + e.getMessage(),
+                e.getMessage().contains("Corrupt key file") || e.getMessage().contains("out of bounds")
+            );
+        }
+    }
+
+    /**
+     * A torn write leaving only the 4-byte prefix (payload lost) must be rejected: the declared length
+     * exceeds the zero bytes available after the prefix. Regression test.
+     */
+    public void testReadTornKeyFilePrefixOnlyRejected() throws Exception {
+        writeRawKeyFile(32, 0); // prefix claims 32 payload bytes, but none were written
+
+        try {
+            new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, TEST_SHARD_ID);
+            fail("Expected KeyCacheException for torn (prefix-only) key file");
+        } catch (KeyCacheException e) {
+            assertTrue(
+                "Expected corrupt-key-file cause, got: " + e.getMessage(),
+                e.getMessage().contains("Corrupt key file") || e.getMessage().contains("out of bounds")
+            );
+        }
+    }
+
+    /**
+     * A well-formed keyfile whose prefix matches its payload must still read successfully — the bounds
+     * check must not reject valid files.
+     */
+    public void testReadValidKeyFileStillSucceeds() throws Exception {
+        byte[] dataKey = new byte[32];
+        for (int i = 0; i < 32; i++) {
+            dataKey[i] = (byte) i;
+        }
+        when(mockKeyProvider.decryptKey(any())).thenReturn(dataKey);
+
+        // 32-byte payload with a matching prefix — the exact-fit valid case.
+        writeRawKeyFile(32, 32);
+
+        DefaultKeyResolver resolver = new DefaultKeyResolver(
+            TEST_INDEX_UUID,
+            "test-index",
+            directory,
+            provider,
+            mockKeyProvider,
+            TEST_SHARD_ID
+        );
+        registerResolver(TEST_INDEX_UUID, TEST_SHARD_ID, resolver);
+
+        assertNotNull(resolver.getDataKey());
     }
 }

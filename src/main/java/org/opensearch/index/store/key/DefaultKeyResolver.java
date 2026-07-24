@@ -109,7 +109,22 @@ public class DefaultKeyResolver implements KeyResolver {
     }
 
     private void initNewKey(int shardId) throws IOException {
-        DataKeyPair pair = keyProvider.generateDataPair();
+        // Time + classify the KMS GenerateDataKey call (crypto.kms.call{op=generate_data_key}); KMS throttling
+        // is a known latency cause that a generic error counter alone does not surface.
+        long startNanos = System.nanoTime();
+        DataKeyPair pair;
+        try {
+            pair = keyProvider.generateDataPair();
+        } catch (Exception e) {
+            long ms = (System.nanoTime() - startNanos) / 1_000_000L;
+            FailureType ft = KeyCacheException.classify(e);
+            // Latency + outcome on the KMS histogram. The failure COUNT is folded into crypto.error.total:
+            // the caller (initialize) already records KMS_KEY_ERROR for the critical/blocking case, and a
+            // transient failure is captured by result=transient here — so no separate KMS-failure counter.
+            CryptoMetricsService.getInstance().recordKmsCall("generate_data_key", ft == FailureType.TRANSIENT ? "transient" : "error", ms);
+            throw e;
+        }
+        CryptoMetricsService.getInstance().recordKmsCall("generate_data_key", "ok", (System.nanoTime() - startNanos) / 1_000_000L);
         writeByteArrayFile(KEY_FILE, pair.getEncryptedKey());
     }
 
@@ -119,6 +134,18 @@ public class DefaultKeyResolver implements KeyResolver {
     private byte[] readByteArrayFile(String fileName) throws IOException {
         try (IndexInput in = directory.openInput(fileName, IOContext.READONCE)) {
             int size = in.readInt();
+            // The length prefix comes straight off disk and is untrusted: a torn/partial write during a
+            // crash mid-initNewKey, an on-disk bit-flip, or a bad snapshot/clone can leave a bogus value.
+            // A negative size throws NegativeArraySizeException; a huge one (e.g. 0x7FFFFFFF) attempts a
+            // ~2GB allocation that can OOM-kill the node — and this runs on the node-global key-refresh
+            // thread, so one corrupt keyfile can cascade across every encrypted index. Bound size to the
+            // bytes actually available after the prefix before allocating.
+            long maxSize = in.length() - Integer.BYTES;
+            if (size < 0 || size > maxSize) {
+                throw new IOException(
+                    "Corrupt key file '" + fileName + "': declared length " + size + " is out of bounds [0, " + maxSize + "]"
+                );
+            }
             byte[] bytes = new byte[size];
             in.readBytes(bytes, 0, size);
             return bytes;
@@ -141,12 +168,21 @@ public class DefaultKeyResolver implements KeyResolver {
      * Exceptions are allowed to bubble up - the cache will handle fallback to old value.
      */
     Key loadKeyFromMasterKeyProvider() throws Exception {
-        // Attempt decryption
+        // Attempt decryption. Time + classify the KMS Decrypt call (crypto.kms.call{op=decrypt}) and split the
+        // failure by class (transient=rode-out-on-cached-key vs critical=key-disabled/blocked) so a post-mortem
+        // can tell KMS throttling from a real key failure, which a generic error counter alone cannot.
+        byte[] encryptedKey = readByteArrayFile(KEY_FILE);
+        long startNanos = System.nanoTime();
         try {
-            byte[] encryptedKey = readByteArrayFile(KEY_FILE);
             byte[] masterKey = keyProvider.decryptKey(encryptedKey);
+            CryptoMetricsService.getInstance().recordKmsCall("decrypt", "ok", (System.nanoTime() - startNanos) / 1_000_000L);
             return new SecretKeySpec(masterKey, "AES");
         } catch (Exception e) {
+            long ms = (System.nanoTime() - startNanos) / 1_000_000L;
+            FailureType ft = KeyCacheException.classify(e);
+            // Latency + outcome on the KMS histogram; the failure COUNT is the existing crypto.error.total
+            // KMS_KEY_ERROR recorded just below (no separate KMS-failure counter).
+            CryptoMetricsService.getInstance().recordKmsCall("decrypt", ft == FailureType.TRANSIENT ? "transient" : "error", ms);
             CryptoMetricsService.getInstance().recordError(ErrorType.KMS_KEY_ERROR, getMetricKey(e));
             throw e;
         }

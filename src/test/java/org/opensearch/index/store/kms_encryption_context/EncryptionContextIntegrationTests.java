@@ -23,7 +23,7 @@ import org.opensearch.common.settings.Settings;
  */
 public class EncryptionContextIntegrationTests extends LuceneTestCase {
 
-    private static final String AMAZON_ENC_CTX_VALUE = "domainARN=arn:aws:es:eu-west-1:110365260509:domain/test-domain";
+    private static final String AMAZON_ENC_CTX_VALUE = "context-key=test-context-value";
 
     /**
      * Test that Amazon resolver finds encryption context among multiple repositories.
@@ -60,8 +60,8 @@ public class EncryptionContextIntegrationTests extends LuceneTestCase {
      * Test that Amazon resolver returns first matching repository when multiple have encryption context.
      */
     public void testAmazonResolverReturnsFirstMatchingRepository() {
-        String firstEncCtx = "domainARN=arn:aws:es:us-east-1:111:domain/first";
-        String secondEncCtx = "domainARN=arn:aws:es:us-west-2:222:domain/second";
+        String firstEncCtx = "context-key=first-value";
+        String secondEncCtx = "context-key=second-value";
 
         Settings repo1Settings = Settings.builder().put("type", "s3").put("amazon_es_kms_enc_ctx", firstEncCtx).build();
 

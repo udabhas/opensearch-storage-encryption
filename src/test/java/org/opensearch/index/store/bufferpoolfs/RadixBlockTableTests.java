@@ -4,502 +4,191 @@
  */
 package org.opensearch.index.store.bufferpoolfs;
 
-import java.nio.ByteBuffer;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.opensearch.test.OpenSearchTestCase;
 
+/**
+ * Tests for {@link RadixBlockTable}: single-threaded map semantics (put/get/remove/clear,
+ * directory growth, inner-array reclamation) plus cross-thread visibility smoke tests for
+ * the acquire/release slot and directory accesses that L1 invalidation correctness relies on
+ * (an eviction's {@code remove} null-out and a {@code clear()} swap must become visible to a
+ * concurrent lock-free reader).
+ */
 public class RadixBlockTableTests extends OpenSearchTestCase {
 
-    private static final int PS = RadixBlockTable.PAGE_SIZE; // 1024
-
-    private static ByteBuffer buf(int capacity) {
-        return ByteBuffer.allocate(capacity);
-    }
-
-    // ---- basic put/get/remove ----
-
     public void testPutGetRoundTrip() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer b = buf(8);
-        table.put(10, b);
-        assertSame(b, table.get(10));
-    }
-
-    public void testRemoveReturnsPreviousAndNullsSlot() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer b = buf(8);
-        table.put(10, b);
-        assertSame(b, table.remove(10));
-        assertNull(table.get(10));
-    }
-
-    public void testClearResetsAllState() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        table.put(PS, buf(8));
-        table.put(2 * PS, buf(8));
-        table.clear();
+        RadixBlockTable<String> table = new RadixBlockTable<>();
         assertNull(table.get(0));
-        assertNull(table.get(PS));
-        assertNull(table.get(2 * PS));
+        table.put(0, "a");
+        table.put(1023, "b");
+        table.put(1024, "c"); // second inner page
+        assertEquals("a", table.get(0));
+        assertEquals("b", table.get(1023));
+        assertEquals("c", table.get(1024));
+        assertNull(table.get(2));
     }
 
-    public void testPutOverwritesExistingEntry() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer a = buf(8);
-        ByteBuffer b = buf(16);
-        table.put(5, a);
-        assertSame(a, table.get(5));
-        table.put(5, b);
-        assertSame(b, table.get(5));
+    public void testOverwrite() {
+        RadixBlockTable<String> table = new RadixBlockTable<>();
+        table.put(7, "old");
+        table.put(7, "new");
+        assertEquals("new", table.get(7));
     }
 
-    // ---- get edge cases ----
-
-    public void testGetOuterOobReturnsNull() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        assertNull(table.get(PS));
-    }
-
-    public void testGetInnerNullReturnsNull() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        assertNull(table.get(0));
-    }
-
-    public void testGetSlotNullReturnsNull() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        assertNull(table.get(1));
-    }
-
-    public void testGetSlotPopulatedReturnsBuffer() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer b = buf(8);
-        table.put(5, b);
-        assertSame(b, table.get(5));
-    }
-
-    // ---- put paths ----
-
-    public void testPutFastPathInnerExists() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        ByteBuffer b = buf(16);
-        table.put(1, b);
-        assertSame(b, table.get(1));
-    }
-
-    public void testPutSlowInnerNull() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        assertFalse(table.isInnerAllocated(0));
-        ByteBuffer b = buf(8);
-        table.put(0, b);
-        assertTrue(table.isInnerAllocated(0));
-        assertSame(b, table.get(0));
-    }
-
-    public void testPutSlowDirectoryGrowth() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        assertEquals(1, table.directoryLength());
-        ByteBuffer b = buf(8);
-        table.put(PS, b);
-        assertTrue(table.directoryLength() > 1);
-        assertSame(b, table.get(PS));
-    }
-
-    public void testPutSlowRaceInnerAlreadyAllocated() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer a = buf(8);
-        table.put(0, a);
-        assertTrue(table.isInnerAllocated(0));
-        ByteBuffer b = buf(16);
-        table.put(1, b);
-        assertSame(a, table.get(0));
-        assertSame(b, table.get(1));
-        assertEquals(2, table.countEntries(0));
-    }
-
-    // ---- remove edge cases ----
-
-    public void testRemoveOuterOobReturnsNull() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        assertNull(table.remove(PS));
-    }
-
-    public void testRemoveInnerNullReturnsNull() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        assertNull(table.remove(0));
-    }
-
-    public void testRemoveSlotNullReturnsNull() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        assertNull(table.remove(1));
-    }
-
-    public void testRemoveSlotPopulatedReturnsPrevious() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer b = buf(8);
-        table.put(5, b);
-        assertSame(b, table.remove(5));
+    public void testRemoveReturnsPreviousAndClearsSlot() {
+        RadixBlockTable<String> table = new RadixBlockTable<>();
+        table.put(5, "x");
+        assertEquals("x", table.remove(5));
         assertNull(table.get(5));
+        assertNull(table.remove(5));
+        // Removing from a never-populated page is a no-op.
+        assertNull(table.remove(50_000_000L));
     }
 
-    // ---- clear ----
-
-    public void testClearPopulatedTable() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        table.put(PS, buf(8));
-        table.put(2 * PS, buf(8));
-        table.clear();
-        assertNull(table.get(0));
-        assertNull(table.get(PS));
-        assertNull(table.get(2 * PS));
-        assertFalse(table.isInnerAllocated(0));
-        assertFalse(table.isInnerAllocated(1));
-        assertFalse(table.isInnerAllocated(2));
-    }
-
-    public void testClearEmptyTable() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.clear(); // should not throw
-    }
-
-    // ---- directory growth ----
-
-    public void testGrowDirectorySizingInvariants() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(2);
-        assertEquals(2, table.directoryLength());
-        ByteBuffer existing = buf(8);
-        table.put(0, existing);
-        table.put(5 * PS, buf(8));
-        int newLen = table.directoryLength();
-        assertTrue(newLen >= 6);
-        assertSame(existing, table.get(0));
-    }
-
-    public void testInitialOuterSlots1WithMultipleGrowths() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        assertEquals(1, table.directoryLength());
-        ByteBuffer b1 = buf(8);
-        table.put(PS, b1);
-        assertTrue(table.directoryLength() >= 2);
-        ByteBuffer b2 = buf(8);
-        table.put(4 * PS, b2);
-        assertTrue(table.directoryLength() >= 5);
-        ByteBuffer b3 = buf(8);
-        table.put(20 * PS, b3);
-        assertTrue(table.directoryLength() >= 21);
-        assertSame(b1, table.get(PS));
-        assertSame(b2, table.get(4 * PS));
-        assertSame(b3, table.get(20 * PS));
-    }
-
-    public void testGrowDirectoryDoublesOrFitsRequired() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        assertEquals(1, table.directoryLength());
-        table.put(3 * PS, buf(8));
-        int len1 = table.directoryLength();
-        assertTrue(len1 >= 4);
-        table.put(100 * PS, buf(8));
-        int len2 = table.directoryLength();
-        assertTrue(len2 >= 101);
-        assertNotNull(table.get(3 * PS));
-        assertNotNull(table.get(100 * PS));
-    }
-
-    public void testGrowDirectoryPreservesAllEntries() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        ByteBuffer[] bufs = new ByteBuffer[50];
-        for (int i = 0; i < 50; i++) {
-            bufs[i] = buf(8);
-            table.put((long) i * PS, bufs[i]);
-        }
-        assertTrue(table.directoryLength() >= 50);
-        for (int i = 0; i < 50; i++) {
-            assertSame(bufs[i], table.get((long) i * PS));
-        }
-    }
-
-    // ---- edge cases ----
-
-    public void testEdgeCaseBlockId0() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer b = buf(8);
-        table.put(0, b);
-        assertSame(b, table.get(0));
-        assertSame(b, table.remove(0));
-        assertNull(table.get(0));
-    }
-
-    public void testEdgeCaseLastSlotInInnerArray() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer b = buf(8);
-        table.put(PS - 1, b);
-        assertSame(b, table.get(PS - 1));
-        assertEquals(1, table.countEntries(0));
-    }
-
-    public void testEdgeCaseFirstSlotInSecondInnerArray() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer b = buf(8);
-        table.put(PS, b);
-        assertSame(b, table.get(PS));
-        assertTrue(table.isInnerAllocated(1));
-        assertFalse(table.isInnerAllocated(0));
-    }
-
-    public void testEdgeCaseMaxBlockId() {
-        long maxBlockId = 2_621_439L;
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        ByteBuffer b = buf(8);
-        table.put(maxBlockId, b);
-        assertSame(b, table.get(maxBlockId));
-        assertSame(b, table.remove(maxBlockId));
-        assertNull(table.get(maxBlockId));
-    }
-
-    public void testFullInnerArrayPopulateThenRemoveAll() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer[] buffers = new ByteBuffer[PS];
-        for (int i = 0; i < PS; i++) {
-            buffers[i] = buf(8);
-            table.put(i, buffers[i]);
-        }
-        assertEquals(PS, table.countEntries(0));
-        for (int i = 0; i < PS; i++) {
-            assertSame(buffers[i], table.remove(i));
-        }
-        assertFalse(table.isInnerAllocated(0));
-    }
-
-    // ---- helper method tests ----
-
-    public void testIsInnerAllocatedCorrectness() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        assertFalse(table.isInnerAllocated(0));
-        assertFalse(table.isInnerAllocated(1));
-        table.put(0, buf(8));
+    public void testInnerArrayReclaimedWhenEmpty() {
+        RadixBlockTable<String> table = new RadixBlockTable<>();
+        table.put(0, "a");
+        table.put(1, "b");
         assertTrue(table.isInnerAllocated(0));
-        assertFalse(table.isInnerAllocated(1));
-        table.put(PS, buf(8));
-        assertTrue(table.isInnerAllocated(0));
-        assertTrue(table.isInnerAllocated(1));
-        assertFalse(table.isInnerAllocated(100));
-    }
-
-    public void testCountEntriesCorrectness() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        assertEquals(-1, table.countEntries(0));
-        table.put(0, buf(8));
-        assertEquals(1, table.countEntries(0));
-        table.put(1, buf(8));
-        assertEquals(2, table.countEntries(0));
         table.remove(0);
-        assertEquals(1, table.countEntries(0));
+        assertTrue(table.isInnerAllocated(0)); // still holds "b"
         table.remove(1);
-        assertEquals(-1, table.countEntries(0));
-        assertEquals(-1, table.countEntries(100));
+        assertFalse(table.isInnerAllocated(0)); // fully empty -> reclaimed
+        // Table remains usable after reclamation.
+        table.put(1, "c");
+        assertEquals("c", table.get(1));
     }
 
-    public void testDirectoryLengthCorrectness() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        assertEquals(4, table.directoryLength());
-        table.put(10 * PS, buf(8));
-        assertTrue(table.directoryLength() >= 11);
-        int lenBeforeClear = table.directoryLength();
+    public void testDirectoryGrowsBeyondDefault() {
+        RadixBlockTable<String> table = new RadixBlockTable<>();
+        int defaultLength = table.directoryLength();
+        long farBlockId = (long) (defaultLength + 3) << RadixBlockTable.PAGE_SHIFT;
+        assertNull(table.get(farBlockId)); // out-of-range read is a miss, not an error
+        table.put(farBlockId, "far");
+        assertTrue(table.directoryLength() > defaultLength);
+        assertEquals("far", table.get(farBlockId));
+    }
+
+    public void testClearEmptiesAllEntries() {
+        RadixBlockTable<String> table = new RadixBlockTable<>();
+        table.put(0, "a");
+        table.put(5000, "b");
+        int lengthBefore = table.directoryLength();
         table.clear();
-        assertEquals(lenBeforeClear, table.directoryLength());
-    }
-
-    public void testAllocatedInnerCount() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        assertEquals(0, table.allocatedInnerCount());
-        table.put(0, buf(8));
-        assertEquals(1, table.allocatedInnerCount());
-        table.put(PS, buf(8));
-        assertEquals(2, table.allocatedInnerCount());
-        table.put(2 * PS, buf(8));
-        assertEquals(3, table.allocatedInnerCount());
-        table.put(1, buf(8));
-        assertEquals(3, table.allocatedInnerCount());
-    }
-
-    // ---- inner array reclamation tests ----
-
-    public void testRemoveLastSlotReclaimsInnerArray() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        assertTrue(table.isInnerAllocated(0));
-        assertEquals(1, table.allocatedInnerCount());
-        table.remove(0);
-        assertFalse(table.isInnerAllocated(0));
+        assertNull(table.get(0));
+        assertNull(table.get(5000));
+        assertEquals(lengthBefore, table.directoryLength());
         assertEquals(0, table.allocatedInnerCount());
     }
 
-    public void testRemoveNonLastSlotDoesNotReclaimInnerArray() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        table.put(1, buf(8));
-        assertEquals(2, table.countEntries(0));
-        table.remove(0);
-        assertTrue(table.isInnerAllocated(0));
-        assertEquals(1, table.countEntries(0));
-    }
+    /**
+     * Cross-thread visibility of the L1 invalidation primitive: a reader spinning on
+     * {@code get(blockId)} must observe the eviction thread's {@code remove} null-out.
+     * With plain (non-ordered) slot access this had no happens-before edge (only
+     * best-effort hardware coherence); with the release store / acquire load pairing it
+     * is guaranteed. A bounded spin keeps the test deterministic-in-practice either way,
+     * while documenting the contract this class must uphold.
+     */
+    public void testRemoveVisibleToConcurrentReader() throws Exception {
+        final RadixBlockTable<String> table = new RadixBlockTable<>();
+        table.put(42, "live");
 
-    public void testRemoveAlreadyNullSlotDoesNotReclaim() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        table.put(1, buf(8));
-        assertNull(table.remove(2));
-        assertTrue(table.isInnerAllocated(0));
-        assertEquals(2, table.countEntries(0));
-    }
-
-    public void testReclaimMultipleInnerArraysIndependently() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        table.put(PS, buf(8));
-        table.put(2 * PS, buf(8));
-        assertEquals(3, table.allocatedInnerCount());
-        table.remove(PS);
-        assertEquals(2, table.allocatedInnerCount());
-        assertFalse(table.isInnerAllocated(1));
-        assertTrue(table.isInnerAllocated(0));
-        assertTrue(table.isInnerAllocated(2));
-        table.remove(0);
-        assertEquals(1, table.allocatedInnerCount());
-        assertFalse(table.isInnerAllocated(0));
-    }
-
-    public void testReclaimThenReAllocateInnerArray() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        ByteBuffer a = buf(8);
-        table.put(0, a);
-        assertTrue(table.isInnerAllocated(0));
-        table.remove(0);
-        assertFalse(table.isInnerAllocated(0));
-        ByteBuffer b = buf(16);
-        table.put(0, b);
-        assertTrue(table.isInnerAllocated(0));
-        assertSame(b, table.get(0));
-    }
-
-    public void testReclaimAllSlotsInFullInnerArray() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        for (int i = 0; i < PS; i++) {
-            table.put(i, buf(8));
-        }
-        assertEquals(PS, table.countEntries(0));
-        assertTrue(table.isInnerAllocated(0));
-        for (int i = 0; i < PS - 1; i++) {
-            table.remove(i);
-        }
-        assertTrue(table.isInnerAllocated(0));
-        assertEquals(1, table.countEntries(0));
-        table.remove(PS - 1);
-        assertFalse(table.isInnerAllocated(0));
-        assertEquals(-1, table.countEntries(0));
-    }
-
-    public void testClearAfterPartialReclamation() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(4);
-        table.put(0, buf(8));
-        table.put(PS, buf(8));
-        table.put(2 * PS, buf(8));
-        table.remove(PS);
-        assertFalse(table.isInnerAllocated(1));
-        table.clear();
-        assertFalse(table.isInnerAllocated(0));
-        assertFalse(table.isInnerAllocated(1));
-        assertFalse(table.isInnerAllocated(2));
-        assertEquals(0, table.allocatedInnerCount());
-    }
-
-    // ---- memory overhead measurement tests ----
-
-    public void testMemoryOverheadUntouchedTable() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        assertEquals(1, table.directoryLength());
-        assertEquals(0, table.allocatedInnerCount());
-    }
-
-    public void testMemoryOverheadProportionalToUsage() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        for (int i = 0; i < 1000; i++) {
-            table.put(i, buf(8));
-        }
-        int innerCount = table.allocatedInnerCount();
-        // ceil(1000/1024) = 1 inner array
-        assertEquals(1, innerCount);
-        long overheadBytes = (long) innerCount * PS * 8; // inner array ref slots (8 bytes per ref)
-        long dataBytes = 1000L * 8; // actual entry references
-        double overheadRatio = (double) overheadBytes / dataBytes;
-        assertTrue("Overhead ratio " + overheadRatio + " exceeds 5%", overheadRatio < 1.10);
-    }
-
-    public void testMemoryOverheadAfterFullEviction() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        for (int i = 0; i < 1000; i++) {
-            table.put(i, buf(8));
-        }
-        assertEquals(1, table.allocatedInnerCount());
-        for (int i = 0; i < 1000; i++) {
-            table.remove(i);
-        }
-        assertEquals(0, table.allocatedInnerCount());
-    }
-
-    public void testMemoryOverheadSparseAccess() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        int sparseCount = 100;
-        for (int i = 0; i < sparseCount; i++) {
-            table.put((long) i * PS, buf(8));
-        }
-        assertEquals(sparseCount, table.allocatedInnerCount());
-        long overheadBytes = (long) sparseCount * PS * 8;
-        long dataBytes = (long) sparseCount * 8;
-        double overheadRatio = (double) overheadBytes / dataBytes;
-        assertTrue("Sparse overhead ratio " + overheadRatio + " is unreasonable", overheadRatio <= (double) PS);
-    }
-
-    public void testMemoryOverheadSparseEvictionReclaims() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        int sparseCount = 100;
-        for (int i = 0; i < sparseCount; i++) {
-            table.put((long) i * PS, buf(8));
-        }
-        assertEquals(sparseCount, table.allocatedInnerCount());
-        for (int i = 0; i < sparseCount; i++) {
-            table.remove((long) i * PS);
-        }
-        assertEquals(0, table.allocatedInnerCount());
-    }
-
-    public void testDirectoryGrowthPattern() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>(1);
-        assertEquals(1, table.directoryLength());
-        int prevLen = table.directoryLength();
-        for (int outer = 0; outer < 200; outer++) {
-            table.put((long) outer * PS, buf(8));
-            int curLen = table.directoryLength();
-            if (curLen != prevLen) {
-                assertTrue(
-                    "Directory grew from " + prevLen + " to " + curLen + " which is less than required " + (outer + 1),
-                    curLen >= outer + 1
-                );
-                prevLen = curLen;
+        final CountDownLatch readerSeesValue = new CountDownLatch(1);
+        final AtomicBoolean sawNull = new AtomicBoolean(false);
+        Thread reader = new Thread(() -> {
+            // First confirm the published value is visible, then spin until the removal is.
+            while (table.get(42) == null) {
+                Thread.onSpinWait();
             }
-        }
-        assertTrue(table.directoryLength() >= 200);
+            readerSeesValue.countDown();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (System.nanoTime() < deadline) {
+                if (table.get(42) == null) {
+                    sawNull.set(true);
+                    return;
+                }
+            }
+        });
+        reader.start();
+        assertTrue("reader never observed the initial put", readerSeesValue.await(10, TimeUnit.SECONDS));
+
+        table.remove(42); // the eviction-listener path
+
+        reader.join(TimeUnit.SECONDS.toMillis(15));
+        assertFalse("reader thread did not terminate", reader.isAlive());
+        assertTrue("reader never observed the eviction null-out", sawNull.get());
     }
 
-    // ---- default constructor test ----
+    /** Same contract for {@code clear()} — the delete/rename {@code clearFile} invalidation path. */
+    public void testClearVisibleToConcurrentReader() throws Exception {
+        final RadixBlockTable<String> table = new RadixBlockTable<>();
+        table.put(7, "live");
 
-    public void testDefaultConstructorUsesDefaultOuterSlots() {
-        RadixBlockTable<ByteBuffer> table = new RadixBlockTable<>();
-        assertEquals(RadixBlockTable.DEFAULT_OUTER_SLOTS, table.directoryLength());
-        assertEquals(0, table.allocatedInnerCount());
+        final CountDownLatch readerSeesValue = new CountDownLatch(1);
+        final AtomicBoolean sawEmpty = new AtomicBoolean(false);
+        Thread reader = new Thread(() -> {
+            while (table.get(7) == null) {
+                Thread.onSpinWait();
+            }
+            readerSeesValue.countDown();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (System.nanoTime() < deadline) {
+                if (table.get(7) == null) {
+                    sawEmpty.set(true);
+                    return;
+                }
+            }
+        });
+        reader.start();
+        assertTrue("reader never observed the initial put", readerSeesValue.await(10, TimeUnit.SECONDS));
+
+        table.clear();
+
+        reader.join(TimeUnit.SECONDS.toMillis(15));
+        assertFalse("reader thread did not terminate", reader.isAlive());
+        assertTrue("reader never observed clear()", sawEmpty.get());
+    }
+
+    /** Concurrent put/remove/get stress across pages — asserts no exceptions and coherent end state. */
+    public void testConcurrentMixedOperationsStress() throws Exception {
+        final RadixBlockTable<Integer> table = new RadixBlockTable<>();
+        final int threads = 4;
+        final int opsPerThread = 20_000;
+        final CountDownLatch start = new CountDownLatch(1);
+        final CountDownLatch done = new CountDownLatch(threads);
+        final AtomicBoolean failed = new AtomicBoolean(false);
+
+        for (int t = 0; t < threads; t++) {
+            final int seed = t;
+            new Thread(() -> {
+                try {
+                    start.await();
+                    java.util.Random random = new java.util.Random(seed);
+                    for (int i = 0; i < opsPerThread; i++) {
+                        long blockId = random.nextInt(4096);
+                        switch (random.nextInt(3)) {
+                            case 0 -> table.put(blockId, seed);
+                            case 1 -> table.remove(blockId);
+                            default -> table.get(blockId);
+                        }
+                    }
+                } catch (Throwable e) {
+                    failed.set(true);
+                } finally {
+                    done.countDown();
+                }
+            }).start();
+        }
+        start.countDown();
+        assertTrue("stress threads did not finish", done.await(60, TimeUnit.SECONDS));
+        assertFalse("stress thread threw", failed.get());
+
+        // Post-stress: the table must still behave as a coherent map.
+        table.clear();
+        table.put(1, 99);
+        assertEquals(Integer.valueOf(99), table.get(1));
     }
 }

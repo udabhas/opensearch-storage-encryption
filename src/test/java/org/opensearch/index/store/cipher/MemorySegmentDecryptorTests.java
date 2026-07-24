@@ -287,6 +287,106 @@ public class MemorySegmentDecryptorTests extends OpenSearchTestCase {
         }
     }
 
+    /**
+     * Regression test: the multi-frame SLOW path of {@link MemorySegmentDecryptor#decryptInPlaceFrameBased}
+     * must decrypt each frame with a WITHIN-FRAME CTR counter, matching the write path (which re-initializes a fresh
+     * cipher at each frame boundary). The bug passed the ABSOLUTE file offset to {@code decryptInPlace}, so for any
+     * frame N&gt;=1 the counter was wrong and the plaintext came back garbage. This test lays out ciphertext that
+     * straddles a frame boundary (built per-frame the way the write path emits it) and asserts a clean round-trip.
+     *
+     * <p>Uses a small synthetic frame size to make the multi-frame path reachable without a 32GB buffer.
+     */
+    public void testDecryptInPlaceFrameBasedMultiFrameBoundary() throws Exception {
+        final long frameSize = 256;                 // small frame so the multi-frame slow path is reachable
+        final byte[] messageId = new byte[16];
+        Arrays.fill(messageId, (byte) 0x07);
+        final byte[] fileKey = new byte[32];
+        Arrays.fill(fileKey, (byte) 0x11);
+        final byte[] directoryKey = TEST_KEY;       // used only for frame-IV derivation
+        final String path = "/tmp/p1_3_boundary.bin";
+        final EncryptionMetadataCache cache = new EncryptionMetadataCache();
+
+        // Read window straddles frame 0 -> frame 1, with a non-block-aligned start (exercises ZERO_SKIP too).
+        final long fileOffset = 250;                // frame 0: [250,256) = 6 bytes; frame 1: [256,270) = 14 bytes
+        final int length = 20;
+
+        byte[] plaintext = new byte[length];
+        for (int i = 0; i < length; i++) {
+            plaintext[i] = (byte) (i + 1);
+        }
+
+        MemorySegment seg = arena.allocate(length);
+        MemorySegment.copy(plaintext, 0, seg, ValueLayout.JAVA_BYTE, 0, length);
+
+        // Build the ciphertext the way the write path does: each frame is encrypted by a cipher (re)started at
+        // that frame, i.e. keyed on the WITHIN-FRAME offset. AES-CTR is symmetric, so applying decryptInPlace with
+        // the correct per-frame within-frame offset turns the plaintext into the on-disk ciphertext.
+        int frame0Len = (int) (frameSize - (fileOffset % frameSize));   // 6
+        byte[] iv0 = AesCipherFactory.computeFrameIV(directoryKey, messageId, 0, fileOffset % frameSize, path, cache);
+        MemorySegmentDecryptor.decryptInPlace(seg.address(), frame0Len, fileKey, iv0, fileOffset % frameSize);
+        byte[] iv1 = AesCipherFactory.computeFrameIV(directoryKey, messageId, 1, 0, path, cache);
+        MemorySegmentDecryptor.decryptInPlace(seg.address() + frame0Len, length - frame0Len, fileKey, iv1, 0);
+
+        // Decrypt via the production multi-frame path. Pre-fix, frame 1 decrypts with counter (256>>4)+2 instead of
+        // (0>>4)+2 -> garbage; post-fix it uses the within-frame offset and round-trips.
+        MemorySegmentDecryptor
+            .decryptInPlaceFrameBased(seg.address(), length, fileKey, directoryKey, messageId, frameSize, fileOffset, path, cache);
+
+        byte[] result = new byte[length];
+        MemorySegment.copy(seg, ValueLayout.JAVA_BYTE, 0, result, 0, length);
+        assertArrayEquals("multi-frame boundary decrypt must round-trip", plaintext, result);
+    }
+
+    /**
+     * Regression test spanning FOUR frames (0,1,2,3) so the fix is exercised for several N&gt;=1 frames in a
+     * single call, not just the first boundary.
+     */
+    public void testDecryptInPlaceFrameBasedSpansManyFrames() throws Exception {
+        final long frameSize = 256;
+        final byte[] messageId = new byte[16];
+        Arrays.fill(messageId, (byte) 0x5A);
+        final byte[] fileKey = new byte[32];
+        Arrays.fill(fileKey, (byte) 0x33);
+        final byte[] directoryKey = TEST_KEY;
+        final String path = "/tmp/p1_3_manyframes.bin";
+        final EncryptionMetadataCache cache = new EncryptionMetadataCache();
+
+        final long fileOffset = 250;                // starts near end of frame 0
+        final int length = 600;                     // spans frames 0,1,2,3
+
+        byte[] plaintext = new byte[length];
+        new SecureRandom().nextBytes(plaintext);
+
+        MemorySegment seg = arena.allocate(length);
+        MemorySegment.copy(plaintext, 0, seg, ValueLayout.JAVA_BYTE, 0, length);
+
+        // Emit ciphertext frame-by-frame using within-frame offsets (models the write path).
+        long remaining = length;
+        long currentOffset = fileOffset;
+        long bufferOffset = 0;
+        while (remaining > 0) {
+            long frameNumber = currentOffset / frameSize;
+            long frameStart = frameNumber * frameSize;
+            long frameEnd = frameStart + frameSize;
+            long bytesInFrame = Math.min(remaining, frameEnd - currentOffset);
+            long offsetWithinFrame = currentOffset - frameStart;
+
+            byte[] iv = AesCipherFactory.computeFrameIV(directoryKey, messageId, frameNumber, offsetWithinFrame, path, cache);
+            MemorySegmentDecryptor.decryptInPlace(seg.address() + bufferOffset, bytesInFrame, fileKey, iv, offsetWithinFrame);
+
+            currentOffset += bytesInFrame;
+            bufferOffset += bytesInFrame;
+            remaining -= bytesInFrame;
+        }
+
+        MemorySegmentDecryptor
+            .decryptInPlaceFrameBased(seg.address(), length, fileKey, directoryKey, messageId, frameSize, fileOffset, path, cache);
+
+        byte[] result = new byte[length];
+        MemorySegment.copy(seg, ValueLayout.JAVA_BYTE, 0, result, 0, length);
+        assertArrayEquals("multi-frame span decrypt must round-trip across frames 0-3", plaintext, result);
+    }
+
     public void testChunkedDecryption() throws Exception {
         // Test that chunked processing works correctly
         int dataSize = 20000; // Larger than default chunk size

@@ -4,18 +4,16 @@
  */
 package org.opensearch.index.store.block_loader;
 
-import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.getDirectIOAlignment;
-
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.OpenOption;
-import java.nio.file.Path;
 import java.util.Arrays;
 
 import org.opensearch.common.SuppressForbidden;
+import org.opensearch.index.store.PanamaNativeAccess;
 
 /**
  * Utility class for Direct I/O operations with proper alignment handling.
@@ -89,16 +87,16 @@ public class DirectIOReaderUtil {
      * </pre>
      *
      * @param channel the file channel to read from
-     * @param filePath the path of the file being read (used to determine filesystem block size)
      * @param offset the byte offset in the file to start reading from
      * @param length the number of bytes to read
      * @param arena the memory arena for allocating the result segment
+     * @param blockSize the filesystem block size for alignment (from Files.getFileStore().getBlockSize())
      * @return a memory segment containing the read data
      * @throws IOException if the read operation fails
      */
-    public static MemorySegment directIOReadAligned(FileChannel channel, Path filePath, long offset, long length, Arena arena)
+    public static MemorySegment directIOReadAligned(FileChannel channel, long offset, long length, Arena arena, int blockSize)
         throws IOException {
-        int alignment = getDirectIOAlignment(filePath);
+        int alignment = Math.max(blockSize, PanamaNativeAccess.getPageSize());
 
         // Require alignment to be a power of 2
         if ((alignment & (alignment - 1)) != 0) {
@@ -117,14 +115,46 @@ public class DirectIOReaderUtil {
         MemorySegment alignedSegment = arena.allocate(alignedLength, alignment);
         ByteBuffer directBuffer = alignedSegment.asByteBuffer();
 
-        int bytesRead = channel.read(directBuffer, alignedOffset);
-        if (bytesRead < 0) {
-            // EOF, return empty segment
+        // FileChannel.read(buffer, position) may return a SHORT count even when the region is not at
+        // EOF (large multi-block reads, signal interruption, certain Direct-I/O/filesystem behaviors).
+        // A single read would then silently under-fill the buffer and we would decrypt/serve the
+        // boundary block's tail as uninitialized/stale bytes — and because the data read path is
+        // unauthenticated AES-CTR that surfaces later as a Lucene CRC / CorruptIndexException rather
+        // than failing fast. Loop until the aligned buffer is full or we hit EOF.
+        int totalRead = 0;
+        while (directBuffer.hasRemaining()) {
+            int n = channel.read(directBuffer, alignedOffset + totalRead);
+            if (n < 0) {
+                break;  // genuine EOF
+            }
+            if (n == 0) {
+                // A non-EOF zero-byte read can occur transiently (e.g. NFS cache staleness). The
+                // upstream loader retries the whole load; do not spin here.
+                break;
+            }
+            totalRead += n;
+            // O_DIRECT requires every positional read to start on a block boundary. The kernel only
+            // returns a sub-block-aligned count at end-of-file, so a short read here means EOF: the
+            // file has fewer bytes than the aligned request (common for small metadata files whose
+            // size is not a block multiple, e.g. Lucene *FieldsIndex*-doc_ids_*.tmp at ~125/1256 B).
+            // We MUST stop rather than continue the loop, because the next read would be issued at the
+            // now-unaligned position (alignedOffset + totalRead) and the JDK rejects it with
+            // "Channel position (N) is not a multiple of the block size (M)" — an IOException that
+            // tragically closes the Lucene IndexWriter and permanently fails (REDs) the shard. The
+            // clamp below returns exactly the bytes the file actually held, so short-read safety is
+            // preserved without the illegal unaligned resume.
+            if ((totalRead & (alignment - 1)) != 0) {
+                break;  // sub-block read ⇒ EOF; do not resume at an unaligned O_DIRECT position
+            }
+        }
+
+        if (totalRead == 0) {
+            // EOF (or transient zero-byte) before any data: return empty segment, caller decides.
             return arena.allocate(0);
         }
 
-        // Clamp to available
-        int available = Math.max(0, bytesRead - (int) offsetDelta);
+        // Clamp to what we actually read past the alignment delta.
+        int available = Math.max(0, totalRead - (int) offsetDelta);
         int toCopy = (int) Math.min(length, available);
 
         return alignedSegment.asSlice(offsetDelta, toCopy);

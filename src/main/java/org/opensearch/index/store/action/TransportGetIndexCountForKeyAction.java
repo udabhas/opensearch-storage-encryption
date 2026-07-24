@@ -4,10 +4,8 @@
  */
 package org.opensearch.index.store.action;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
@@ -85,10 +83,15 @@ public class TransportGetIndexCountForKeyAction extends HandledTransportAction<G
         if (encryptionContext == null || encryptionContext.isEmpty()) {
             return Collections.emptyMap();
         }
-        return Arrays
-            .stream(encryptionContext.split(","))
-            .map(s -> s.split("="))
-            .collect(Collectors.toMap(e -> e[0].trim(), e -> e[1].trim()));
+        Map<String, String> result = new java.util.HashMap<>();
+        for (String pair : encryptionContext.split(",")) {
+            String[] parts = pair.split("=", 2);
+            if (parts.length != 2 || parts[0].trim().isEmpty()) {
+                throw new IllegalArgumentException("Invalid encryption context entry: '" + pair + "'. Expected format: key=value");
+            }
+            result.putIfAbsent(parts[0].trim(), parts[1].trim());
+        }
+        return result;
     }
 
 }

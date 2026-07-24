@@ -18,8 +18,6 @@ import org.opensearch.plugins.Plugin;
 import org.opensearch.snapshots.SnapshotState;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
-import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
-
 /**
  * Snapshot and restore integration tests for encrypted indices.
  * Tests that encrypted data can be successfully snapshotted and restored.
@@ -31,7 +29,6 @@ import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
  * - Survives multiple snapshot/restore cycles
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
-@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class SnapshotRestoreIntegTests extends OpenSearchIntegTestCase {
 
     @Override
@@ -46,8 +43,6 @@ public class SnapshotRestoreIntegTests extends OpenSearchIntegTestCase {
             .put(super.nodeSettings(nodeOrdinal))
             .put("plugins.crypto.enabled", true)
             .put("node.store.crypto.pool_size_percentage", 0.05)
-            .put("node.store.crypto.warmup_percentage", 0.0)
-            .put("node.store.crypto.cache_to_pool_ratio", 0.8)
             .put("node.store.crypto.key_refresh_interval", "30s")
             .build();
     }

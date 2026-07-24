@@ -119,22 +119,20 @@ public class ShardKeyResolverRegistry {
      */
     public static KeyResolver removeResolver(String indexUuid, int shardId, String indexName) {
         ShardCacheKey key = new ShardCacheKey(indexUuid, shardId, indexName);
+
+        // Lock-free by design: this runs on the cluster-applier thread, and getOrCreateResolver holds the
+        // per-index lock across a synchronous KMS call. Taking that lock here could stall cluster-state
+        // application for the full KMS duration. The map remove is atomic; a race with a concurrent
+        // getOrCreateResolver only causes a harmless CACHE_MISS rebuild, never a wrong-key mint.
+        // The per-index lock object is intentionally left in indexInitLocks (removing it risks a
+        // lock-identity race); it is negligible memory.
         KeyResolver removed = resolverCache.remove(key);
         if (removed != null) {
-            // Evict from node-level cache when shard is removed
+            // Evict from node-level cache when shard is removed.
             try {
                 NodeLevelKeyCache.getInstance().evict(indexUuid, shardId, indexName);
             } catch (IllegalStateException e) {
                 logger.debug("Could not evict from NodeLevelKeyCache: {}", e.getMessage());
-            }
-
-            // Clean up index lock if no more shards remain for this index
-            // This prevents memory leaks from accumulating lock objects
-            synchronized (indexInitLocks) {
-                boolean hasOtherShards = resolverCache.keySet().stream().anyMatch(k -> k.getIndexUuid().equals(indexUuid));
-                if (!hasOtherShards) {
-                    indexInitLocks.remove(indexUuid);
-                }
             }
         }
         return removed;

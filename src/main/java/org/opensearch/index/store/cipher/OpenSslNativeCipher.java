@@ -303,6 +303,22 @@ public final class OpenSslNativeCipher {
             throw new IllegalArgumentException("Invalid IV length: expected " + AES_BLOCK_SIZE + " bytes");
         }
 
+        byte[] gcmIV = new byte[AesGcmCipherFactory.GCM_NONCE_LENGTH];
+        System.arraycopy(iv, 0, gcmIV, 0, AesGcmCipherFactory.GCM_NONCE_LENGTH);
+        return initGCMCipherWithNonce(key, gcmIV);
+    }
+
+    /**
+     * Initializes a GCM cipher context with a 12-byte nonce directly.
+     */
+    public static MemorySegment initGCMCipherWithNonce(byte[] key, byte[] gcmNonce) throws Throwable {
+        if (key == null || key.length != AES_256_KEY_SIZE) {
+            throw new IllegalArgumentException("Invalid key length: expected " + AES_256_KEY_SIZE + " bytes");
+        }
+        if (gcmNonce == null || gcmNonce.length != AesGcmCipherFactory.GCM_NONCE_LENGTH) {
+            throw new IllegalArgumentException("GCM nonce must be exactly " + AesGcmCipherFactory.GCM_NONCE_LENGTH + " bytes");
+        }
+
         MemorySegment ctx = (MemorySegment) EVP_CIPHER_CTX_new.invoke();
         if (ctx.address() == 0) {
             LOGGER.error("EVP_CIPHER_CTX_new failed to create GCM cipher context");
@@ -316,12 +332,9 @@ public final class OpenSslNativeCipher {
             throw new OpenSslException("EVP_aes_256_gcm failed");
         }
 
-        byte[] gcmIV = new byte[12];
-        System.arraycopy(iv, 0, gcmIV, 0, 12);
-
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment keySeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, key);
-            MemorySegment ivSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, gcmIV);
+            MemorySegment ivSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, gcmNonce);
 
             int rc = (int) EVP_EncryptInit_ex.invoke(ctx, cipher, MemorySegment.NULL, keySeg, ivSeg);
             if (rc != 1) {

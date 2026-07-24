@@ -18,6 +18,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.IndexScopedSettings;
 import org.opensearch.common.settings.Setting;
@@ -25,6 +26,7 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.settings.SettingsFilter;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.index.Index;
+import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
@@ -32,18 +34,17 @@ import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.shard.IndexEventListener;
+import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.store.action.GetIndexCountForKeyAction;
 import org.opensearch.index.store.action.TransportGetIndexCountForKeyAction;
 import org.opensearch.index.store.block_cache.BlockCache;
-import org.opensearch.index.store.block_loader.FileChannelCache;
 import org.opensearch.index.store.key.MasterKeyHealthMonitor;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.pool.PoolSizeCalculator;
+import org.opensearch.index.store.rest.*;
 import org.opensearch.index.store.rest.RestGetIndexCountForKeyAction;
-import org.opensearch.index.store.rest.RestRegisterCryptoAction;
-import org.opensearch.index.store.rest.RestUnregisterCryptoAction;
 import org.opensearch.indices.RemoteStoreSettings;
 import org.opensearch.indices.cluster.IndicesClusterStateService.AllocatedIndices.IndexRemovalReason;
 import org.opensearch.plugins.ActionPlugin;
@@ -143,12 +144,10 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
                 CryptoDirectoryFactory.INDEX_KMS_ENC_CTX_SETTING,
                 CryptoDirectoryFactory.NODE_KEY_REFRESH_INTERVAL_SETTING,
                 CryptoDirectoryFactory.NODE_KEY_EXPIRY_INTERVAL_SETTING,
-                CryptoDirectoryFactory.WRITE_CACHE_ENABLED_SETTING,
                 PoolSizeCalculator.NODE_POOL_SIZE_PERCENTAGE_SETTING,
-                PoolSizeCalculator.NODE_CACHE_TO_POOL_RATIO_SETTING,
-                PoolSizeCalculator.NODE_WARMUP_PERCENTAGE_SETTING,
-                PoolSizeCalculator.NODE_MAX_FILE_CHANNELS_SETTING,
-                PoolSizeCalculator.NODE_FD_CACHE_EXPIRE_SECONDS_SETTING
+                PoolSizeCalculator.NODE_POOL_SIZE_PERCENTAGE_SMALL_SETTING,
+                PoolSizeCalculator.NODE_GC_HEADROOM_FRACTION_SETTING,
+                PoolSizeCalculator.NODE_PROACTIVE_SHRINK_ENABLED_SETTING
             );
         return settings;
     }
@@ -210,6 +209,11 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         // Create RemoteStoreSettings with node settings and cluster settings
         CryptoDirectoryPlugin.remoteStoreSettings = new RemoteStoreSettings(environment.settings(), clusterService.getClusterSettings());
 
+        // Store remote store parameters for CryptoEngineFactory to access
+        CryptoDirectoryPlugin.repositoriesServiceSupplier = repositoriesServiceSupplier;
+        // Create RemoteStoreSettings with node settings and cluster settings
+        CryptoDirectoryPlugin.remoteStoreSettings = new RemoteStoreSettings(environment.settings(), clusterService.getClusterSettings());
+
         // Set cluster service for accessing cluster metadata (e.g., repository settings)
         CryptoDirectoryFactory.setClusterService(clusterService);
 
@@ -226,6 +230,18 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         // This prevents allocation on dedicated master nodes which never create shards
         CryptoDirectoryFactory.setNodeSettings(environment.settings());
         CryptoMetricsService.initialize(metricsRegistry);
+
+        // Proactive cache-shrink: seed from the node setting and register a dynamic update-consumer so
+        // the (default-off) flag can be toggled at runtime. Applies to the live pool if already built,
+        // else is picked up when the pool is lazily created on first cryptofs shard.
+        CryptoDirectoryFactory
+            .setProactiveShrinkEnabled(PoolSizeCalculator.NODE_PROACTIVE_SHRINK_ENABLED_SETTING.get(environment.settings()));
+        clusterService
+            .getClusterSettings()
+            .addSettingsUpdateConsumer(
+                PoolSizeCalculator.NODE_PROACTIVE_SHRINK_ENABLED_SETTING,
+                CryptoDirectoryFactory::setProactiveShrinkEnabled
+            );
 
         return Collections.emptyList();
     }
@@ -259,7 +275,16 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<DiscoveryNodes> nodesInCluster
     ) {
-        return Arrays.asList(new RestRegisterCryptoAction(), new RestUnregisterCryptoAction(), new RestGetIndexCountForKeyAction());
+        if (isDisabled()) {
+            log.debug("Crypto Directory Plugin is disabled. No REST handlers will be registered.");
+            return Collections.emptyList();
+        }
+        return Arrays
+            .asList(
+                new org.opensearch.index.store.rest.RestRegisterCryptoAction(),
+                new org.opensearch.index.store.rest.RestUnregisterCryptoAction(),
+                new RestGetIndexCountForKeyAction()
+            );
     }
 
     @Override
@@ -280,6 +305,15 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
             // Validate crypto settings early at index creation time
             CryptoIndexSettingsValidator.validate(indexSettings);
             indexModule.addIndexEventListener(new IndexEventListener() {
+                // Evict the per-node resolver cache when a shard leaves this node. Fires on every shard
+                // departure (relocation, close), unlike afterIndexRemoved which only fires on index DELETE.
+                // Without this, a stale resolver survives relocate-away (which deletes the on-disk keyfile),
+                // and relocate-back returns it as a CACHE_HIT that skips keyfile regeneration -> keyless shard.
+                @Override
+                public void afterIndexShardClosed(ShardId shardId, @Nullable IndexShard indexShard, Settings shardIndexSettings) {
+                    ShardKeyResolverRegistry.removeResolver(shardId.getIndex().getUUID(), shardId.id(), shardId.getIndexName());
+                }
+
                 /*
                  * Cache invalidation for closed shards is handled automatically
                  * by CryptoDirectIODirectory.close() when the directory is closed.
@@ -294,14 +328,6 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
                     if (cache != null && nodeEnvironment != null) {
                         for (Path indexPath : nodeEnvironment.indexPaths(index)) {
                             cache.invalidateByPathPrefix(indexPath);
-                        }
-                    }
-
-                    // Invalidate FD cache entries for all files in the deleted index
-                    FileChannelCache fdCache = CryptoDirectoryFactory.getSharedFileChannelCache();
-                    if (fdCache != null && nodeEnvironment != null) {
-                        for (Path indexPath : nodeEnvironment.indexPaths(index)) {
-                            fdCache.invalidateByPathPrefix(indexPath);
                         }
                     }
 

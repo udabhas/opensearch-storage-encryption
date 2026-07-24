@@ -11,6 +11,8 @@ import java.util.function.LongSupplier;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 
 /**
  * A Translog implementation that provides AES-GCM encryption capabilities.
@@ -148,6 +150,7 @@ public class CryptoTranslog extends LocalTranslog {
             CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyResolver, translogUUID);
             return channelFactory;
         } catch (Exception e) {
+            CryptoMetricsService.getInstance().recordError(ErrorType.TRANSLOG_INIT_ERROR);
             throw new IOException(
                 "Failed to initialize crypto channel factory for translog encryption. " + "Cannot proceed without encryption!",
                 e

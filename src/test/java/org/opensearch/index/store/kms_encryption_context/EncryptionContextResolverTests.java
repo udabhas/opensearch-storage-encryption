@@ -32,7 +32,7 @@ import org.opensearch.test.IndexSettingsModule;
 public class EncryptionContextResolverTests extends LuceneTestCase {
 
     private static final String TEST_REPO_NAME = "test-s3-repo";
-    private static final String AMAZON_ENC_CTX_VALUE = "domainARN=arn:aws:es:eu-west-1:110365260509:domain/test-domain";
+    private static final String AMAZON_ENC_CTX_VALUE = "context-key=test-context-value";
     private static final String INDEX_ENC_CTX_VALUE = "indexId=my-custom-index";
 
     private ClusterService clusterService;
@@ -91,8 +91,7 @@ public class EncryptionContextResolverTests extends LuceneTestCase {
      */
     public void testAmazonResolverExtractsFromRepository() {
         ClusterService mockClusterService = createMockClusterServiceWithRepository(TEST_REPO_NAME, AMAZON_ENC_CTX_VALUE);
-        // ClusterSettings clusterSettings = mock(ClusterSettings.class);
-        // when(mockClusterService.getClusterSettings()).thenReturn(clusterSettings);
+
         EncryptionContextResolver resolver = EncryptionContextResolverFactory
             .create(EncryptionContextResolverType.AMAZON, mockClusterService);
 

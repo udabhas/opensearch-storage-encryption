@@ -4,8 +4,12 @@
  */
 package org.opensearch.index.store.block_cache;
 
+import java.nio.file.Path;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -82,6 +86,20 @@ public final class BlockCacheBuilder {
                 new ThreadContext(org.opensearch.common.settings.Settings.EMPTY)
             );
 
+        // Shared reference for L1 eviction notification. The removal listener lambda reads
+        // from this reference; CaffeineBlockCache sets it via setEvictionListener(). This is
+        // the coherence path that clears stale RadixBlockTable (L1) pointers when the
+        // Caffeine L2 cache evicts a block — required because RefCountedByteBuffer carries
+        // no generation counter for the L1 to detect staleness on its own.
+        AtomicReference<BlockCache.EvictionListener> evictionListenerRef = new AtomicReference<>();
+
+        // Path -> keyset index so invalidate(Path) is O(K-file), not an O(N-cache) scan.
+        // Trimmed by the Caffeine removal listener below so every eviction path stays consistent.
+        ConcurrentHashMap<Path, Set<BlockCacheKey>> secondary = new ConcurrentHashMap<>(8192, 0.75f, 64);
+
+        // Forward reference so the removal listener can consult the primary cache.
+        AtomicReference<Cache<BlockCacheKey, BlockCacheValue<T>>> cacheRef = new AtomicReference<>();
+
         Cache<BlockCacheKey, BlockCacheValue<T>> cache = Caffeine
             .newBuilder()
             .initialCapacity(initialCapacity)
@@ -89,6 +107,31 @@ public final class BlockCacheBuilder {
             .maximumSize(maxBlocks)
             .removalListener((BlockCacheKey key, BlockCacheValue<T> value, RemovalCause cause) -> {
                 if (value != null) {
+                    // Notify L1 eviction listener BEFORE closing the segment, so the stale
+                    // L1 pointer is cleared and future reads see a clean miss.
+                    BlockCache.EvictionListener listener = evictionListenerRef.get();
+                    if (listener != null && key instanceof FileBlockCacheKey fbk) {
+                        try {
+                            listener.onEviction(fbk.filePath(), fbk.fileOffset());
+                        } catch (Exception e) {
+                            LOGGER.warn("L1 eviction notification failed for {}", key, e);
+                        }
+                    }
+
+                    // Trim the secondary for every eviction cause through one path.
+                    // Guard: skip the trim if the primary still holds the key. The removal listener
+                    // fires asynchronously — a concurrent re-insert would otherwise leave the
+                    // secondary untracking a live entry, so invalidate(Path) would miss it and stale
+                    // ciphertext could persist for a recreated path (AES-CTR reads decrypt to garbage
+                    // → CRC / CorruptIndexException).
+                    Cache<BlockCacheKey, BlockCacheValue<T>> primary = cacheRef.get();
+                    if (key instanceof FileBlockCacheKey fbk && (primary == null || !primary.asMap().containsKey(key))) {
+                        secondary.computeIfPresent(fbk.filePath(), (p, keys) -> {
+                            keys.remove(key);
+                            return keys.isEmpty() ? null : keys;
+                        });
+                    }
+
                     removalExec.execute(() -> {
                         try {
                             value.close();
@@ -100,10 +143,14 @@ public final class BlockCacheBuilder {
             })
             .build();
 
+        // Publish cache ref so the removal listener can consult primary presence. Listener can't
+        // fire before .build() returns; the null-guard in the listener is defensive.
+        cacheRef.set(cache);
+
         // Loader is null here because this creates a shared cache instance.
         // Per-directory caches will wrap this cache with their own loaders
         // that provide directory-specific decryption keys.
-        CaffeineBlockCache<T, V> caffeineBlockCache = new CaffeineBlockCache<>(cache, null, maxBlocks);
+        CaffeineBlockCache<T, V> caffeineBlockCache = new CaffeineBlockCache<>(cache, null, maxBlocks, evictionListenerRef, secondary);
         return new CacheWithExecutor<>(caffeineBlockCache, removalExec);
     }
 }

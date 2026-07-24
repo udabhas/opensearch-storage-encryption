@@ -30,14 +30,11 @@ import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
-import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
-
 /**
  * Extended integration tests for CryptoDirectory plugin.
  * Tests multi-node operations, lifecycle management, resilience, and performance.
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
-@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class ConcurrencyIntegTests extends OpenSearchIntegTestCase {
 
     @Override
@@ -52,8 +49,6 @@ public class ConcurrencyIntegTests extends OpenSearchIntegTestCase {
             .put(super.nodeSettings(nodeOrdinal))
             .put("plugins.crypto.enabled", true)
             .put("node.store.crypto.pool_size_percentage", 0.05) // 5% for tests
-            .put("node.store.crypto.warmup_percentage", 0.0) // No warmup
-            .put("node.store.crypto.cache_to_pool_ratio", 0.8)
             .put("node.store.crypto.key_refresh_interval", "30s") // Short for testing
             .build();
     }
@@ -285,7 +280,6 @@ public class ConcurrencyIntegTests extends OpenSearchIntegTestCase {
             .builder()
             .put(nodeSettings(0))
             .put("node.store.crypto.pool_size_percentage", 0.001) // Very small pool
-            .put("node.store.crypto.cache_to_pool_ratio", 0.5)
             .build();
 
         internalCluster().startNode(smallPoolSettings);

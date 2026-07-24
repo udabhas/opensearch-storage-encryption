@@ -133,6 +133,34 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
         }
     }
 
+    /**
+     * Routes rename so the buffer-pool directory's cache invalidation actually runs under HYBRIDFS
+     * (the default store type).
+     *
+     * <p>Without this override, {@code rename} would fall through to {@link org.apache.lucene.store.FSDirectory#rename}
+     * (a bare {@code Files.move} with no cache invalidation), bypassing {@link BufferPoolDirectory#rename}. A rename that
+     * replaces a buffer-pool-cached path would then leave stale FD-cache / block-cache / encryption-metadata entries for
+     * the source and destination paths. Because the data read path is unauthenticated AES-CTR, a later read of the
+     * reused path could be served the OLD inode's ciphertext while the footer/file-key is re-resolved from the NEW inode
+     * — silent corruption (surfacing later as a Lucene CRC / CorruptIndexException). Mirrors {@link #deleteFile} routing.
+     *
+     * <p>We route to {@link BufferPoolDirectory#rename} when EITHER path is buffer-pool-routed (so the invalidation for
+     * both the source's and destination's cached state runs); otherwise to {@code super.rename} for NIO-only files. Both
+     * directories share the same underlying {@link org.apache.lucene.store.FSDirectory}, so the physical move is
+     * identical regardless of which path performs it.
+     */
+    @Override
+    public void rename(String source, String dest) throws IOException {
+        String sourceExtension = FileSwitchDirectory.getExtension(source);
+        String destExtension = FileSwitchDirectory.getExtension(dest);
+
+        if (delegeteBufferPool(sourceExtension) || delegeteBufferPool(destExtension)) {
+            bufferPoolDirectory.rename(source, dest);
+        } else {
+            super.rename(source, dest);
+        }
+    }
+
     @Override
     public void close() throws IOException {
         bufferPoolDirectory.close(); // only closes its resources.

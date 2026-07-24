@@ -291,4 +291,76 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
             CryptoDirectoryPlugin.CRYPTO_PLUGIN_ENABLED_SETTING.getDefault(org.opensearch.common.settings.Settings.EMPTY)
         );
     }
+
+    // ==================== SI File Encryption Tests ====================
+
+    /**
+     * .si files are encrypted on disk (not plaintext).
+     */
+    public void testSiFileIsEncrypted() throws IOException {
+        try (Directory dir = getDirectory(createTempDir())) {
+            byte[] data = "SI_CONTENT_MUST_BE_ENCRYPTED_99".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            try (IndexOutput out = dir.createOutput("_0.si", newIOContext(random()))) {
+                out.writeBytes(data, 0, data.length);
+            }
+
+            // Read back through crypto dir — should decrypt correctly
+            try (IndexInput in = dir.openInput("_0.si", newIOContext(random()))) {
+                byte[] read = new byte[data.length];
+                in.readBytes(read, 0, data.length);
+                assertEquals("SI_CONTENT_MUST_BE_ENCRYPTED_99", new String(read, java.nio.charset.StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    /**
+     * segments_* files are encrypted on disk.
+     */
+    public void testSegmentsFileIsEncrypted() throws IOException {
+        try (Directory dir = getDirectory(createTempDir())) {
+            byte[] data = "SEGMENTS_DATA_ENCRYPTED_XYZ".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            try (IndexOutput out = dir.createOutput("segments_1", newIOContext(random()))) {
+                out.writeBytes(data, 0, data.length);
+            }
+
+            try (IndexInput in = dir.openInput("segments_1", newIOContext(random()))) {
+                byte[] read = new byte[data.length];
+                in.readBytes(read, 0, data.length);
+                assertEquals("SEGMENTS_DATA_ENCRYPTED_XYZ", new String(read, java.nio.charset.StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    /**
+     * Plaintext .si files (from pre-encryption indices) are still readable via fallback.
+     */
+    public void testPlaintextSiFallback() throws IOException {
+        Path tempPath = createTempDir();
+        byte[] data = "OLD_PLAINTEXT_SI".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        // Write plaintext file directly (simulating pre-encryption index)
+        java.nio.file.Files.write(tempPath.resolve("_0.si"), data);
+
+        try (Directory dir = getDirectory(tempPath)) {
+            try (IndexInput in = dir.openInput("_0.si", newIOContext(random()))) {
+                byte[] read = new byte[data.length];
+                in.readBytes(read, 0, data.length);
+                assertEquals("OLD_PLAINTEXT_SI", new String(read, java.nio.charset.StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    /**
+     * fileLength() returns content length (not raw file size) for encrypted .si files.
+     */
+    public void testFileLengthForSiFile() throws IOException {
+        try (Directory dir = getDirectory(createTempDir())) {
+            byte[] data = "LENGTH_CHECK_DATA".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            try (IndexOutput out = dir.createOutput("_0.si", newIOContext(random()))) {
+                out.writeBytes(data, 0, data.length);
+            }
+
+            assertEquals("fileLength should equal content length", data.length, dir.fileLength("_0.si"));
+        }
+    }
 }

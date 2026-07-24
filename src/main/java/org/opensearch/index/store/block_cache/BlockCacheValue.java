@@ -27,7 +27,7 @@ package org.opensearch.index.store.block_cache;
  * hold a pin. Implementations should ensure {@link #tryPin()} fails (returns {@code false})
  * once the value has been retired.
  *
- * @param <T> The wrapped resource type (e.g., a read-only view like RefCountedMemorySegment)
+ * @param <T> The wrapped resource type (e.g., a read-only view like RefCountedByteBuffer)
  */
 public interface BlockCacheValue<T> extends AutoCloseable {
 
@@ -99,4 +99,16 @@ public interface BlockCacheValue<T> extends AutoCloseable {
      * @return current generation counter value
      */
     int getGeneration();
+
+    /**
+     * Whether this value is a transient, non-cacheable fallback (e.g. a non-pooled buffer the read
+     * path allocated because the pool was exhausted/throttled). Such values back a single in-flight
+     * read and must NOT be inserted into the cache, since they are not accounted in the pool's memory
+     * budget. Default {@code false}; pooled cache values are cacheable.
+     *
+     * @return {@code true} if this value must not be cached
+     */
+    default boolean isTransient() {
+        return false;
+    }
 }

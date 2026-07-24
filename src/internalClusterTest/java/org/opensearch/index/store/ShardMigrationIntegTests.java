@@ -26,8 +26,6 @@ import org.opensearch.common.unit.TimeValue;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
-import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
-
 /**
  * Integration tests for encrypted shard migration, relocation, and recovery across nodes.
  * Tests various scenarios including:
@@ -37,7 +35,6 @@ import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
  * - Replica synchronization with data changes during downtime
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
-@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
 
     @Override
@@ -52,8 +49,6 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
             .put(super.nodeSettings(nodeOrdinal))
             .put("plugins.crypto.enabled", true)
             .put("node.store.crypto.pool_size_percentage", 0.05) // 5% for tests
-            .put("node.store.crypto.warmup_percentage", 0.0) // No warmup
-            .put("node.store.crypto.cache_to_pool_ratio", 0.8)
             .put("node.store.crypto.key_refresh_interval", "30s") // Short for testing
             .build();
     }

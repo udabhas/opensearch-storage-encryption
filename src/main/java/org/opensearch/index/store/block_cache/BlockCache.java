@@ -23,6 +23,30 @@ import java.util.Map;
 public interface BlockCache<T> {
 
     /**
+     * Callback invoked when a block is evicted from the cache.
+     * Used to notify L1 caches (RadixBlockTable) so they can clear stale entries.
+     *
+     * <p>This is the coherence mechanism for the GC-managed {@code RefCountedByteBuffer} L1
+     * design: because {@code RefCountedByteBuffer} carries no generation counter, the L1
+     * (RadixBlockTable) cannot detect a stale entry on its own. The L2 cache notifies the L1
+     * here, on eviction, so the L1 drops the stale pointer and future reads see a clean miss.
+     */
+    @FunctionalInterface
+    interface EvictionListener {
+        void onEviction(Path path, long blockOffset);
+    }
+
+    /**
+     * Registers a listener that is notified when blocks are evicted from this cache.
+     * The listener is called before the evicted value is closed.
+     *
+     * @param listener the eviction listener
+     */
+    default void setEvictionListener(EvictionListener listener) {
+        // no-op by default; implementations that support eviction notification override this
+    }
+
+    /**
      * Returns the block if cached, or null if absent.
      *
      * @param key the cache key identifying the block
@@ -80,6 +104,20 @@ public interface BlockCache<T> {
      * Clear all blocks from the cache.
      */
     void clear();
+
+    /**
+     * Evict approximately the given fraction (0.0–1.0) of currently-cached blocks to release memory
+     * under pressure. Implementations should evict the coldest entries first and run their normal
+     * removal/eviction listeners so the backing buffers become reclaimable. Used by the pool's
+     * memory-pressure throttle to actively shed memory so the throttle can clear (see
+     * {@code MemorySegmentPool} throttle-engaged hook). Default no-op.
+     *
+     * @param fraction fraction of current entries to evict, clamped to [0,1]
+     * @return the number of entries evicted
+     */
+    default long evictColdestFraction(double fraction) {
+        return 0L;
+    }
 
     /**
      * Load multiple blocks for prefetch/readahead with a short timeout to fail fast when pool is under pressure.

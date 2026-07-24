@@ -45,8 +45,6 @@ import org.opensearch.transport.client.AdminClient;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.IndicesAdminClient;
 
-import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
-
 /**
  * Tests for concurrent shard creation to verify the race condition fix
  * in ShardKeyResolverRegistry.
@@ -54,7 +52,6 @@ import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
  * This test ensures that when multiple shards of the same index are created
  * concurrently, only one thread initializes the shared index-level keyfile.
  */
-@ThreadLeakFilters(filters = org.opensearch.index.store.CaffeineThreadLeakFilter.class)
 public class ShardKeyResolverRegistryConcurrencyTests extends OpenSearchTestCase {
 
     private Path tempDir;
@@ -64,6 +61,7 @@ public class ShardKeyResolverRegistryConcurrencyTests extends OpenSearchTestCase
     @Before
     public void setUp() throws Exception {
         super.setUp();
+
         // Create temporary directory for test
         tempDir = createTempDir();
 
@@ -206,6 +204,54 @@ public class ShardKeyResolverRegistryConcurrencyTests extends OpenSearchTestCase
 
         // Verify only one key generation occurred
         verify(mockKeyProvider, times(1)).generateDataPair();
+
+        indexDirectory.close();
+    }
+
+    /**
+     * The per-index lock object is intentionally RETAINED in indexInitLocks after the last shard is removed
+     * (reclaiming it created a lock-identity race). Verify that (a) the entry survives full removal, and
+     * (b) re-creating the index after full removal still initializes the keyfile exactly once — i.e. the
+     * retained lock keeps serializing init correctly across a remove -> recreate cycle.
+     */
+    @SuppressWarnings("unchecked")
+    public void testIndexLockRetainedAfterFullRemovalAndReinit() throws Exception {
+        String indexUuid = "test-lock-retained";
+        String indexName = "test-lock-retained";
+        int numShards = 3;
+        Directory indexDirectory = FSDirectory.open(tempDir);
+
+        // Read the private indexInitLocks map via reflection to assert retention.
+        java.lang.reflect.Field f = ShardKeyResolverRegistry.class.getDeclaredField("indexInitLocks");
+        f.setAccessible(true);
+        java.util.Map<String, Object> locks = (java.util.Map<String, Object>) f.get(null);
+
+        for (int s = 0; s < numShards; s++) {
+            ShardKeyResolverRegistry.getOrCreateResolver(indexUuid, indexDirectory, cryptoProvider, mockKeyProvider, s, indexName);
+        }
+        Object lockAfterCreate = locks.get(indexUuid);
+        assertNotNull("lock object should exist while shards are present", lockAfterCreate);
+        verify(mockKeyProvider, times(1)).generateDataPair();
+
+        // Remove ALL shards; the lock object must NOT be reclaimed.
+        for (int s = 0; s < numShards; s++) {
+            ShardKeyResolverRegistry.removeResolver(indexUuid, s, indexName);
+        }
+        assertEquals("all resolvers removed", 0, ShardKeyResolverRegistry.getCacheSize());
+        assertTrue("index lock must be retained after full removal", locks.containsKey(indexUuid));
+        assertTrue("retained lock must be the SAME object (no identity churn)", lockAfterCreate == locks.get(indexUuid));
+
+        // Recreate the index; keyfile already exists on disk so it should LOAD, not mint again.
+        reset(mockKeyProvider);
+        byte[] pk = new byte[32];
+        byte[] ek = new byte[48];
+        when(mockKeyProvider.generateDataPair()).thenReturn(new DataKeyPair(pk, ek));
+        when(mockKeyProvider.decryptKey(any())).thenReturn(pk);
+        for (int s = 0; s < numShards; s++) {
+            ShardKeyResolverRegistry.getOrCreateResolver(indexUuid, indexDirectory, cryptoProvider, mockKeyProvider, s, indexName);
+        }
+        assertTrue("lock still the same object after reinit", lockAfterCreate == locks.get(indexUuid));
+        verify(mockKeyProvider, times(0)).generateDataPair(); // keyfile present -> load, no new mint
 
         indexDirectory.close();
     }

@@ -16,6 +16,7 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.engine.InternalEngine;
+import org.opensearch.index.engine.NRTReplicationEngine;
 import org.opensearch.index.remote.RemoteTranslogTransferTracker;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
@@ -64,6 +65,11 @@ public class CryptoEngineFactory implements EngineFactory {
                 .toBuilder()
                 .translogFactory(cryptoTranslogFactory)  // <- Replace with our crypto factory
                 .build();
+
+            // Replicas use segment-replication NRT engine; only primaries get the full write path.
+            if (cryptoConfig.isReadOnlyReplica()) {
+                return new NRTReplicationEngine(cryptoConfig);
+            }
 
             // Return the default engine with crypto-enabled translog
             return new InternalEngine(cryptoConfig);

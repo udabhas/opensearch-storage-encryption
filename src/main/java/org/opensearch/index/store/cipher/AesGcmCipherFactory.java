@@ -38,6 +38,31 @@ public class AesGcmCipherFactory {
     public static final int GCM_TAG_LENGTH = 16;
 
     /**
+     * GCM nonce length in bytes (96 bits per NIST SP 800-38D).
+     */
+    public static final int GCM_NONCE_LENGTH = 12;
+
+    private static final int GCM_NONCE_PREFIX_LENGTH = 8;
+
+    /**
+     * Computes a 12-byte GCM nonce for a given chunk index.
+     * Construction: baseIV[0:8] || big-endian(chunkIndex)
+     *
+     * @param baseIV The base IV (at least 8 bytes) derived from the data key
+     * @param chunkIndex The chunk index (0-based)
+     * @return A 12-byte nonce unique per chunk
+     */
+    public static byte[] computeGcmNonce(byte[] baseIV, int chunkIndex) {
+        byte[] nonce = new byte[GCM_NONCE_LENGTH];
+        System.arraycopy(baseIV, 0, nonce, 0, GCM_NONCE_PREFIX_LENGTH);
+        nonce[GCM_NONCE_PREFIX_LENGTH] = (byte) (chunkIndex >>> 24);
+        nonce[GCM_NONCE_PREFIX_LENGTH + 1] = (byte) (chunkIndex >>> 16);
+        nonce[GCM_NONCE_PREFIX_LENGTH + 2] = (byte) (chunkIndex >>> 8);
+        nonce[GCM_NONCE_PREFIX_LENGTH + 3] = (byte) chunkIndex;
+        return nonce;
+    }
+
+    /**
      * Returns a new Cipher instance configured for AES/GCM/NoPadding using the given provider.
      *
      * @param provider The JCE provider to use (e.g., SunJCE, BouncyCastle)
@@ -187,6 +212,85 @@ public class AesGcmCipherFactory {
             return cipher.doFinal(ciphertext);
         } catch (Exception e) {
             throw new JavaCryptoException("GCM decryption with tag verification failed", e);
+        }
+    }
+
+    /**
+     * Encrypts data with GCM, binding {@code aad} as Additional Authenticated Data, and returns the
+     * ciphertext with the 16-byte authentication tag appended.
+     *
+     * <p>The AAD is authenticated but not encrypted (not part of the ciphertext). The same {@code aad} bytes
+     * MUST be supplied to {@link #decryptWithTag(Key, byte[], byte[], byte[])} or authentication fails — this
+     * is how frame metadata tamper is detected as a tag mismatch.
+     *
+     * @param key    The AES-256 key
+     * @param iv     The initialization vector (first 12 bytes used as the GCM nonce)
+     * @param input  Input data to encrypt
+     * @param length Length of {@code input} to encrypt
+     * @param aad    Additional Authenticated Data to bind (may be null/empty for no AAD)
+     * @return Encrypted data with 16-byte authentication tag appended
+     * @throws JavaCryptoException If encryption fails
+     */
+    public static byte[] encryptWithTag(Key key, byte[] iv, byte[] input, int length, byte[] aad) throws JavaCryptoException {
+        if (input == null || length <= 0) {
+            throw new IllegalArgumentException("Input cannot be null and length must be positive");
+        }
+        if (length > input.length) {
+            throw new IllegalArgumentException("Length cannot exceed input array size");
+        }
+
+        try {
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            byte[] gcmIv = new byte[12];
+            System.arraycopy(iv, 0, gcmIv, 0, 12);
+            GCMParameterSpec spec = new GCMParameterSpec(128, gcmIv);
+            cipher.init(Cipher.ENCRYPT_MODE, key, spec);
+
+            // AAD MUST be applied before doFinal, and symmetrically on decrypt (see decryptWithTag overload).
+            if (aad != null && aad.length > 0) {
+                cipher.updateAAD(aad);
+            }
+
+            return cipher.doFinal(input, 0, length);
+        } catch (Exception e) {
+            throw new JavaCryptoException("GCM encryption with tag (AAD) failed", e);
+        }
+    }
+
+    /**
+     * Decrypts GCM data, verifying both the authentication tag and the {@code aad} binding.
+     *
+     * <p>{@code aad} MUST be byte-for-byte identical to the value passed to
+     * {@link #encryptWithTag(Key, byte[], byte[], int, byte[])}, else {@code doFinal} throws and we
+     * fail closed with a {@link JavaCryptoException} — detecting tamper of the metadata, not just ciphertext.
+     *
+     * @param key        The AES-256 key
+     * @param iv         The initialization vector (first 12 bytes used as the GCM nonce)
+     * @param ciphertext Encrypted data with authentication tag appended
+     * @param aad        Additional Authenticated Data that was bound at encryption (may be null/empty)
+     * @return Decrypted plaintext data
+     * @throws JavaCryptoException If decryption, tag verification, or AAD verification fails
+     */
+    public static byte[] decryptWithTag(Key key, byte[] iv, byte[] ciphertext, byte[] aad) throws JavaCryptoException {
+        if (ciphertext == null || ciphertext.length < GCM_TAG_LENGTH) {
+            throw new IllegalArgumentException("Ciphertext must be at least " + GCM_TAG_LENGTH + " bytes");
+        }
+
+        try {
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            byte[] gcmIv = new byte[12];
+            System.arraycopy(iv, 0, gcmIv, 0, 12);
+            GCMParameterSpec spec = new GCMParameterSpec(128, gcmIv);
+            cipher.init(Cipher.DECRYPT_MODE, key, spec);
+
+            // Symmetric with the encrypt path: same AAD applied before doFinal, else authentication fails.
+            if (aad != null && aad.length > 0) {
+                cipher.updateAAD(aad);
+            }
+
+            return cipher.doFinal(ciphertext);
+        } catch (Exception e) {
+            throw new JavaCryptoException("GCM decryption with tag+AAD verification failed", e);
         }
     }
 

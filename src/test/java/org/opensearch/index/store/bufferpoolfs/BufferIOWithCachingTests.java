@@ -12,8 +12,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayOutputStream;
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Provider;
@@ -23,7 +21,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
 import org.junit.Before;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheKey;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
@@ -44,13 +42,12 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     private static final int BUFFER_SIZE = 65_536;
     private static final int FRAME_SIZE = 4 * 1024 * 1024; // Default frame size
 
-    private Pool<RefCountedMemorySegment> mockPool;
-    private BlockCache<RefCountedMemorySegment> mockCache;
+    private Pool<RefCountedByteBuffer> mockPool;
+    private BlockCache<RefCountedByteBuffer> mockCache;
     private EncryptionMetadataCache encryptionMetadataCache;
     private Provider provider;
     private byte[] testKey;
     private Path tempFile;
-    private Arena arena;
 
     @Before
     public void setUp() throws Exception {
@@ -66,7 +63,6 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         new SecureRandom().nextBytes(testKey);
 
         tempFile = Files.createTempFile("test-buffer-io", ".dat");
-        arena = Arena.ofAuto();
     }
 
     @After
@@ -84,7 +80,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
         // Setup mock pool to return segment
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -117,7 +113,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testLargeWritesBypassBuffer() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -147,7 +143,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testBufferOverflowFlushesCompleteBlocks() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -180,7 +176,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testSingleByteWrite() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -210,7 +206,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testFullBlocksAreCachedImmediately() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -232,7 +228,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         }
 
         // Verify that block was cached
-        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedMemorySegment.class));
+        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedByteBuffer.class));
     }
 
     /**
@@ -241,7 +237,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testMultipleFullBlocksAreCached() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -265,7 +261,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         }
 
         // Verify that blocks were cached (at least 5 times, possibly 6 with final partial)
-        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedMemorySegment.class));
+        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedByteBuffer.class));
     }
 
     /**
@@ -274,7 +270,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testPartialBlocksAreAccumulated() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -296,7 +292,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         }
 
         // Verify that final partial block was cached on close
-        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedMemorySegment.class));
+        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedByteBuffer.class));
     }
 
     /**
@@ -305,7 +301,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testFinalPartialBlockIsCachedOnClose() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -327,7 +323,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         }
 
         // Should cache both full block and final partial block
-        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedMemorySegment.class));
+        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedByteBuffer.class));
     }
 
     /**
@@ -336,7 +332,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testUnalignedWritesSpanningBlocks() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -365,7 +361,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
             output.writeBytes(data3, data3.length);
         }
 
-        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedMemorySegment.class));
+        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedByteBuffer.class));
     }
 
     /**
@@ -374,7 +370,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testWriteSpanningFrameBoundaries() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -408,7 +404,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testNullInputBufferThrowsException() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -433,7 +429,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testInvalidOffsetLengthThrowsException() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -467,7 +463,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testZeroLengthWrite() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -526,7 +522,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testEmptyFile() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -554,7 +550,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testExactBlockBoundaryWrites() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -576,7 +572,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
             }
         }
 
-        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedMemorySegment.class));
+        verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedByteBuffer.class));
     }
 
     /**
@@ -585,7 +581,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
     public void testVeryLargeFileWrite() throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-        RefCountedMemorySegment mockSegment = createMockSegment();
+        RefCountedByteBuffer mockSegment = createMockSegment();
         when(mockPool.tryAcquire(anyLong(), any(TimeUnit.class))).thenReturn(mockSegment);
 
         try (
@@ -613,8 +609,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         assertTrue("Should handle large file writes", baos.size() > 0);
     }
 
-    private RefCountedMemorySegment createMockSegment() {
-        MemorySegment segment = arena.allocate(CACHE_BLOCK_SIZE);
-        return new RefCountedMemorySegment(segment, CACHE_BLOCK_SIZE, (ref) -> {});
+    private RefCountedByteBuffer createMockSegment() {
+        return new RefCountedByteBuffer(java.nio.ByteBuffer.allocateDirect(CACHE_BLOCK_SIZE), CACHE_BLOCK_SIZE);
     }
 }

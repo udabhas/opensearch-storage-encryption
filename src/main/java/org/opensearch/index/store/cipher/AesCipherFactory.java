@@ -163,12 +163,14 @@ public class AesCipherFactory {
             throw new IllegalArgumentException("Invalid frame number: " + frameNumber);
         }
 
-        // Get or derive frame base IV from cache
-        byte[] frameBaseIV = encryptionMetadataCache.getFrameIv(normalizedFilePath, frameNumber);
+        // Get or derive frame base IV from cache. The lookup is bound to messageId, so a recreated file
+        // (new footer -> new messageId) never reuses the previous inode's cached IV even if its metadata
+        // entry was not purged.
+        byte[] frameBaseIV = encryptionMetadataCache.getFrameIv(normalizedFilePath, frameNumber, messageId);
         if (frameBaseIV == null) {
             String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
             frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
-            encryptionMetadataCache.putFrameIv(normalizedFilePath, frameNumber, frameBaseIV);
+            encryptionMetadataCache.putFrameIv(normalizedFilePath, frameNumber, messageId, frameBaseIV);
         }
 
         // Modify last 4 bytes for block counter within frame

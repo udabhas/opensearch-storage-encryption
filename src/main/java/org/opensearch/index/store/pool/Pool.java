@@ -18,14 +18,6 @@ import java.util.concurrent.TimeUnit;
  */
 public interface Pool<T> {
     /**
-     * Acquires a resource from the pool, blocking until one becomes available.
-     *
-     * @return a pooled resource ready for use
-     * @throws Exception if acquisition fails due to pool closure, allocation errors, or other issues
-     */
-    T acquire() throws Exception;
-
-    /**
      * Attempts to acquire a resource from the pool within the specified timeout.
      *
      * @param timeout maximum time to wait for a resource

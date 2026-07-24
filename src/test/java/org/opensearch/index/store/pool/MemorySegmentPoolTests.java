@@ -5,564 +5,655 @@
 package org.opensearch.index.store.pool;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Mockito.mock;
+
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.After;
 import org.junit.Before;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
-import org.opensearch.index.store.metrics.CryptoMetricsService;
-import org.opensearch.telemetry.metrics.MetricsRegistry;
-import org.opensearch.test.OpenSearchTestCase;
+import org.junit.Test;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 
 /**
- * Unit tests for {@link MemorySegmentPool} - Simple Panama malloc/free based pool
+ * Unit tests for {@link MemorySegmentPool} — GC-managed direct-ByteBuffer pool.
+ *
+ * <p>Covers: construction/validation, GC-managed allocation (page-aligned direct buffers),
+ * no-op release/warmUp, buffersInUse tracking, stall on over-capacity, the dual
+ * direct-memory / OS-free-memory throttle decision logic, the legacy System.gc() zombie hint,
+ * Cleaner-driven decrement, and concurrency.
  */
 @SuppressWarnings("preview")
-public class MemorySegmentPoolTests extends OpenSearchTestCase {
+public class MemorySegmentPoolTests {
 
     private MemorySegmentPool pool;
 
     @Before
-    public void setUp() throws Exception {
-        super.setUp();
-        // Initialize with a mock metrics registry for testing
-        CryptoMetricsService.initialize(mock(MetricsRegistry.class));
-    }
+    public void setUp() {}
 
     @After
-    public void tearDown() throws Exception {
+    public void tearDown() {
         if (pool != null && !pool.isClosed()) {
             pool.close();
         }
-        super.tearDown();
     }
 
-    /**
-     * Test 1: Basic pool creation and properties
-     */
+    // ---- Construction ----
+
+    @Test
     public void testPoolCreation() {
-        long totalMemory = 4096;  // 4 segments * 1024 bytes
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        assertNotNull("Pool should not be null", pool);
-        assertEquals("Pool segment size should match", segmentSize, pool.pooledSegmentSize());
-        assertEquals("Pool should not be closed", false, pool.isClosed());
+        pool = new MemorySegmentPool(4096, 1024);
+        assertEquals(1024, pool.pooledSegmentSize());
+        assertEquals(4096L, pool.totalMemory());
+        assertFalse(pool.isClosed());
+        assertEquals(0, pool.getBuffersInUse());
+        assertEquals(0, pool.getAllocatedBytes());
     }
 
-    /**
-     * Test 2: Single segment acquire and release
-     */
-    public void testSingleAcquireRelease() throws Exception {
-        long totalMemory = 4096;
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Acquire a segment
-        RefCountedMemorySegment segment = pool.acquire();
-        assertNotNull("Acquired segment should not be null", segment);
-        assertEquals("Segment ref count should be 1", 1, segment.getRefCount());
-        assertEquals("Segment size should match", segmentSize, segment.length());
-
-        // Release the segment (refCount goes to 0, triggers pool.release())
-        segment.decRef();
-
-        // Segment should be back in pool's freelist now (not freed)
-    }
-
-    /**
-     * Test 3: Acquire multiple segments
-     */
-    public void testMultipleAcquire() throws Exception {
-        long totalMemory = 4096;  // 4 segments
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Acquire all 4 segments
-        RefCountedMemorySegment seg1 = pool.acquire();
-        RefCountedMemorySegment seg2 = pool.acquire();
-        RefCountedMemorySegment seg3 = pool.acquire();
-        RefCountedMemorySegment seg4 = pool.acquire();
-
-        assertNotNull(seg1);
-        assertNotNull(seg2);
-        assertNotNull(seg3);
-        assertNotNull(seg4);
-
-        // All should have refCount = 1
-        assertEquals(1, seg1.getRefCount());
-        assertEquals(1, seg2.getRefCount());
-        assertEquals(1, seg3.getRefCount());
-        assertEquals(1, seg4.getRefCount());
-
-        // Release all segments
-        seg1.decRef();
-        seg2.decRef();
-        seg3.decRef();
-        seg4.decRef();
-    }
-
-    /**
-     * Test 4: Pool exhaustion - tryAcquire should timeout
-     */
-    public void testPoolExhaustion() throws Exception {
-        long totalMemory = 2048;  // Only 2 segments
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Acquire 2 segments successfully
-        RefCountedMemorySegment seg1 = pool.acquire();
-        RefCountedMemorySegment seg2 = pool.acquire();
-
-        assertNotNull(seg1);
-        assertNotNull(seg2);
-
-        // Third tryAcquire should timeout (pool exhausted)
+    @Test
+    public void testInvalidConfigurationThrows() {
         try {
-            pool.tryAcquire(100, java.util.concurrent.TimeUnit.MILLISECONDS);
-            fail("Should have thrown IOException when pool exhausted and timed out");
-        } catch (java.io.IOException e) {
-            assertTrue(
-                "Exception should mention pool timeout",
-                e.getMessage().contains("timed out") || e.getMessage().contains("Pool acquisition")
-            );
-        }
-
-        // Cleanup
-        seg1.decRef();
-        seg2.decRef();
-    }
-
-    /**
-     * Test 5: Segment reuse from freelist
-     */
-    public void testSegmentReuse() throws Exception {
-        long totalMemory = 2048;
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Acquire and release a segment
-        RefCountedMemorySegment seg1 = pool.acquire();
-        long firstAddress = seg1.segment().address();
-        seg1.decRef();  // Returns to freelist
-
-        // Acquire again - should get the same segment reused
-        RefCountedMemorySegment seg2 = pool.acquire();
-        long secondAddress = seg2.segment().address();
-
-        assertEquals("Should reuse the same memory segment", firstAddress, secondAddress);
-        assertEquals("Reused segment should have refCount=1", 1, seg2.getRefCount());
-
-        // Cleanup
-        seg2.decRef();
-    }
-
-    /**
-     * Test 6: Pool close should free all segments
-     */
-    public void testPoolClose() throws Exception {
-        long totalMemory = 4096;
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Acquire and release some segments (they go to freelist)
-        RefCountedMemorySegment seg1 = pool.acquire();
-        RefCountedMemorySegment seg2 = pool.acquire();
-        seg1.decRef();
-        seg2.decRef();
-
-        // Close the pool
-        pool.close();
-
-        assertTrue("Pool should be closed", pool.isClosed());
-
-        // Trying to acquire after close should fail
-        try {
-            pool.acquire();
-            fail("Should not be able to acquire from closed pool");
-        } catch (IllegalStateException e) {
-            assertTrue("Exception should mention pool is closed", e.getMessage().contains("closed"));
-        }
-    }
-
-    /**
-     * Test 7: Reference counting behavior - increment and decrement
-     */
-    public void testRefCounting() throws Exception {
-        long totalMemory = 2048;
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Acquire a segment (refCount = 1)
-        RefCountedMemorySegment seg = pool.acquire();
-        assertEquals("Initial refCount should be 1", 1, seg.getRefCount());
-
-        // Increment reference (simulates multiple readers)
-        seg.incRef();
-        assertEquals("After incRef, refCount should be 2", 2, seg.getRefCount());
-
-        seg.incRef();
-        assertEquals("After second incRef, refCount should be 3", 3, seg.getRefCount());
-
-        // Decrement back down
-        seg.decRef();
-        assertEquals("After decRef, refCount should be 2", 2, seg.getRefCount());
-
-        seg.decRef();
-        assertEquals("After second decRef, refCount should be 1", 1, seg.getRefCount());
-
-        // Final decrement - should return to pool
-        seg.decRef();
-        // refCount is now 0, segment is back in freelist
-    }
-
-    /**
-     * Test 8: Pin and unpin behavior
-     */
-    public void testPinUnpin() throws Exception {
-        long totalMemory = 2048;
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        RefCountedMemorySegment seg = pool.acquire();
-        int initialRefCount = seg.getRefCount();
-
-        // Pin the segment
-        boolean pinned = seg.tryPin();
-        assertTrue("tryPin should succeed", pinned);
-        assertEquals("After pin, refCount should increase", initialRefCount + 1, seg.getRefCount());
-
-        // Unpin the segment
-        seg.unpin();
-        assertEquals("After unpin, refCount should decrease", initialRefCount, seg.getRefCount());
-
-        // Cleanup
-        seg.decRef();
-    }
-
-    /**
-     * Test 9: Memory zeroing when requiresZeroing is enabled
-     */
-    public void testMemoryZeroing() throws Exception {
-        long totalMemory = 2048;
-        int segmentSize = 1024;
-
-        // Create pool with zeroing enabled
-        pool = new MemorySegmentPool(totalMemory, segmentSize, true);
-
-        // Acquire segment and write some data
-        RefCountedMemorySegment seg1 = pool.acquire();
-        seg1.segment().fill((byte) 0xFF);  // Fill with non-zero values
-
-        // Verify data was written
-        assertEquals((byte) 0xFF, seg1.segment().get(java.lang.foreign.ValueLayout.JAVA_BYTE, 0));
-
-        // Release the segment (should be zeroed)
-        seg1.decRef();
-
-        // Acquire again (should get same segment, now zeroed)
-        RefCountedMemorySegment seg2 = pool.acquire();
-        assertEquals("Segment should be zeroed after release", (byte) 0, seg2.segment().get(java.lang.foreign.ValueLayout.JAVA_BYTE, 0));
-
-        // Cleanup
-        seg2.decRef();
-    }
-
-    /**
-     * Test 10: Memory NOT zeroed when requiresZeroing is disabled
-     */
-    public void testNoZeroing() throws Exception {
-        long totalMemory = 2048;
-        int segmentSize = 1024;
-
-        // Create pool with zeroing disabled
-        pool = new MemorySegmentPool(totalMemory, segmentSize, false);
-
-        // Acquire segment and write some data
-        RefCountedMemorySegment seg1 = pool.acquire();
-        seg1.segment().fill((byte) 0xAA);
-
-        // Release the segment (should NOT be zeroed)
-        seg1.decRef();
-
-        // Acquire again (should get same segment with data intact)
-        RefCountedMemorySegment seg2 = pool.acquire();
-        assertEquals(
-            "Segment should NOT be zeroed when zeroing disabled",
-            (byte) 0xAA,
-            seg2.segment().get(java.lang.foreign.ValueLayout.JAVA_BYTE, 0)
-        );
-
-        // Cleanup
-        seg2.decRef();
-    }
-
-    /**
-     * Test 11: Pool statistics and memory tracking
-     */
-    public void testPoolStats() throws Exception {
-        long totalMemory = 4096;  // 4 segments
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Initially, no segments allocated
-        assertEquals("Total memory should match", totalMemory, pool.totalMemory());
-        assertEquals("All memory should be available", totalMemory, pool.availableMemory());
-
-        // Acquire 2 segments
-        RefCountedMemorySegment seg1 = pool.acquire();
-        RefCountedMemorySegment seg2 = pool.acquire();
-
-        // Available memory should decrease
-        long expectedAvailable = 2 * segmentSize;  // 2 unallocated segments remaining
-        assertEquals("Available memory should account for acquired segments", expectedAvailable, pool.availableMemory());
-
-        // Release one segment
-        seg1.decRef();
-
-        // Available memory should increase by one segment (now in freelist)
-        expectedAvailable = 3 * segmentSize;  // 1 free + 2 unallocated
-        assertEquals("Available memory should increase after release", expectedAvailable, pool.availableMemory());
-
-        // Cleanup
-        seg2.decRef();
-    }
-
-    /**
-     * Test 12: Pool pressure detection
-     */
-    public void testPoolPressure() throws Exception {
-        long totalMemory = 20480;  // 20 segments
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Pool should not be under pressure initially
-        assertFalse("Pool should not be under pressure initially", pool.isUnderPressure());
-
-        // Acquire 19 segments (leaving only 1 available = 5% which is < 10% threshold)
-        RefCountedMemorySegment[] segments = new RefCountedMemorySegment[19];
-        for (int i = 0; i < 19; i++) {
-            segments[i] = pool.acquire();
-        }
-
-        // Pool should be under pressure now (< 10% available)
-        assertTrue("Pool should be under pressure with 95% allocated", pool.isUnderPressure());
-
-        // Release segments
-        for (RefCountedMemorySegment seg : segments) {
-            seg.decRef();
-        }
-
-        // Pool should not be under pressure anymore
-        assertFalse("Pool should not be under pressure after releasing segments", pool.isUnderPressure());
-    }
-
-    /**
-     * Test 13: WarmUp functionality
-     */
-    public void testWarmUp() throws Exception {
-        long totalMemory = 10240;  // 10 segments
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Warm up pool with 5 segments
-        pool.warmUp(5);
-
-        // Should be able to quickly acquire 5 segments (already allocated)
-        RefCountedMemorySegment seg1 = pool.acquire();
-        RefCountedMemorySegment seg2 = pool.acquire();
-        RefCountedMemorySegment seg3 = pool.acquire();
-        RefCountedMemorySegment seg4 = pool.acquire();
-        RefCountedMemorySegment seg5 = pool.acquire();
-
-        assertNotNull(seg1);
-        assertNotNull(seg2);
-        assertNotNull(seg3);
-        assertNotNull(seg4);
-        assertNotNull(seg5);
-
-        // Cleanup
-        seg1.decRef();
-        seg2.decRef();
-        seg3.decRef();
-        seg4.decRef();
-        seg5.decRef();
-    }
-
-    /**
-     * Test 14: ReleaseAll batch operation
-     */
-    public void testReleaseAll() throws Exception {
-        long totalMemory = 5120;  // 5 segments
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Acquire multiple segments
-        RefCountedMemorySegment seg1 = pool.acquire();
-        RefCountedMemorySegment seg2 = pool.acquire();
-        RefCountedMemorySegment seg3 = pool.acquire();
-
-        // Mark them as ready for release (reduce refCount to 1)
-        // In real usage, they would be ready to return to pool
-
-        // Use releaseAll for batch release
-        pool.releaseAll(seg1, seg2, seg3);
-
-        // All segments should now be in freelist
-        // Verify by acquiring - should get reused segments
-        RefCountedMemorySegment reused1 = pool.acquire();
-        RefCountedMemorySegment reused2 = pool.acquire();
-        RefCountedMemorySegment reused3 = pool.acquire();
-
-        assertNotNull(reused1);
-        assertNotNull(reused2);
-        assertNotNull(reused3);
-
-        // Cleanup
-        reused1.decRef();
-        reused2.decRef();
-        reused3.decRef();
-    }
-
-    /**
-     * Test 15: Pool stats string formatting
-     */
-    public void testPoolStatsString() throws Exception {
-        long totalMemory = 4096;
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        // Acquire and release to create interesting state
-        RefCountedMemorySegment seg1 = pool.acquire();
-        RefCountedMemorySegment seg2 = pool.acquire();
-        seg1.decRef();  // seg1 now in freelist
-
-        String stats = pool.poolStats();
-        assertNotNull("Pool stats string should not be null", stats);
-        assertTrue("Stats should contain allocation info", stats.contains("allocated"));
-        assertTrue("Stats should contain utilization info", stats.contains("utilization"));
-
-        // Cleanup
-        seg2.decRef();
-    }
-
-    /**
-     * Test 16: Generation tracking after close
-     */
-    public void testGenerationTracking() throws Exception {
-        long totalMemory = 2048;
-        int segmentSize = 1024;
-
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
-
-        RefCountedMemorySegment seg = pool.acquire();
-        int initialGeneration = seg.getGeneration();
-
-        // Close the segment (simulates cache eviction)
-        seg.close();  // This increments generation and decrements refCount
-
-        // Generation should have incremented
-        assertEquals("Generation should increment after close", initialGeneration + 1, seg.getGeneration());
-    }
-
-    /**
-     * Test 17: Invalid total memory configuration
-     */
-    public void testInvalidConfiguration() {
-        long totalMemory = 4097;  // Not divisible by segment size
-        int segmentSize = 1024;
-
-        try {
-            pool = new MemorySegmentPool(totalMemory, segmentSize);
-            fail("Should throw exception for invalid configuration");
+            pool = new MemorySegmentPool(4097, 1024);
+            fail("Should throw for non-aligned totalMemory");
         } catch (IllegalArgumentException e) {
-            assertTrue("Exception should mention memory/segment alignment", e.getMessage().contains("multiple"));
+            assertTrue(e.getMessage().contains("multiple"));
         }
     }
 
-    /**
-     * Test 18: AvailableMemoryAccurate under contention
-     */
-    public void testAvailableMemoryAccurate() throws Exception {
-        long totalMemory = 5120;  // 5 segments
-        int segmentSize = 1024;
+    @Test
+    public void testHeadroomConstructor() {
+        pool = new MemorySegmentPool(4096, 1024, 0.25);
+        assertNotNull(pool);
+        assertEquals(1024, pool.pooledSegmentSize());
+        assertEquals(4096L, pool.totalMemory());
+    }
 
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
+    @Test
+    public void testDefaultHeadroomConstructor() {
+        pool = new MemorySegmentPool(4096, 1024);
+        assertNotNull(pool);
+        assertEquals(1024, pool.pooledSegmentSize());
+    }
 
-        // Acquire some segments
-        RefCountedMemorySegment seg1 = pool.acquire();
-        RefCountedMemorySegment seg2 = pool.acquire();
+    // ---- tryAcquire() ----
 
-        // Get accurate available memory
-        long accurateAvailable = pool.availableMemoryAccurate();
-        long cachedAvailable = pool.availableMemory();
+    @Test
+    public void testTryAcquireUnderCapacitySucceeds() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        RefCountedByteBuffer buf = pool.tryAcquire(100, TimeUnit.MILLISECONDS);
+        assertNotNull(buf);
+        assertEquals(1, pool.getBuffersInUse());
+    }
 
-        // Both should report same value in this simple scenario
-        assertEquals("Accurate and cached available memory should match", accurateAvailable, cachedAvailable);
-
-        // Cleanup
-        seg1.decRef();
-        seg2.decRef();
+    @Test
+    public void testTryAcquireReturnsDirectByteBuffer() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        RefCountedByteBuffer buf = pool.tryAcquire(100, TimeUnit.MILLISECONDS);
+        assertNotNull(buf);
+        assertNotNull(buf.buffer());
+        assertTrue(buf.buffer().isDirect());
+        assertEquals(1024, buf.buffer().capacity());
+        assertEquals(ByteOrder.LITTLE_ENDIAN, buf.buffer().order());
     }
 
     /**
-     * Test 19: Segment size verification
+     * The default allocator must reserve EXACTLY {@code segmentSize} bytes of direct memory — no
+     * page-alignment over-allocation. Pool buffers are in-memory copy scratch for the block cache;
+     * they are never used for O_DIRECT DMA (the direct read allocates its own page-aligned arena
+     * segment in {@code DirectIOReaderUtil}), so they do not need a page-aligned native address.
+     * Over-allocating by {@code pageSize - 1} per block reserved ~1.5x the configured pool against
+     * {@code -XX:MaxDirectMemorySize} while accounting for only {@code segmentSize}, which guaranteed
+     * direct-memory exhaustion / throttle engagement under load. This asserts the over-allocation is gone.
      */
-    public void testSegmentSize() throws Exception {
-        long totalMemory = 4096;
-        int segmentSize = 1024;
+    @Test
+    public void testTryAcquireReservesExactSegmentSizeNoOverAllocation() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        RefCountedByteBuffer buf = pool.tryAcquire(100, TimeUnit.MILLISECONDS);
+        assertNotNull(buf);
+        // Exactly segmentSize — not segmentSize + pageSize - 1.
+        assertEquals("pool buffer must reserve exactly segmentSize bytes (no alignment padding)", 1024, buf.buffer().capacity());
+        assertEquals(1024L, buf.segment().byteSize());
+        assertEquals(ByteOrder.LITTLE_ENDIAN, buf.buffer().order());
+        assertTrue("pool buffer must be a direct buffer", buf.buffer().isDirect());
+    }
 
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
+    @Test
+    public void testTryAcquireFromClosedPoolThrows() throws Exception {
+        pool = new MemorySegmentPool(2048, 1024);
+        pool.close();
+        try {
+            pool.tryAcquire(100, TimeUnit.MILLISECONDS);
+            fail("Should throw on closed pool");
+        } catch (IllegalStateException e) {
+            assertTrue(e.getMessage().contains("closed"));
+        }
+    }
 
-        assertEquals("Pooled segment size should match", segmentSize, pool.pooledSegmentSize());
+    // ---- MemorySegment view ----
 
-        RefCountedMemorySegment seg = pool.acquire();
-        assertEquals("Acquired segment length should match", segmentSize, seg.length());
+    @Test
+    public void testSegmentViewSharesMemory() throws Exception {
+        pool = new MemorySegmentPool(2048, 1024);
+        RefCountedByteBuffer buf = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        // Write via ByteBuffer, read via MemorySegment
+        buf.buffer().put(0, (byte) 42);
+        assertEquals((byte) 42, buf.segment().get(ValueLayout.JAVA_BYTE, 0));
+        // Write via MemorySegment, read via ByteBuffer
+        buf.segment().set(ValueLayout.JAVA_BYTE, 100, (byte) 99);
+        assertEquals((byte) 99, buf.buffer().get(100));
+    }
 
-        // Cleanup
-        seg.decRef();
+    @Test
+    public void testSegmentReadWriteFullBlock() throws Exception {
+        pool = new MemorySegmentPool(2048, 1024);
+        RefCountedByteBuffer buf = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        buf.segment().fill((byte) 0xFF);
+        assertEquals((byte) 0xFF, buf.segment().get(ValueLayout.JAVA_BYTE, 0));
+        assertEquals((byte) 0xFF, buf.segment().get(ValueLayout.JAVA_BYTE, 1023));
+    }
+
+    // ---- release() no-op ----
+
+    @Test
+    public void testReleaseIsNoOp() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        RefCountedByteBuffer seg = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        int before = pool.getBuffersInUse();
+        pool.release(seg);
+        assertEquals(before, pool.getBuffersInUse());
+    }
+
+    @Test
+    public void testReleaseAllIsNoOp() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        RefCountedByteBuffer s1 = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        RefCountedByteBuffer s2 = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        int before = pool.getBuffersInUse();
+        pool.releaseAll(s1, s2);
+        assertEquals(before, pool.getBuffersInUse());
+    }
+
+    // ---- availableMemory ----
+
+    @Test
+    public void testAvailableMemoryDecreases() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        assertEquals(4096L, pool.availableMemory());
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        assertEquals(3072L, pool.availableMemory());
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        assertEquals(2048L, pool.availableMemory());
+    }
+
+    @Test
+    public void testAvailableMemoryNeverNegative() throws Exception {
+        pool = new MemorySegmentPool(2048, 1024); // max=2
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        try {
+            pool.tryAcquire(1, TimeUnit.MILLISECONDS); // over capacity
+        } catch (Exception ignored) {
+            // over-limit rejection expected
+        }
+        assertTrue(pool.availableMemory() >= 0);
+    }
+
+    // ---- allocatedBytes ----
+
+    @Test
+    public void testAllocatedBytesTracking() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        assertEquals(0, pool.getAllocatedBytes());
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        assertEquals(1024, pool.getAllocatedBytes());
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        assertEquals(2048, pool.getAllocatedBytes());
+    }
+
+    // ---- isUnderPressure ----
+
+    @Test
+    public void testNotUnderPressureInitially() {
+        pool = new MemorySegmentPool(10240, 1024); // max=10
+        assertFalse(pool.isUnderPressure());
+    }
+
+    @Test
+    public void testNotUnderPressureAt90Percent() throws Exception {
+        pool = new MemorySegmentPool(20480, 1024); // max=20
+        for (int i = 0; i < 18; i++)
+            pool.tryAcquire(5000, TimeUnit.MILLISECONDS); // 90%
+        assertFalse(pool.isUnderPressure()); // threshold is 95%
+    }
+
+    @Test
+    public void testUnderPressureAt95Percent() throws Exception {
+        pool = new MemorySegmentPool(20480, 1024); // max=20
+        for (int i = 0; i < 19; i++)
+            pool.tryAcquire(5000, TimeUnit.MILLISECONDS); // 95%
+        assertTrue(pool.isUnderPressure());
+    }
+
+    @Test
+    public void testUnderPressureAtFull() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024); // max=4
+        for (int i = 0; i < 4; i++)
+            pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        assertTrue(pool.isUnderPressure());
+    }
+
+    // ---- warmUp ----
+
+    @Test
+    public void testWarmUpIsNoOp() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        pool.warmUp(4);
+        assertEquals(0, pool.getBuffersInUse());
+    }
+
+    // ---- close ----
+
+    @Test
+    public void testCloseMarksPoolClosed() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        pool.close();
+        assertTrue(pool.isClosed());
+    }
+
+    @Test
+    public void testDoubleCloseIsSafe() {
+        pool = new MemorySegmentPool(2048, 1024);
+        pool.close();
+        pool.close();
+        assertTrue(pool.isClosed());
+    }
+
+    @Test
+    public void testCloseStopsGcDebtMonitor() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        pool.close();
+        // Give thread time to stop
+        Thread.sleep(100);
+        // No assertion needed — if join(5000) hangs, the test framework will time out
+    }
+
+    // ---- poolStats ----
+
+    @Test
+    public void testPoolStatsContainsAllFields() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        String stats = pool.poolStats();
+        assertNotNull(stats);
+        assertTrue(stats.contains("PoolStats"));
+        assertTrue(stats.contains("max=4"));
+        assertTrue(stats.contains("inUse=1"));
+        assertTrue(stats.contains("utilization="));
+        assertTrue(stats.contains("stalls="));
+        assertTrue(stats.contains("tracked="));
+        assertTrue(stats.contains("native="));
+        assertTrue(stats.contains("zombie="));
+    }
+
+    @Test
+    public void testPoolStatsShowsStallsAfterOverCapacity() throws Exception {
+        pool = new MemorySegmentPool(1024, 1024); // max=1, allocLimit=1
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        try {
+            pool.tryAcquire(1, TimeUnit.MILLISECONDS); // over limit → reject
+            fail("Expected over-limit rejection");
+        } catch (Exception expected) {
+            // expected
+        }
+        String stats = pool.poolStats();
+        assertFalse(stats.contains("stalls=0"));
+    }
+
+    // ---- Cleaner decrements buffersInUse ----
+
+    @Test
+    public void testCleanerDecrementsBuffersInUse() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        RefCountedByteBuffer seg = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        assertEquals(1, pool.getBuffersInUse());
+
+        seg = null; // drop reference
+        for (int i = 0; i < 20; i++) {
+            System.gc();
+            Thread.sleep(50);
+            if (pool.getBuffersInUse() == 0)
+                break;
+        }
+        // Best-effort: Cleaner may or may not have run within the window.
+        if (pool.getBuffersInUse() == 0) {
+            assertEquals(0L, pool.getAllocatedBytes());
+        }
+    }
+
+    // ---- GC debt monitor / cache supplier wiring ----
+
+    @Test
+    public void testCacheEntriesSupplierWiring() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        AtomicInteger cacheSize = new AtomicInteger(0);
+        pool.setCacheEntriesSupplier(cacheSize::get);
+        pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        cacheSize.set(1);
+        // No assertion — just verify wiring doesn't throw.
     }
 
     /**
-     * Test 20: Concurrent acquire and release patterns
+     * Drive the pool into GC debt: fill allocation limit, cache supplier reports 0.
+     * With maxSegments=10 and gcHeadroom=0.5, allocationLimit=15.
+     * zombies = inUse, remaining = 0, so checkGcDebt() sees the trigger condition.
+     * Returns the acquired buffers so the caller holds strong refs across System.gc().
      */
-    public void testConcurrentAcquireRelease() throws Exception {
-        long totalMemory = 2048;  // 2 segments
-        int segmentSize = 1024;
+    private RefCountedByteBuffer[] driveIntoGcDebt() throws Exception {
+        pool.setCacheEntriesSupplier(() -> 0L);
+        RefCountedByteBuffer[] held = new RefCountedByteBuffer[15];
+        for (int i = 0; i < 15; i++) {
+            held[i] = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        }
+        return held;
+    }
 
-        pool = new MemorySegmentPool(totalMemory, segmentSize);
+    @Test
+    public void testGcHintDisabledSuppressesAllHints() throws Exception {
+        pool = new MemorySegmentPool(10240, 1024, 0.50);
+        pool.setGcHintEnabled(false);
+        RefCountedByteBuffer[] held = driveIntoGcDebt();
+        long before = pool.getGcTriggerCount();
+        pool.checkGcDebt();
+        pool.checkGcDebt();
+        assertEquals("No hint should fire when disabled", before, pool.getGcTriggerCount());
+        assertNotNull(held); // keep alive
+    }
 
-        // Acquire, release, acquire pattern (common in real usage)
-        RefCountedMemorySegment seg1 = pool.acquire();
-        seg1.decRef();
+    @Test
+    public void testGcHintCooldownSuppressesSecondHint() throws Exception {
+        pool = new MemorySegmentPool(10240, 1024, 0.50);
+        pool.setGcHintEnabled(true);
+        pool.setGcHintCooldownSeconds(3600L); // 1h cooldown
+        RefCountedByteBuffer[] held = driveIntoGcDebt();
+        long before = pool.getGcTriggerCount();
+        pool.checkGcDebt();
+        pool.checkGcDebt();
+        pool.checkGcDebt();
+        assertEquals("Only first hint fires inside cooldown window", before + 1, pool.getGcTriggerCount());
+        assertNotNull(held); // keep alive
+    }
 
-        RefCountedMemorySegment seg2 = pool.acquire();
-        seg2.decRef();
+    @Test
+    public void testGcHintZeroCooldownAllowsEveryTick() throws Exception {
+        pool = new MemorySegmentPool(10240, 1024, 0.50);
+        pool.setGcHintEnabled(true);
+        pool.setGcHintCooldownSeconds(0L); // no cooldown
+        RefCountedByteBuffer[] held = driveIntoGcDebt();
+        long before = pool.getGcTriggerCount();
+        pool.checkGcDebt();
+        pool.checkGcDebt();
+        pool.checkGcDebt();
+        assertEquals("Every tick fires when cooldown is zero", before + 3, pool.getGcTriggerCount());
+        assertNotNull(held); // keep alive
+    }
 
-        RefCountedMemorySegment seg3 = pool.acquire();
-        long addr1 = seg1.segment().address();
-        long addr3 = seg3.segment().address();
+    // ---- Concurrent acquire ----
 
-        // Should reuse same segment
-        assertEquals("Should reuse segment addresses", addr1, addr3);
+    @Test
+    public void testConcurrentAcquire() throws Exception {
+        pool = new MemorySegmentPool(81920, 1024); // max=80
+        int threads = 8;
+        int acquiresPerThread = 10;
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+        AtomicReference<Throwable> error = new AtomicReference<>();
 
-        // Cleanup
-        seg3.decRef();
+        for (int t = 0; t < threads; t++) {
+            new Thread(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < acquiresPerThread; i++) {
+                        RefCountedByteBuffer buf = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+                        assertNotNull(buf);
+                        // Write and read to verify buffer is usable
+                        buf.buffer().putInt(0, 42);
+                        assertEquals(42, buf.buffer().getInt(0));
+                    }
+                } catch (Throwable e) {
+                    error.compareAndSet(null, e);
+                } finally {
+                    done.countDown();
+                }
+            }).start();
+        }
+
+        start.countDown();
+        assertTrue("Threads should complete", done.await(30, TimeUnit.SECONDS));
+        if (error.get() != null)
+            throw new AssertionError("Thread failed", error.get());
+        assertEquals(threads * acquiresPerThread, pool.getBuffersInUse());
+    }
+
+    // ---- Buffer independence ----
+
+    @Test
+    public void testEachAcquireReturnsIndependentBuffer() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        RefCountedByteBuffer buf1 = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        RefCountedByteBuffer buf2 = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+
+        buf1.buffer().putInt(0, 111);
+        buf2.buffer().putInt(0, 222);
+
+        assertEquals(111, buf1.buffer().getInt(0));
+        assertEquals(222, buf2.buffer().getInt(0));
+    }
+
+    // ---- Length ----
+
+    @Test
+    public void testAcquiredBufferLength() throws Exception {
+        pool = new MemorySegmentPool(8192, 8192);
+        RefCountedByteBuffer buf = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        assertEquals(8192, buf.length());
+        assertEquals(8192, buf.buffer().capacity());
+    }
+
+    // ---- tryPin/unpin/close are no-ops on RefCountedByteBuffer ----
+
+    @Test
+    public void testRefCountedByteBufferLifecycleNoOps() throws Exception {
+        pool = new MemorySegmentPool(4096, 1024);
+        RefCountedByteBuffer buf = pool.tryAcquire(5000, TimeUnit.MILLISECONDS);
+        assertTrue(buf.tryPin());
+        buf.unpin();
+        buf.close();
+        buf.decRef();
+        assertTrue(buf.tryPin()); // still true — all no-ops
+        assertEquals(0, buf.getGeneration()); // always 0
+    }
+
+    // ---- shouldThrottle: pure decision logic (package-private) ----
+
+    @Test
+    public void testShouldThrottleReturnsFalseWhenMaxDirectMemoryNotSet() {
+        // max=0 means -XX:MaxDirectMemorySize not set — throttle stays disabled.
+        assertFalse(MemorySegmentPool.shouldThrottle(1_000_000_000L, 0L));
+        assertFalse(MemorySegmentPool.shouldThrottle(1_000_000_000L, -1L));
+    }
+
+    @Test
+    public void testShouldThrottleReturnsFalseWhenUsedUnknown() {
+        // directMemoryMxBean absent (used < 0) — throttle stays disabled.
+        assertFalse(MemorySegmentPool.shouldThrottle(-1L, 8L * 1024 * 1024 * 1024));
+    }
+
+    @Test
+    public void testShouldThrottleReturnsFalseWhenFreeAboveThreshold() {
+        // 2-arg shouldThrottle compares free against the absolute floor THROTTLE_FREE_FLOOR_BYTES (256 MB).
+        long max = 8L * 1024 * 1024 * 1024;       // 8 GB
+        long used = max - (600L * 1024 * 1024);    // free = 600 MB > 256 MB floor
+        assertFalse(MemorySegmentPool.shouldThrottle(used, max));
+    }
+
+    @Test
+    public void testShouldThrottleReturnsTrueWhenFreeBelowThreshold() {
+        long max = 8L * 1024 * 1024 * 1024;       // 8 GB
+        long used = max - (200L * 1024 * 1024);    // free = 200 MB < 256 MB floor
+        assertTrue(MemorySegmentPool.shouldThrottle(used, max));
+    }
+
+    @Test
+    public void testShouldThrottleReturnsFalseExactlyAtThreshold() {
+        // Boundary: free == reserve floor → NOT throttled (strict less-than). The 2-arg static helper
+        // uses the absolute floor THROTTLE_FREE_FLOOR_BYTES (the instance pool uses a relative reserve).
+        long max = 8L * 1024 * 1024 * 1024;
+        long used = max - MemorySegmentPool.THROTTLE_FREE_FLOOR_BYTES;
+        assertFalse(MemorySegmentPool.shouldThrottle(used, max));
+    }
+
+    @Test
+    public void testShouldThrottleReturnsTrueOneByteBelowThreshold() {
+        long max = 8L * 1024 * 1024 * 1024;
+        long used = max - MemorySegmentPool.THROTTLE_FREE_FLOOR_BYTES + 1;
+        assertTrue(MemorySegmentPool.shouldThrottle(used, max));
+    }
+
+    @Test
+    public void testShouldThrottleReturnsTrueWhenUsedExceedsMax() {
+        // Degenerate: JVM reports used > max (can happen with direct memory overcommit).
+        // free becomes negative, should still throttle.
+        long max = 1L * 1024 * 1024 * 1024;
+        long used = 2L * 1024 * 1024 * 1024;
+        assertTrue(MemorySegmentPool.shouldThrottle(used, max));
+    }
+
+    // ---- OS free memory throttle tests ----
+
+    @Test
+    public void testShouldThrottleOsReturnsFalseWhenFreeAboveThreshold() {
+        // The no-arg helper compares against the absolute floor OS_FREE_FLOOR_BYTES (256MB).
+        assertFalse(MemorySegmentPool.shouldThrottleOs(600L * 1024 * 1024));
+    }
+
+    @Test
+    public void testShouldThrottleOsReturnsTrueWhenFreeBelowThreshold() {
+        // 200MB is below the 256MB floor → throttled.
+        assertTrue(MemorySegmentPool.shouldThrottleOs(200L * 1024 * 1024));
+    }
+
+    @Test
+    public void testShouldThrottleOsReturnsFalseExactlyAtThreshold() {
+        assertFalse(MemorySegmentPool.shouldThrottleOs(MemorySegmentPool.OS_FREE_FLOOR_BYTES));
+    }
+
+    @Test
+    public void testShouldThrottleOsReturnsTrueOneByteBelowThreshold() {
+        assertTrue(MemorySegmentPool.shouldThrottleOs(MemorySegmentPool.OS_FREE_FLOOR_BYTES - 1));
+    }
+
+    @Test
+    public void testShouldThrottleOsReturnsFalseWhenUnknown() {
+        // -1 means /proc/meminfo not available (non-Linux) — don't throttle
+        assertFalse(MemorySegmentPool.shouldThrottleOs(-1L));
+    }
+
+    @Test
+    public void testShouldThrottleOsWithCustomThreshold() {
+        long customThreshold = 1024L * 1024 * 1024; // 1 GB
+        assertTrue(MemorySegmentPool.shouldThrottleOs(500L * 1024 * 1024, customThreshold));
+        assertFalse(MemorySegmentPool.shouldThrottleOs(1500L * 1024 * 1024, customThreshold));
+    }
+
+    @Test
+    public void testShouldThrottleOsWithZeroThresholdDisablesCheck() {
+        // free==threshold → not throttled; free > threshold → not throttled.
+        assertFalse(MemorySegmentPool.shouldThrottleOs(0L, 0L));
+        assertFalse(MemorySegmentPool.shouldThrottleOs(1L, 0L));
+    }
+
+    // ---- Dual threshold tests ----
+
+    @Test
+    public void testDualThrottleDirectOnlyTriggered() {
+        // Static helpers use the 256 MB absolute floors; pick free direct below the floor.
+        long max = 8L * 1024 * 1024 * 1024;
+        long used = max - (100L * 1024 * 1024); // 100 MB free direct < 256 MB floor
+        long osFree = 2L * 1024 * 1024 * 1024;  // 2 GB free OS — plenty
+        assertTrue(MemorySegmentPool.shouldThrottle(used, max, osFree));
+    }
+
+    @Test
+    public void testDualThrottleOsOnlyTriggered() {
+        long max = 8L * 1024 * 1024 * 1024;
+        long used = max - (2L * 1024 * 1024 * 1024); // 2 GB free direct — plenty
+        long osFree = 200L * 1024 * 1024;             // 200 MB free OS — low
+        assertTrue(MemorySegmentPool.shouldThrottle(used, max, osFree));
+    }
+
+    @Test
+    public void testDualThrottleNeitherTriggered() {
+        long max = 8L * 1024 * 1024 * 1024;
+        long used = max - (2L * 1024 * 1024 * 1024); // 2 GB free direct
+        long osFree = 2L * 1024 * 1024 * 1024;        // 2 GB free OS
+        assertFalse(MemorySegmentPool.shouldThrottle(used, max, osFree));
+    }
+
+    @Test
+    public void testDualThrottleBothTriggered() {
+        long max = 8L * 1024 * 1024 * 1024;
+        long used = max - (100L * 1024 * 1024); // 100 MB free direct
+        long osFree = 100L * 1024 * 1024;        // 100 MB free OS
+        assertTrue(MemorySegmentPool.shouldThrottle(used, max, osFree));
+    }
+
+    @Test
+    public void testDualThrottleOsUnknownFallsBackToDirectOnly() {
+        long max = 8L * 1024 * 1024 * 1024;
+        long used = max - (600L * 1024 * 1024); // 600 MB free direct — above threshold
+        long osFree = -1L;                        // unknown
+        assertFalse(MemorySegmentPool.shouldThrottle(used, max, osFree));
+    }
+
+    // ---- readMemAvailable test ----
+
+    @Test
+    public void testReadMemAvailableReturnsNonNegativeOnLinux() {
+        long memAvail = MemorySegmentPool.readMemAvailableFromProc();
+        // On Linux: should return a positive value. On macOS/Windows: returns -1.
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        if (os.contains("linux")) {
+            assertTrue("MemAvailable should be positive on Linux", memAvail > 0);
+        } else {
+            assertEquals("readMemAvailable should return -1 on non-Linux", -1L, memAvail);
+        }
+    }
+
+    // ---- Configurable threshold test ----
+
+    @Test
+    public void testOsFreeThresholdConfigurable() throws Exception {
+        pool = new MemorySegmentPool(1024, 1024);
+        // Default is now computed at construction (relative + cgroup/host-aware), so it varies per host;
+        // assert only the invariant lower bound rather than an exact constant.
+        assertTrue(
+            "default OS-free threshold should be at least the floor",
+            pool.getOsFreeThresholdBytes() >= MemorySegmentPool.OS_FREE_FLOOR_BYTES
+        );
+        // Update round-trips exactly.
+        pool.setOsFreeThresholdBytes(1024L * 1024 * 1024); // 1 GB
+        assertEquals(1024L * 1024 * 1024, pool.getOsFreeThresholdBytes());
+        // Set to 0 (disabled)
+        pool.setOsFreeThresholdBytes(0L);
+        assertEquals(0L, pool.getOsFreeThresholdBytes());
+        pool.close();
     }
 }

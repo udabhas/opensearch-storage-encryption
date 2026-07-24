@@ -15,8 +15,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
@@ -25,32 +24,31 @@ import org.junit.After;
 import org.junit.Before;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import org.opensearch.index.store.CaffeineThreadLeakFilter;
-import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.test.OpenSearchTestCase;
 
-import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 
 @SuppressWarnings("preview")
-@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class BlockCacheTests extends OpenSearchTestCase {
 
     @Mock
-    private BlockLoader<RefCountedMemorySegment> mockLoader;
+    private BlockLoader<RefCountedByteBuffer> mockLoader;
 
-    private Cache<BlockCacheKey, BlockCacheValue<RefCountedMemorySegment>> caffeineCache;
-    private CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> blockCache;
-    private Arena arena;
+    private Cache<BlockCacheKey, BlockCacheValue<RefCountedByteBuffer>> caffeineCache;
+    private CaffeineBlockCache<RefCountedByteBuffer, RefCountedByteBuffer> blockCache;
+
+    /** Allocates a fresh GC-managed direct buffer wrapped in a RefCountedByteBuffer. */
+    private static RefCountedByteBuffer block(int size) {
+        return new RefCountedByteBuffer(ByteBuffer.allocateDirect(size), size);
+    }
 
     @Before
     public void setUp() throws Exception {
         super.setUp();
         MockitoAnnotations.openMocks(this);
-
-        arena = Arena.ofConfined();
 
         caffeineCache = Caffeine.newBuilder().maximumSize(100).removalListener((key, value, cause) -> {
             if (value != null) {
@@ -66,9 +64,6 @@ public class BlockCacheTests extends OpenSearchTestCase {
         if (caffeineCache != null) {
             caffeineCache.invalidateAll();
         }
-        if (arena != null) {
-            arena.close();
-        }
         super.tearDown();
     }
 
@@ -76,7 +71,7 @@ public class BlockCacheTests extends OpenSearchTestCase {
         Path filePath = Paths.get("/test/file.txt");
         BlockCacheKey key = new FileBlockCacheKey(filePath, 0);
 
-        BlockCacheValue<RefCountedMemorySegment> value = blockCache.get(key);
+        BlockCacheValue<RefCountedByteBuffer> value = blockCache.get(key);
 
         assertNull(value);
     }
@@ -85,12 +80,11 @@ public class BlockCacheTests extends OpenSearchTestCase {
         Path filePath = Paths.get("/test/file.txt");
         BlockCacheKey key = new FileBlockCacheKey(filePath, 0);
 
-        MemorySegment segment = arena.allocate(1024);
-        RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, 1024, (s) -> {});
+        RefCountedByteBuffer refSegment = block(1024);
 
         blockCache.put(key, refSegment);
 
-        BlockCacheValue<RefCountedMemorySegment> retrieved = blockCache.get(key);
+        BlockCacheValue<RefCountedByteBuffer> retrieved = blockCache.get(key);
 
         assertNotNull(retrieved);
         assertEquals(refSegment, retrieved);
@@ -100,12 +94,11 @@ public class BlockCacheTests extends OpenSearchTestCase {
         Path filePath = Paths.get("/test/file.txt");
         BlockCacheKey key = new FileBlockCacheKey(filePath, 0);
 
-        MemorySegment segment = arena.allocate(1024);
-        RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, 1024, (s) -> {});
+        RefCountedByteBuffer refSegment = block(1024);
 
         when(mockLoader.load(any(BlockCacheKey.class))).thenReturn(refSegment);
 
-        BlockCacheValue<RefCountedMemorySegment> value = blockCache.getOrLoad(key);
+        BlockCacheValue<RefCountedByteBuffer> value = blockCache.getOrLoad(key);
 
         assertNotNull(value);
         assertEquals(refSegment, value);
@@ -116,12 +109,11 @@ public class BlockCacheTests extends OpenSearchTestCase {
         Path filePath = Paths.get("/test/file.txt");
         BlockCacheKey key = new FileBlockCacheKey(filePath, 0);
 
-        MemorySegment segment = arena.allocate(1024);
-        RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, 1024, (s) -> {});
+        RefCountedByteBuffer refSegment = block(1024);
 
         blockCache.put(key, refSegment);
 
-        BlockCacheValue<RefCountedMemorySegment> value = blockCache.getOrLoad(key);
+        BlockCacheValue<RefCountedByteBuffer> value = blockCache.getOrLoad(key);
 
         assertNotNull(value);
         assertEquals(refSegment, value);
@@ -146,12 +138,11 @@ public class BlockCacheTests extends OpenSearchTestCase {
         Path filePath = Paths.get("/test/file.txt");
         BlockCacheKey key = new FileBlockCacheKey(filePath, 0);
 
-        MemorySegment segment = arena.allocate(1024);
-        RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, 1024, (s) -> {});
+        RefCountedByteBuffer refSegment = block(1024);
 
         blockCache.put(key, refSegment);
 
-        BlockCacheValue<RefCountedMemorySegment> retrieved = blockCache.get(key);
+        BlockCacheValue<RefCountedByteBuffer> retrieved = blockCache.get(key);
         assertNotNull(retrieved);
         assertEquals(refSegment, retrieved);
     }
@@ -160,8 +151,7 @@ public class BlockCacheTests extends OpenSearchTestCase {
         Path filePath = Paths.get("/test/file.txt");
         BlockCacheKey key = new FileBlockCacheKey(filePath, 0);
 
-        MemorySegment segment = arena.allocate(1024);
-        RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, 1024, (s) -> {});
+        RefCountedByteBuffer refSegment = block(1024);
 
         blockCache.put(key, refSegment);
         assertNotNull(blockCache.get(key));
@@ -177,17 +167,9 @@ public class BlockCacheTests extends OpenSearchTestCase {
         BlockCacheKey key2 = new FileBlockCacheKey(filePath, 1);
         BlockCacheKey key3 = new FileBlockCacheKey(Paths.get("/test/other.txt"), 0);
 
-        MemorySegment segment1 = arena.allocate(1024);
-        MemorySegment segment2 = arena.allocate(1024);
-        MemorySegment segment3 = arena.allocate(1024);
-
-        RefCountedMemorySegment refSegment1 = new RefCountedMemorySegment(segment1, 1024, (s) -> {});
-        RefCountedMemorySegment refSegment2 = new RefCountedMemorySegment(segment2, 1024, (s) -> {});
-        RefCountedMemorySegment refSegment3 = new RefCountedMemorySegment(segment3, 1024, (s) -> {});
-
-        blockCache.put(key1, refSegment1);
-        blockCache.put(key2, refSegment2);
-        blockCache.put(key3, refSegment3);
+        blockCache.put(key1, block(1024));
+        blockCache.put(key2, block(1024));
+        blockCache.put(key3, block(1024));
 
         blockCache.invalidate(filePath);
 
@@ -207,20 +189,10 @@ public class BlockCacheTests extends OpenSearchTestCase {
         BlockCacheKey key3 = new FileBlockCacheKey(shard1File, 0);
         BlockCacheKey key4 = new FileBlockCacheKey(otherIndexFile, 0);
 
-        MemorySegment segment1 = arena.allocate(1024);
-        MemorySegment segment2 = arena.allocate(1024);
-        MemorySegment segment3 = arena.allocate(1024);
-        MemorySegment segment4 = arena.allocate(1024);
-
-        RefCountedMemorySegment refSegment1 = new RefCountedMemorySegment(segment1, 1024, (s) -> {});
-        RefCountedMemorySegment refSegment2 = new RefCountedMemorySegment(segment2, 1024, (s) -> {});
-        RefCountedMemorySegment refSegment3 = new RefCountedMemorySegment(segment3, 1024, (s) -> {});
-        RefCountedMemorySegment refSegment4 = new RefCountedMemorySegment(segment4, 1024, (s) -> {});
-
-        blockCache.put(key1, refSegment1);
-        blockCache.put(key2, refSegment2);
-        blockCache.put(key3, refSegment3);
-        blockCache.put(key4, refSegment4);
+        blockCache.put(key1, block(1024));
+        blockCache.put(key2, block(1024));
+        blockCache.put(key3, block(1024));
+        blockCache.put(key4, block(1024));
 
         // Invalidate all entries under index1
         blockCache.invalidateByPathPrefix(indexPath);
@@ -237,14 +209,8 @@ public class BlockCacheTests extends OpenSearchTestCase {
         BlockCacheKey key1 = new FileBlockCacheKey(filePath1, 0);
         BlockCacheKey key2 = new FileBlockCacheKey(filePath2, 0);
 
-        MemorySegment segment1 = arena.allocate(1024);
-        MemorySegment segment2 = arena.allocate(1024);
-
-        RefCountedMemorySegment refSegment1 = new RefCountedMemorySegment(segment1, 1024, (s) -> {});
-        RefCountedMemorySegment refSegment2 = new RefCountedMemorySegment(segment2, 1024, (s) -> {});
-
-        blockCache.put(key1, refSegment1);
-        blockCache.put(key2, refSegment2);
+        blockCache.put(key1, block(1024));
+        blockCache.put(key2, block(1024));
 
         blockCache.clear();
 
@@ -264,19 +230,10 @@ public class BlockCacheTests extends OpenSearchTestCase {
         long startOffset = 0;
         long blockCount = 3;
 
-        MemorySegment segment1 = arena.allocate(1024);
-        MemorySegment segment2 = arena.allocate(1024);
-        MemorySegment segment3 = arena.allocate(1024);
-
-        RefCountedMemorySegment refSegment1 = new RefCountedMemorySegment(segment1, 1024, (s) -> {});
-        RefCountedMemorySegment refSegment2 = new RefCountedMemorySegment(segment2, 1024, (s) -> {});
-        RefCountedMemorySegment refSegment3 = new RefCountedMemorySegment(segment3, 1024, (s) -> {});
-
-        @SuppressWarnings("unchecked")
-        RefCountedMemorySegment[] segments = new RefCountedMemorySegment[] { refSegment1, refSegment2, refSegment3 };
+        RefCountedByteBuffer[] segments = new RefCountedByteBuffer[] { block(1024), block(1024), block(1024) };
         when(mockLoader.load(any(Path.class), any(Long.class), any(Long.class), anyLong())).thenReturn(segments);
 
-        Map<BlockCacheKey, BlockCacheValue<RefCountedMemorySegment>> result = blockCache.loadForPrefetch(filePath, startOffset, blockCount);
+        Map<BlockCacheKey, BlockCacheValue<RefCountedByteBuffer>> result = blockCache.loadForPrefetch(filePath, startOffset, blockCount);
 
         assertNotNull(result);
         assertEquals(3, result.size());
@@ -288,9 +245,7 @@ public class BlockCacheTests extends OpenSearchTestCase {
         // Add multiple blocks
         for (int i = 0; i < 10; i++) {
             BlockCacheKey key = new FileBlockCacheKey(filePath, i);
-            MemorySegment segment = arena.allocate(1024);
-            RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, 1024, (s) -> {});
-            blockCache.put(key, refSegment);
+            blockCache.put(key, block(1024));
         }
 
         // Verify all are cached
@@ -333,7 +288,7 @@ public class BlockCacheTests extends OpenSearchTestCase {
 
     public void testCacheSizeLimit() throws Exception {
         // Create a small cache
-        Cache<BlockCacheKey, BlockCacheValue<RefCountedMemorySegment>> smallCache = Caffeine
+        Cache<BlockCacheKey, BlockCacheValue<RefCountedByteBuffer>> smallCache = Caffeine
             .newBuilder()
             .maximumSize(5)
             .removalListener((key, value, cause) -> {
@@ -343,7 +298,7 @@ public class BlockCacheTests extends OpenSearchTestCase {
             })
             .build();
 
-        CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> smallBlockCache = new CaffeineBlockCache<>(
+        CaffeineBlockCache<RefCountedByteBuffer, RefCountedByteBuffer> smallBlockCache = new CaffeineBlockCache<>(
             smallCache,
             mockLoader,
             5
@@ -354,9 +309,7 @@ public class BlockCacheTests extends OpenSearchTestCase {
         // Add more than cache size
         for (int i = 0; i < 10; i++) {
             BlockCacheKey key = new FileBlockCacheKey(filePath, i);
-            MemorySegment segment = arena.allocate(1024);
-            RefCountedMemorySegment refSegment = new RefCountedMemorySegment(segment, 1024, (s) -> {});
-            smallBlockCache.put(key, refSegment);
+            smallBlockCache.put(key, block(1024));
         }
 
         // Force cache cleanup
