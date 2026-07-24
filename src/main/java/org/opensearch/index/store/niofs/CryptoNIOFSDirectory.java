@@ -30,9 +30,12 @@ import org.opensearch.index.store.metrics.ErrorType;
  * A NioFS directory implementation that encrypts all index files using a
  * user supplied key.
  *
- * <p>All files (including .si and segments_*) are encrypted when the crypto plugin
- * is enabled. The read path attempts decryption with a fallback to plaintext for
- * backward compatibility with indices created before encryption was enabled.
+ * <p>Most index files are encrypted when the crypto plugin is enabled. As a temporary
+ * measure, {@code segments_N} and {@code .si} files are NOT encrypted and are delegated
+ * to the plaintext NIOFS implementation for read, write, and length operations; encryption
+ * for these will be added back later (it requires accompanying core changes). The read path
+ * attempts decryption with a fallback to plaintext for backward compatibility with indices
+ * created before encryption was enabled.
  *
  * @opensearch.internal
  */
@@ -75,6 +78,12 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
         try {
+            // segments_N and .si files are intentionally NOT encrypted for now; delegate to the
+            // plaintext NIOFS impl. Encryption for these will be added back later (requires core changes).
+            if (name.contains("segments_") || name.endsWith(".si")) {
+                return super.openInput(name, context);
+            }
+
             ensureOpen();
             ensureCanRead(name);
             Path path = getDirectory().resolve(name);
@@ -111,6 +120,12 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
         try {
+            // segments_N and .si files are intentionally NOT encrypted for now; delegate to the
+            // plaintext NIOFS impl. Encryption for these will be added back later (requires core changes).
+            if (name.contains("segments_") || name.endsWith(".si")) {
+                return super.createOutput(name, context);
+            }
+
             ensureOpen();
             Path path = directory.resolve(name);
 
@@ -134,6 +149,12 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
+        // segments_N and .si files are intentionally NOT encrypted for now; delegate to the
+        // plaintext NIOFS impl. Encryption for these will be added back later (requires core changes).
+        if (prefix.contains("segments_") || prefix.endsWith(".si")) {
+            return super.createTempOutput(prefix, suffix, context);
+        }
+
         ensureOpen();
         String name = getTempFileName(prefix, suffix, nextTempFileCounter.getAndIncrement());
         Path path = directory.resolve(name);
@@ -153,6 +174,12 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
+        // segments_N and .si files are intentionally NOT encrypted for now; their on-disk length is
+        // the true content length (no OSEF footer). Encryption for these will be added back later.
+        if (name.contains("segments_") || name.endsWith(".si")) {
+            return super.fileLength(name);
+        }
+
         Path path = dirPath.resolve(name);
         long fileSize = super.fileLength(name);
 

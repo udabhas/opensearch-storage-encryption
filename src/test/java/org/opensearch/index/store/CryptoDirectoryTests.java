@@ -292,47 +292,64 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
         );
     }
 
-    // ==================== SI File Encryption Tests ====================
+    // ==================== SI / segments_N Plaintext Passthrough Tests ====================
+    //
+    // segments_N and .si files are intentionally NOT encrypted for now — they are delegated to the
+    // plaintext NIOFS impl (see CryptoNIOFSDirectory). Encryption for these will be added back later
+    // (requires accompanying core changes). These tests pin that passthrough contract: the bytes on
+    // disk are the raw plaintext (no OSEF footer), and round-trips through the directory still work.
 
     /**
-     * .si files are encrypted on disk (not plaintext).
+     * .si files are written as plaintext on disk (not encrypted) and round-trip correctly.
      */
-    public void testSiFileIsEncrypted() throws IOException {
-        try (Directory dir = getDirectory(createTempDir())) {
-            byte[] data = "SI_CONTENT_MUST_BE_ENCRYPTED_99".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    public void testSiFileIsPlaintextOnDisk() throws IOException {
+        Path tempPath = createTempDir();
+        try (Directory dir = getDirectory(tempPath)) {
+            byte[] data = "SI_CONTENT_MUST_BE_PLAINTEXT_99".getBytes(java.nio.charset.StandardCharsets.UTF_8);
             try (IndexOutput out = dir.createOutput("_0.si", newIOContext(random()))) {
                 out.writeBytes(data, 0, data.length);
             }
 
-            // Read back through crypto dir — should decrypt correctly
+            // Bytes on disk must be the raw plaintext — no encryption, no OSEF footer.
+            byte[] onDisk = java.nio.file.Files.readAllBytes(tempPath.resolve("_0.si"));
+            assertEquals("_0.si should be plaintext on disk (no footer)", data.length, onDisk.length);
+            assertEquals("SI_CONTENT_MUST_BE_PLAINTEXT_99", new String(onDisk, java.nio.charset.StandardCharsets.UTF_8));
+
+            // Read back through crypto dir — plaintext passthrough should return the same bytes.
             try (IndexInput in = dir.openInput("_0.si", newIOContext(random()))) {
                 byte[] read = new byte[data.length];
                 in.readBytes(read, 0, data.length);
-                assertEquals("SI_CONTENT_MUST_BE_ENCRYPTED_99", new String(read, java.nio.charset.StandardCharsets.UTF_8));
+                assertEquals("SI_CONTENT_MUST_BE_PLAINTEXT_99", new String(read, java.nio.charset.StandardCharsets.UTF_8));
             }
         }
     }
 
     /**
-     * segments_* files are encrypted on disk.
+     * segments_* files are written as plaintext on disk (not encrypted) and round-trip correctly.
      */
-    public void testSegmentsFileIsEncrypted() throws IOException {
-        try (Directory dir = getDirectory(createTempDir())) {
-            byte[] data = "SEGMENTS_DATA_ENCRYPTED_XYZ".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    public void testSegmentsFileIsPlaintextOnDisk() throws IOException {
+        Path tempPath = createTempDir();
+        try (Directory dir = getDirectory(tempPath)) {
+            byte[] data = "SEGMENTS_DATA_PLAINTEXT_XYZ".getBytes(java.nio.charset.StandardCharsets.UTF_8);
             try (IndexOutput out = dir.createOutput("segments_1", newIOContext(random()))) {
                 out.writeBytes(data, 0, data.length);
             }
 
+            byte[] onDisk = java.nio.file.Files.readAllBytes(tempPath.resolve("segments_1"));
+            assertEquals("segments_1 should be plaintext on disk (no footer)", data.length, onDisk.length);
+            assertEquals("SEGMENTS_DATA_PLAINTEXT_XYZ", new String(onDisk, java.nio.charset.StandardCharsets.UTF_8));
+
             try (IndexInput in = dir.openInput("segments_1", newIOContext(random()))) {
                 byte[] read = new byte[data.length];
                 in.readBytes(read, 0, data.length);
-                assertEquals("SEGMENTS_DATA_ENCRYPTED_XYZ", new String(read, java.nio.charset.StandardCharsets.UTF_8));
+                assertEquals("SEGMENTS_DATA_PLAINTEXT_XYZ", new String(read, java.nio.charset.StandardCharsets.UTF_8));
             }
         }
     }
 
     /**
-     * Plaintext .si files (from pre-encryption indices) are still readable via fallback.
+     * Plaintext .si files (from pre-encryption indices, or written via the current plaintext
+     * passthrough) are readable.
      */
     public void testPlaintextSiFallback() throws IOException {
         Path tempPath = createTempDir();
@@ -351,7 +368,8 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
     }
 
     /**
-     * fileLength() returns content length (not raw file size) for encrypted .si files.
+     * fileLength() for a .si file equals the raw on-disk size (plaintext passthrough — no footer to
+     * subtract).
      */
     public void testFileLengthForSiFile() throws IOException {
         try (Directory dir = getDirectory(createTempDir())) {
@@ -360,7 +378,7 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
                 out.writeBytes(data, 0, data.length);
             }
 
-            assertEquals("fileLength should equal content length", data.length, dir.fileLength("_0.si"));
+            assertEquals("fileLength should equal plaintext content length", data.length, dir.fileLength("_0.si"));
         }
     }
 }
