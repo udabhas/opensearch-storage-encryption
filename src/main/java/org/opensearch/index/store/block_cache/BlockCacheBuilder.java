@@ -185,7 +185,14 @@ public final class BlockCacheBuilder {
         // Loader is null here because this creates a shared cache instance.
         // Per-directory caches will wrap this cache with their own loaders
         // that provide directory-specific decryption keys.
-        CaffeineBlockCache<T, V> caffeineBlockCache = new CaffeineBlockCache<>(cache, null, maxBlocks, evictionListenerRef, secondary);
-        return new CacheWithExecutor<>(caffeineBlockCache, removalExec);
+        CaffeineBlockCache<T, V> caffeineBlockCache = new CaffeineBlockCache<>(
+            cache,
+            null,
+            maxBlocks,
+            evictionListenerRef,
+            secondary,
+            prefetchTracker
+        );
+        return new CacheWithExecutor<>(caffeineBlockCache, removalExec, prefetchTracker);
     }
 }
