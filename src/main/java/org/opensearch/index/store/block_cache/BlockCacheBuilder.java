@@ -39,10 +39,16 @@ public final class BlockCacheBuilder {
     public static class CacheWithExecutor<T extends AutoCloseable, V> {
         private final CaffeineBlockCache<T, V> cache;
         private final ThreadPoolExecutor executor;
+        private final PrefetchTracker prefetchTracker;
 
         CacheWithExecutor(CaffeineBlockCache<T, V> cache, ThreadPoolExecutor executor) {
+            this(cache, executor, null);
+        }
+
+        CacheWithExecutor(CaffeineBlockCache<T, V> cache, ThreadPoolExecutor executor, PrefetchTracker prefetchTracker) {
             this.cache = cache;
             this.executor = executor;
+            this.prefetchTracker = prefetchTracker;
         }
 
         /**
@@ -63,6 +69,17 @@ public final class BlockCacheBuilder {
         public ThreadPoolExecutor getExecutor() {
             return executor;
         }
+
+        /**
+         * Returns the shared prefetch tracker wired into this cache, or {@code null} if prefetch was
+         * not configured. The owning {@link org.opensearch.index.store.pool.PoolBuilder} is responsible
+         * for shutting down the tracker's executor on node closure.
+         *
+         * @return the prefetch tracker, or {@code null}
+         */
+        public PrefetchTracker getPrefetchTracker() {
+            return prefetchTracker;
+        }
     }
 
     /**
@@ -75,6 +92,24 @@ public final class BlockCacheBuilder {
      * @return CacheWithExecutor containing the configured cache and its executor
      */
     public static <T extends AutoCloseable, V> CacheWithExecutor<T, V> build(int initialCapacity, long maxBlocks) {
+        return build(initialCapacity, maxBlocks, null);
+    }
+
+    /**
+     * Creates a block cache with the specified capacity, removal handling, and prefetch tracker.
+     *
+     * @param <T> the type of cached block values
+     * @param <V> the type returned by the block loader
+     * @param initialCapacity initial capacity hint for the cache
+     * @param maxBlocks maximum number of blocks to cache
+     * @param prefetchTracker shared tracker for async prefetch submission/dedup/stats (may be null)
+     * @return CacheWithExecutor containing the configured cache, its removal executor, and the tracker
+     */
+    public static <T extends AutoCloseable, V> CacheWithExecutor<T, V> build(
+        int initialCapacity,
+        long maxBlocks,
+        PrefetchTracker prefetchTracker
+    ) {
         ThreadPoolExecutor removalExec = OpenSearchExecutors
             .newScaling(
                 "block-cache-maint",

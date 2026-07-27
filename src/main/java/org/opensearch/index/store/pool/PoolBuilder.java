@@ -9,13 +9,17 @@ import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_
 import java.io.Closeable;
 import java.time.Duration;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinWorkerThread;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.concurrent.OpenSearchExecutors;
 import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheBuilder;
+import org.opensearch.index.store.block_cache.PrefetchTracker;
 import org.opensearch.index.store.bufferpoolfs.RadixBlockTableRegistry;
 import org.opensearch.index.store.read_ahead.Worker;
 import org.opensearch.index.store.read_ahead.impl.NoopWorker;
@@ -53,6 +57,8 @@ public final class PoolBuilder {
         private final java.util.concurrent.ThreadPoolExecutor removalExecutor;
         private final ExecutorService readAheadExecutor;
         private final RadixBlockTableRegistry radixBlockTableRegistry;
+        private final PrefetchTracker prefetchTracker;
+        private final ExecutorService prefetchExecutor;
 
         PoolResources(
             Pool<RefCountedByteBuffer> segmentPool,
@@ -63,7 +69,9 @@ public final class PoolBuilder {
             TelemetryThread telemetry,
             java.util.concurrent.ThreadPoolExecutor removalExecutor,
             ExecutorService readAheadExecutor,
-            RadixBlockTableRegistry radixBlockTableRegistry
+            RadixBlockTableRegistry radixBlockTableRegistry,
+            PrefetchTracker prefetchTracker,
+            ExecutorService prefetchExecutor
         ) {
             this.segmentPool = segmentPool;
             this.blockCache = blockCache;
@@ -74,6 +82,19 @@ public final class PoolBuilder {
             this.removalExecutor = removalExecutor;
             this.readAheadExecutor = readAheadExecutor;
             this.radixBlockTableRegistry = radixBlockTableRegistry;
+            this.prefetchTracker = prefetchTracker;
+            this.prefetchExecutor = prefetchExecutor;
+        }
+
+        /**
+         * Returns the node-shared prefetch tracker used by the Lucene {@code IndexInput.prefetch()} path.
+         * Its executor is a dedicated {@link ForkJoinPool}; the tracker also provides in-flight dedup,
+         * back-pressure, and prefetch statistics.
+         *
+         * @return the shared prefetch tracker
+         */
+        public PrefetchTracker getPrefetchTracker() {
+            return prefetchTracker;
         }
 
         /**
@@ -179,6 +200,17 @@ public final class PoolBuilder {
                     readAheadExecutor.shutdownNow();
                 }
             }
+            if (prefetchExecutor != null) {
+                prefetchExecutor.shutdown();
+                try {
+                    if (!prefetchExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        prefetchExecutor.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    prefetchExecutor.shutdownNow();
+                }
+            }
         }
     }
 
@@ -190,15 +222,18 @@ public final class PoolBuilder {
         private final Pool<RefCountedByteBuffer> pool;
         private final BlockCache<RefCountedByteBuffer> blockCache;
         private final RadixBlockTableRegistry radixBlockTableRegistry;
+        private final PrefetchTracker prefetchTracker;
 
         TelemetryThread(
             Pool<RefCountedByteBuffer> pool,
             BlockCache<RefCountedByteBuffer> blockCache,
-            RadixBlockTableRegistry radixBlockTableRegistry
+            RadixBlockTableRegistry radixBlockTableRegistry,
+            PrefetchTracker prefetchTracker
         ) {
             this.pool = pool;
             this.blockCache = blockCache;
             this.radixBlockTableRegistry = radixBlockTableRegistry;
+            this.prefetchTracker = prefetchTracker;
             this.thread = new Thread(this::run);
             this.thread.setDaemon(true);
             this.thread.setName("DirectIOBufferPoolStatsLogger");
@@ -225,6 +260,9 @@ public final class PoolBuilder {
                 blockCache.recordStats();
                 if (radixBlockTableRegistry != null) {
                     radixBlockTableRegistry.recordStats();
+                }
+                if (prefetchTracker != null) {
+                    LOGGER.info(prefetchTracker.stats());
                 }
             } catch (Exception e) {
                 LOGGER.warn("Failed to log cache/pool stats", e);
@@ -277,9 +315,31 @@ public final class PoolBuilder {
         int readAheadQueueSize = ReadAheadSizingPolicy.calculateQueueSize(maxCacheBlocks);
         LOGGER.info("Calculated read-ahead queue size={} (cache={} blocks)", readAheadQueueSize, maxCacheBlocks);
 
+        // Dedicated prefetch executor for the Lucene IndexInput.prefetch() path. A ForkJoinPool is used
+        // (rather than an OpenSearch thread pool) because its work-stealing deque has a much lower
+        // task-submission latency, and prefetch submission sits on the hot read path where time-to-submit
+        // dominates.
+        int prefetchThreads = OpenSearchExecutors.allocatedProcessors(settings) * 4;
+        int prefetchQueueSize = prefetchThreads * 1000;
+        LOGGER
+            .info(
+                "Prefetch ForkJoinPool: threads={}, maxInflight={}, allocatedProcessors={}",
+                prefetchThreads,
+                prefetchQueueSize,
+                OpenSearchExecutors.allocatedProcessors(settings)
+            );
+        ForkJoinPool.ForkJoinWorkerThreadFactory prefetchThreadFactory = fjp -> {
+            ForkJoinWorkerThread t = ForkJoinPool.defaultForkJoinWorkerThreadFactory.newThread(fjp);
+            t.setName("prefetch-worker-" + t.getPoolIndex());
+            t.setDaemon(true);
+            return t;
+        };
+        ExecutorService prefetchExecutor = new ForkJoinPool(prefetchThreads, prefetchThreadFactory, null, false);
+        PrefetchTracker prefetchTracker = new PrefetchTracker(prefetchExecutor, prefetchQueueSize);
+
         // Initialize shared cache with removal listener and get its executor
         BlockCacheBuilder.CacheWithExecutor<RefCountedByteBuffer, RefCountedByteBuffer> cacheWithExecutor = BlockCacheBuilder
-            .build(CACHE_INITIAL_SIZE, maxCacheBlocks);
+            .build(CACHE_INITIAL_SIZE, maxCacheBlocks, prefetchTracker);
         BlockCache<RefCountedByteBuffer> blockCache = cacheWithExecutor.getCache();
         java.util.concurrent.ThreadPoolExecutor removalExecutor = cacheWithExecutor.getExecutor();
         LOGGER.info("Creating shared block cache with blocks={}", maxCacheBlocks);
@@ -323,7 +383,7 @@ public final class PoolBuilder {
         LOGGER.info("Read-ahead DISABLED — using NoopWorker (queueSize={}, threads=0)", readAheadQueueSize);
 
         // Start telemetry
-        TelemetryThread telemetry = new TelemetryThread(segmentPool, blockCache, radixBlockTableRegistry);
+        TelemetryThread telemetry = new TelemetryThread(segmentPool, blockCache, radixBlockTableRegistry, prefetchTracker);
 
         return new PoolResources(
             segmentPool,
@@ -334,7 +394,9 @@ public final class PoolBuilder {
             telemetry,
             removalExecutor,
             readAheadExecutor,
-            radixBlockTableRegistry
+            radixBlockTableRegistry,
+            prefetchTracker,
+            prefetchExecutor
         );
     }
 }

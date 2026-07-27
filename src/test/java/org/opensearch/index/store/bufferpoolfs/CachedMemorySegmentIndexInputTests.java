@@ -5,6 +5,8 @@
 package org.opensearch.index.store.bufferpoolfs;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -1471,6 +1473,200 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         // Verify cache clear was called
         assertEquals("master close should release the L1 table", 0, radixBlockTableRegistry.getTableCount());
         verify(mockReadaheadManager, times(1)).close();
+    }
+
+    // ==================== Prefetch (IndexInput.prefetch) Tests ====================
+    //
+    // prefetch() decides what to load purely from the L1 RadixBlockTable (radixBlockTable.get()), NOT from
+    // mockCache. So tests that expect loadMissingBlocks to fire leave L1 EMPTY for those blocks (unlike the
+    // read-path helpers setupOneBlock/setupBlock, which publish into L1). Tests that expect a skip populate
+    // L1 explicitly via radixBlockTable.put(...). loadMissingBlocks is a void method on the mock, so it is a
+    // no-op by default and needs no stubbing.
+
+    /**
+     * prefetch() on the first (single-block) call with an empty L1 delegates to loadMissingBlocks with a
+     * block-aligned offset and count.
+     */
+    public void testPrefetchTriggersLoadMissingBlocksOnFirstCall() throws IOException {
+        long fileLength = BLOCK_SIZE * 2;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        input.prefetch(0, BLOCK_SIZE);
+
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq(0L), eq(1L));
+        input.close();
+    }
+
+    /**
+     * Each prefetch call delegates to loadMissingBlocks with the correct block-aligned offset.
+     */
+    public void testPrefetchLoadsPerBlockOffset() throws IOException {
+        long fileLength = BLOCK_SIZE * 2;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        input.prefetch(0, BLOCK_SIZE);
+        input.prefetch(BLOCK_SIZE, BLOCK_SIZE);
+
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq(0L), eq(1L));
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq((long) BLOCK_SIZE), eq(1L));
+        input.close();
+    }
+
+    /**
+     * prefetch() on a slice maps the slice-relative offset to the absolute (block-aligned) file offset.
+     */
+    public void testPrefetchWithSliceOffset() throws IOException {
+        long fileLength = BLOCK_SIZE * 4;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+        CachedMemorySegmentIndexInput slice = input.slice("test_slice", BLOCK_SIZE, BLOCK_SIZE * 2);
+
+        slice.prefetch(0, BLOCK_SIZE);
+
+        // Absolute start block offset = BLOCK_SIZE, count = 1.
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq((long) BLOCK_SIZE), eq(1L));
+        slice.close();
+        input.close();
+    }
+
+    /**
+     * prefetch() on a nested slice accumulates the base offsets to the correct absolute block offset.
+     */
+    public void testPrefetchWithNestedSlices() throws IOException {
+        long fileLength = BLOCK_SIZE * 4;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+        CachedMemorySegmentIndexInput slice1 = input.slice("slice1", BLOCK_SIZE, BLOCK_SIZE * 2);
+        CachedMemorySegmentIndexInput slice2 = slice1.slice("slice2", 100, BLOCK_SIZE);
+
+        slice2.prefetch(50, 100);
+
+        // absoluteBaseOffset = BLOCK_SIZE + 100, offset = 50 → startFileOffset = BLOCK_SIZE + 150,
+        // block-aligned down to BLOCK_SIZE.
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq((long) BLOCK_SIZE), anyLong());
+        slice2.close();
+        slice1.close();
+        input.close();
+    }
+
+    /**
+     * prefetch() aligns a non-aligned offset down to the block boundary.
+     */
+    public void testPrefetchBlockAlignment() throws IOException {
+        long fileLength = BLOCK_SIZE * 2;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        // startFileOffset=100 → startBlockOffset=0.
+        input.prefetch(100, 200);
+
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq(0L), anyLong());
+        input.close();
+    }
+
+    /**
+     * prefetch() after close throws (AlreadyClosedException via ensureOpen).
+     */
+    public void testPrefetchAfterCloseThrows() throws IOException {
+        long fileLength = BLOCK_SIZE;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+        input.close();
+
+        expectThrows(Exception.class, () -> input.prefetch(0, BLOCK_SIZE));
+    }
+
+    /**
+     * prefetch() spanning multiple blocks (empty L1) delegates a single multi-block loadMissingBlocks.
+     */
+    public void testPrefetchMultipleBlocks() throws IOException {
+        long fileLength = BLOCK_SIZE * 5;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        input.prefetch(0, BLOCK_SIZE * 3);
+
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq(0L), eq(3L));
+        input.close();
+    }
+
+    /**
+     * prefetch() has no internal dedup: repeated/various-length calls each delegate to loadMissingBlocks.
+     */
+    public void testPrefetchDelegatesForVariousLengths() throws IOException {
+        long fileLength = BLOCK_SIZE * 10;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        input.prefetch(0, 100);                            // startBlock=0, count=1
+        input.prefetch(0, BLOCK_SIZE);                     // startBlock=0, count=1
+        input.prefetch(0, BLOCK_SIZE + 100);               // startBlock=0, count=2
+        input.prefetch(0, BLOCK_SIZE * 3);                 // startBlock=0, count=3
+        input.prefetch(100, BLOCK_SIZE);                   // startBlock=0, count=1
+        input.prefetch(BLOCK_SIZE + 100, BLOCK_SIZE * 2);  // startBlock=BLOCK_SIZE, count=2
+
+        verify(mockCache, times(6)).loadMissingBlocks(eq(testPath), anyLong(), anyLong());
+        input.close();
+    }
+
+    /**
+     * Multi-block prefetch skips loading entirely when all blocks are already present in L1.
+     */
+    @SuppressWarnings("unchecked")
+    public void testPrefetchSkipsMultiBlockWhenAllInL1() throws IOException {
+        long fileLength = BLOCK_SIZE * 4;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        // Populate L1 for blocks 0, 1, 2.
+        for (int i = 0; i < 3; i++) {
+            BlockCacheValue<RefCountedByteBuffer> mockValue = mock(BlockCacheValue.class);
+            radixBlockTable.put(i, mockValue);
+        }
+
+        input.prefetch(0, BLOCK_SIZE * 3);
+
+        verify(mockCache, never()).loadMissingBlocks(any(), anyLong(), anyLong());
+        input.close();
+    }
+
+    /**
+     * Multi-block prefetch starts loading from the first block missing in L1, covering the remaining blocks.
+     */
+    @SuppressWarnings("unchecked")
+    public void testPrefetchLoadsMultiBlockFromFirstMissing() throws IOException {
+        long fileLength = BLOCK_SIZE * 4;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        // Block 0 cached in L1; block 1 is the first miss.
+        BlockCacheValue<RefCountedByteBuffer> mockValue = mock(BlockCacheValue.class);
+        radixBlockTable.put(0, mockValue);
+
+        input.prefetch(0, BLOCK_SIZE * 3);
+
+        // Loading starts at block 1 (offset BLOCK_SIZE), covering the 2 remaining blocks.
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq((long) BLOCK_SIZE), eq(2L));
+        input.close();
+    }
+
+    /**
+     * prefetch() works (and still delegates) when the input was created with a null readahead context.
+     */
+    public void testPrefetchWithNullReadaheadContext() throws IOException {
+        long fileLength = BLOCK_SIZE * 2;
+        CachedMemorySegmentIndexInput input = CachedMemorySegmentIndexInput
+            .newInstance("test", testPath, fileLength, mockCache, mockReadaheadManager, null, radixBlockTable, radixBlockTableRegistry);
+
+        input.prefetch(0, BLOCK_SIZE);
+
+        verify(mockCache, times(1)).loadMissingBlocks(eq(testPath), eq(0L), eq(1L));
+        input.close();
+    }
+
+    /**
+     * prefetch() does not propagate exceptions from the async submission path (fire-and-forget).
+     */
+    public void testPrefetchDoesNotThrowFromSubmission() throws IOException {
+        long fileLength = BLOCK_SIZE * 2;
+        CachedMemorySegmentIndexInput input = createInput(fileLength);
+
+        // Should not throw even though nothing special is stubbed on the mock cache.
+        input.prefetch(0, BLOCK_SIZE);
+
+        input.close();
     }
 
     private MemorySegment createBlockWithPattern(int blockIndex, byte pattern) {

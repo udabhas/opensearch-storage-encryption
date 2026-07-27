@@ -871,15 +871,16 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             }
             if (firstMissing > 0) {
                 // Skip leading cached blocks — start loading from the first miss.
-                // loadForPrefetch loads the missing range into L2 (Caffeine); the subsequent
-                // read promotes the block into L1 (RadixBlockTable) via acquireBlock().
-                blockCache.loadForPrefetch(path, startBlockOffset + (firstMissing << CACHE_BLOCK_SIZE_POWER), blockCount - firstMissing);
+                // loadMissingBlocks submits the missing range to the shared prefetch ForkJoinPool
+                // (async, fire-and-forget) and loads it into L2 (Caffeine); a subsequent read promotes
+                // the block into L1 (RadixBlockTable) via acquireBlock().
+                blockCache.loadMissingBlocks(path, startBlockOffset + (firstMissing << CACHE_BLOCK_SIZE_POWER), blockCount - firstMissing);
                 return;
             }
         }
 
-        // Load the requested range into L2; reads promote into L1 on access.
-        blockCache.loadForPrefetch(path, startBlockOffset, blockCount);
+        // Submit the requested range to the prefetch executor; reads promote into L1 on access.
+        blockCache.loadMissingBlocks(path, startBlockOffset, blockCount);
     }
 
     @Override

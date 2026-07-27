@@ -60,6 +60,20 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     private final ConcurrentHashMap<Path, Set<BlockCacheKey>> secondary;
 
     /**
+     * Pool-acquire timeout (ms) for a single-block prefetch load. Kept intentionally short so prefetch
+     * fails fast and never contends with critical on-demand loads when the segment pool is under pressure.
+     */
+    private static final long PREFETCH_POOL_TIMEOUT_MS = 5;
+
+    /**
+     * Shared prefetch tracker providing async submission (ForkJoinPool), in-flight dedup, back-pressure,
+     * and statistics for the {@link #loadMissingBlocks} path. May be {@code null} for caches that were
+     * built without prefetch support (e.g. some tests); in that case prefetch falls back to a synchronous
+     * best-effort load.
+     */
+    private final PrefetchTracker prefetchTracker;
+
+    /**
      * Previous cumulative {@link CacheStats} snapshot, so {@link #recordStats()} can publish the PER-INTERVAL
      * delta (this tick minus last tick) instead of lifetime cumulative counters. Cumulative counters forced the
      * dashboard to use {@code derivative}, which mis-handles JVM-restart counter resets (large negative spikes)
@@ -77,13 +91,32 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
      * @param maxBlocks the maximum number of blocks to cache (currently unused but kept for API compatibility)
      */
     public CaffeineBlockCache(Cache<BlockCacheKey, BlockCacheValue<T>> cache, BlockLoader<V> blockLoader, long maxBlocks) {
-        this(cache, blockLoader, maxBlocks, new AtomicReference<>(), new ConcurrentHashMap<>());
+        this(cache, blockLoader, maxBlocks, new AtomicReference<>(), new ConcurrentHashMap<>(), null);
+    }
+
+    /**
+     * Constructs a CaffeineBlockCache with a shared {@link PrefetchTracker} for the async
+     * {@link #loadMissingBlocks} path (fresh eviction-listener ref and secondary index).
+     *
+     * @param cache the underlying Caffeine cache instance
+     * @param blockLoader the loader used to load blocks when cache misses occur
+     * @param maxBlocks the maximum number of blocks to cache (currently unused but kept for API compatibility)
+     * @param prefetchTracker shared tracker for async prefetch submission, dedup, and stats (may be null)
+     */
+    public CaffeineBlockCache(
+        Cache<BlockCacheKey, BlockCacheValue<T>> cache,
+        BlockLoader<V> blockLoader,
+        long maxBlocks,
+        PrefetchTracker prefetchTracker
+    ) {
+        this(cache, blockLoader, maxBlocks, new AtomicReference<>(), new ConcurrentHashMap<>(), prefetchTracker);
     }
 
     /**
      * Per-directory wrapper sharing the underlying cache and eviction/secondary bookkeeping of
      * {@code source}. Used by {@code CryptoDirectoryFactory} to build per-directory decryption
-     * wrappers over the shared cache from {@link BlockCacheBuilder}.
+     * wrappers over the shared cache from {@link BlockCacheBuilder}. Reuses {@code source}'s prefetch
+     * tracker so all directory caches submit to the same shared async prefetch executor.
      */
     public CaffeineBlockCache(
         Cache<BlockCacheKey, BlockCacheValue<T>> cache,
@@ -91,7 +124,7 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
         long maxBlocks,
         CaffeineBlockCache<T, ?> source
     ) {
-        this(cache, blockLoader, maxBlocks, source.evictionListenerRef, source.secondary);
+        this(cache, blockLoader, maxBlocks, source.evictionListenerRef, source.secondary, source.prefetchTracker);
     }
 
     /**
@@ -112,10 +145,43 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
         AtomicReference<EvictionListener> evictionListenerRef,
         ConcurrentHashMap<Path, Set<BlockCacheKey>> secondary
     ) {
+        this(cache, blockLoader, maxBlocks, evictionListenerRef, secondary, null);
+    }
+
+    /**
+     * Full constructor additionally wiring a shared {@link PrefetchTracker} for the async
+     * {@link #loadMissingBlocks} path.
+     *
+     * @param cache the underlying Caffeine cache instance
+     * @param blockLoader the loader used to load blocks when cache misses occur
+     * @param maxBlocks the maximum number of blocks to cache (currently unused but kept for API compatibility)
+     * @param evictionListenerRef shared reference read by the Caffeine removal listener
+     * @param secondary shared path -> keyset index used to short-circuit {@link #invalidate(Path)}
+     * @param prefetchTracker shared tracker for async prefetch submission, dedup, and stats (may be null)
+     */
+    public CaffeineBlockCache(
+        Cache<BlockCacheKey, BlockCacheValue<T>> cache,
+        BlockLoader<V> blockLoader,
+        long maxBlocks,
+        AtomicReference<EvictionListener> evictionListenerRef,
+        ConcurrentHashMap<Path, Set<BlockCacheKey>> secondary,
+        PrefetchTracker prefetchTracker
+    ) {
         this.blockLoader = blockLoader;
         this.cache = cache;
         this.evictionListenerRef = evictionListenerRef;
         this.secondary = secondary;
+        this.prefetchTracker = prefetchTracker;
+    }
+
+    /**
+     * Returns the shared prefetch tracker, so per-directory cache wrappers can reuse the same async
+     * executor, in-flight dedup map, and statistics as the shared cache.
+     *
+     * @return the prefetch tracker, or {@code null} if none was configured
+     */
+    public PrefetchTracker getPrefetchTracker() {
+        return prefetchTracker;
     }
 
     /**
@@ -334,6 +400,101 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
         }
 
         return loaded;
+    }
+
+    /**
+     * Asynchronous prefetch entry point for the Lucene {@code IndexInput.prefetch()} path.
+     *
+     * <p>Submits the missing-block range to the shared {@link PrefetchTracker}'s executor (a ForkJoinPool)
+     * and returns immediately, so the calling read thread never blocks on prefetch I/O. The actual loading
+     * runs in {@link #loadMissingBlocksSync}, which loads one block at a time and skips blocks already
+     * cached or already being prefetched. If no tracker is configured, the range is loaded synchronously as
+     * a best-effort fallback.
+     */
+    @Override
+    public void loadMissingBlocks(Path filePath, long startOffset, long blockCount) {
+        if (prefetchTracker == null) {
+            // No async support wired — best-effort synchronous load (no dedup, no stats).
+            loadMissingBlocksSync(filePath, startOffset, blockCount, null);
+            return;
+        }
+
+        prefetchTracker.recordPrefetchCall(blockCount);
+        long t0 = System.nanoTime();
+        try {
+            prefetchTracker.execute(() -> {
+                try {
+                    loadMissingBlocksSync(filePath, startOffset, blockCount, prefetchTracker);
+                } catch (Exception e) {
+                    LOGGER.error("failed to prefetch blocks: path={} offset={} count={}", filePath, startOffset, blockCount, e);
+                }
+            });
+        } catch (Exception e) {
+            LOGGER.warn("prefetch task rejected: path={} offset={} count={} e={}", filePath, startOffset, blockCount, e.getMessage());
+        } finally {
+            prefetchTracker.recordPrefetchTimeNs(System.nanoTime() - t0);
+        }
+    }
+
+    /**
+     * Loads a contiguous range of blocks one at a time, skipping blocks already cached or already in-flight
+     * (when a tracker is supplied). Each block is loaded with a short pool-acquire timeout
+     * ({@link #PREFETCH_POOL_TIMEOUT_MS}) so prefetch fails fast under pool pressure. Degraded-mode
+     * (transient) blocks are never left in the shared cache.
+     *
+     * @param tracker the prefetch tracker for dedup/stats, or {@code null} for an untracked best-effort load
+     */
+    private void loadMissingBlocksSync(Path filePath, long startOffset, long blockCount, PrefetchTracker tracker) {
+        BlockCacheKey[] keys = new BlockCacheKey[(int) blockCount];
+        int keyCount = 0;
+        for (int i = 0; i < blockCount; i++) {
+            long blockOffset = startOffset + i * CACHE_BLOCK_SIZE;
+            BlockCacheKey key = createBlockKey(filePath, blockOffset);
+            // Dedup against other in-flight prefetch tasks. Without a tracker, load every block.
+            if (tracker == null || tracker.putIfAbsent(key)) {
+                keys[keyCount++] = key;
+            }
+        }
+
+        long[] loaded = { 0 };
+        long failed = 0;
+        for (int i = 0; i < keyCount; i++) {
+            BlockCacheKey key = keys[i];
+            try {
+                BlockCacheValue<T> value = cache.get(key, k -> {
+                    try {
+                        V[] result = blockLoader.load(k.filePath(), k.offset(), 1, PREFETCH_POOL_TIMEOUT_MS);
+                        @SuppressWarnings("unchecked")
+                        BlockCacheValue<T> v = (BlockCacheValue<T>) result[0];
+                        loaded[0]++;
+                        return v;
+                    } catch (Exception e) {
+                        return handleLoadException(k, e);
+                    }
+                });
+                // Degraded-mode fallback blocks (non-pooled, not memory-accounted) must never persist in the
+                // shared cache — evict immediately, mirroring getOrLoad()'s transient handling.
+                if (value != null && value.isTransient()) {
+                    cache.invalidate(key);
+                }
+            } catch (Exception e) {
+                LOGGER.warn("Prefetch load failed: path={} offset={}", filePath, key.offset(), e);
+                failed++;
+            } finally {
+                if (tracker != null) {
+                    tracker.remove(key);
+                }
+            }
+        }
+        if (tracker != null) {
+            if (loaded[0] > 0) {
+                tracker.recordBlocksLoaded(loaded[0]);
+            }
+            long cacheHits = keyCount - loaded[0] - failed;
+            if (cacheHits > 0) {
+                tracker.recordCacheHits(cacheHits);
+            }
+        }
     }
 
     // Helper method to create appropriate cache key for file blocks

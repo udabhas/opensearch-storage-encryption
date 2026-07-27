@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -17,6 +18,11 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Before;
 import org.opensearch.index.store.block_loader.BlockLoader;
@@ -531,6 +537,190 @@ public class CaffeineBlockCacheTests extends OpenSearchTestCase {
         assertNotNull("Stats should not be null for empty cache", stats);
         // Stats may contain size=0 or a small number due to Caffeine's async estimation
         assertTrue("Stats should be non-empty", stats.length() > 0);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // loadMissingBlocks (async prefetch) tests.
+    //
+    // Note on the pool-acquire timeout: these tests stub/verify the loader with a timeout of 5ms, matching
+    // CaffeineBlockCache.PREFETCH_POOL_TIMEOUT_MS.
+    // ---------------------------------------------------------------------------------------------
+
+    private static final long PREFETCH_TIMEOUT_MS = 5L;
+
+    /**
+     * Tests that loadMissingBlocks executes asynchronously on the tracker's executor and records the call.
+     */
+    public void testLoadMissingBlocksAsync() throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        PrefetchTracker prefetchTracker = new PrefetchTracker(executor);
+
+        CaffeineBlockCache<String, BlockCacheValue<String>> asyncCache = new CaffeineBlockCache<>(
+            caffeineCache,
+            mockLoader,
+            MAX_BLOCKS,
+            prefetchTracker
+        );
+
+        Path testPath = Paths.get("/test/async.dat");
+        BlockCacheValue<String> mockValue = createMockValue("test");
+
+        CountDownLatch loadStarted = new CountDownLatch(1);
+        CountDownLatch loadComplete = new CountDownLatch(1);
+
+        when(mockLoader.load(any(Path.class), anyLong(), eq(1L), eq(PREFETCH_TIMEOUT_MS))).thenAnswer(invocation -> {
+            loadStarted.countDown();
+            loadComplete.await();
+            return new BlockCacheValue[] { mockValue };
+        });
+
+        // Call loadMissingBlocks - should execute asynchronously.
+        asyncCache.loadMissingBlocks(testPath, 0L, 1L);
+        assertEquals("Call should be recorded", 1L, prefetchTracker.getCalls());
+
+        // Verify the load started on the executor thread (not the caller thread).
+        assertTrue("Load should start", loadStarted.await(1, TimeUnit.SECONDS));
+
+        // Complete the load.
+        loadComplete.countDown();
+
+        // Wait for async execution to finish.
+        executor.shutdown();
+        assertTrue("Executor should finish", executor.awaitTermination(5, TimeUnit.SECONDS));
+
+        verify(mockLoader, times(1)).load(any(Path.class), anyLong(), eq(1L), eq(PREFETCH_TIMEOUT_MS));
+    }
+
+    /**
+     * Tests that concurrent calls to loadMissingBlocks for the same block are deduplicated so the loader
+     * runs only once (via the in-flight tracker plus the populated cache).
+     */
+    public void testLoadMissingBlocksAsyncDeduplication() throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(4);
+        PrefetchTracker prefetchTracker = new PrefetchTracker(executor);
+
+        CaffeineBlockCache<String, BlockCacheValue<String>> asyncCache = new CaffeineBlockCache<>(
+            caffeineCache,
+            mockLoader,
+            MAX_BLOCKS,
+            prefetchTracker
+        );
+
+        Path testPath = Paths.get("/test/dedup.dat");
+        BlockCacheValue<String> mockValue = createMockValue("test");
+
+        AtomicInteger loadCount = new AtomicInteger(0);
+
+        when(mockLoader.load(any(Path.class), anyLong(), eq(1L), eq(PREFETCH_TIMEOUT_MS))).thenAnswer(invocation -> {
+            loadCount.incrementAndGet();
+            return new BlockCacheValue[] { mockValue };
+        });
+
+        // Make many concurrent calls for the same offset.
+        int callCount = 100;
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(callCount);
+
+        for (int i = 0; i < callCount; i++) {
+            executor.submit(() -> {
+                try {
+                    startLatch.await();
+                    asyncCache.loadMissingBlocks(testPath, 0L, 1L);
+                } catch (Exception e) {
+                    fail("Unexpected exception: " + e.getMessage());
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        startLatch.countDown();
+        assertTrue("All calls should complete", doneLatch.await(10, TimeUnit.SECONDS));
+
+        executor.shutdown();
+        assertTrue("Executor should finish", executor.awaitTermination(10, TimeUnit.SECONDS));
+
+        // Should only load once due to dedup + cache population.
+        assertEquals("Should only load once", 1, loadCount.get());
+    }
+
+    /**
+     * Tests that loadMissingBlocks does not invoke the loader for a block already present in the cache.
+     */
+    public void testLoadMissingBlocksCacheHitSkipsLoader() throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        PrefetchTracker prefetchTracker = new PrefetchTracker(executor);
+
+        CaffeineBlockCache<String, BlockCacheValue<String>> cacheWithPrefetch = new CaffeineBlockCache<>(
+            caffeineCache,
+            mockLoader,
+            MAX_BLOCKS,
+            prefetchTracker
+        );
+
+        Path testPath = Paths.get("/test/cachehit.dat");
+        BlockCacheValue<String> mockValue = createMockValue("cached");
+
+        // Pre-populate the cache so the block is already present.
+        FileBlockCacheKey key = new FileBlockCacheKey(testPath, 0L);
+        caffeineCache.put(key, mockValue);
+
+        // Load the same block (async) — should hit cache, not call loader.
+        cacheWithPrefetch.loadMissingBlocks(testPath, 0L, 1L);
+
+        executor.shutdown();
+        assertTrue("Executor should finish", executor.awaitTermination(5, TimeUnit.SECONDS));
+
+        verify(mockLoader, never()).load(any(Path.class), anyLong(), anyLong(), anyLong());
+    }
+
+    /**
+     * Tests that the in-flight tracker is drained (size returns to 0) after a prefetch load completes.
+     */
+    public void testLoadMissingBlocksCleansUpInflightTracker() throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        PrefetchTracker prefetchTracker = new PrefetchTracker(executor);
+
+        CaffeineBlockCache<String, BlockCacheValue<String>> cacheWithPrefetch = new CaffeineBlockCache<>(
+            caffeineCache,
+            mockLoader,
+            MAX_BLOCKS,
+            prefetchTracker
+        );
+
+        Path testPath = Paths.get("/test/cleanup.dat");
+        BlockCacheValue<String> mockValue = createMockValue("test");
+
+        when(mockLoader.load(any(Path.class), anyLong(), eq(1L), eq(PREFETCH_TIMEOUT_MS))).thenReturn(new BlockCacheValue[] { mockValue });
+
+        // Load blocks (async).
+        cacheWithPrefetch.loadMissingBlocks(testPath, 0L, 1L);
+
+        // Wait for async execution to finish.
+        executor.shutdown();
+        assertTrue("Executor should finish", executor.awaitTermination(5, TimeUnit.SECONDS));
+
+        // In-flight tracker should be empty after loading.
+        assertEquals("In-flight tracker should be cleaned up", 0, prefetchTracker.size());
+    }
+
+    /**
+     * Tests the best-effort synchronous fallback when no PrefetchTracker is configured: the range is still
+     * loaded into the cache on the calling thread.
+     */
+    public void testLoadMissingBlocksWithoutTrackerLoadsSynchronously() throws Exception {
+        // blockCache from setUp() has no PrefetchTracker.
+        Path testPath = Paths.get("/test/notracker.dat");
+        BlockCacheValue<String> mockValue = createMockValue("sync");
+
+        when(mockLoader.load(any(Path.class), anyLong(), eq(1L), eq(PREFETCH_TIMEOUT_MS))).thenReturn(new BlockCacheValue[] { mockValue });
+
+        blockCache.loadMissingBlocks(testPath, 0L, 1L);
+
+        // No executor involved — the block is loaded synchronously and cached by the time the call returns.
+        BlockCacheValue<String> cached = blockCache.get(new FileBlockCacheKey(testPath, 0L));
+        assertNotNull("Block should be loaded synchronously without a tracker", cached);
+        verify(mockLoader, times(1)).load(any(Path.class), anyLong(), eq(1L), eq(PREFETCH_TIMEOUT_MS));
     }
 
     // Helper methods

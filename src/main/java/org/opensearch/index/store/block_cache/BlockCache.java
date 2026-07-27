@@ -132,6 +132,28 @@ public interface BlockCache<T> {
     Map<BlockCacheKey, BlockCacheValue<T>> loadForPrefetch(Path filePath, long startOffset, long blockCount) throws IOException;
 
     /**
+     * Prefetch a range of blocks for the Lucene {@code IndexInput.prefetch()} path.
+     *
+     * <p>Unlike {@link #loadForPrefetch} (a single synchronous bulk read used by the read-ahead worker), this
+     * method is asynchronous and fire-and-forget: the missing blocks are submitted to a dedicated prefetch
+     * executor (a {@link java.util.concurrent.ForkJoinPool}) so the calling read thread is never blocked on
+     * prefetch I/O. Blocks already cached or already being prefetched are skipped via the shared
+     * {@link PrefetchTracker}. Submissions are dropped under back-pressure rather than queued unbounded.
+     *
+     * <p>Implementations without a configured prefetch tracker/executor may load the range synchronously as a
+     * best-effort fallback.
+     *
+     * @param filePath file to read from
+     * @param startOffset starting file offset (should be block-aligned)
+     * @param blockCount number of blocks to prefetch
+     * @throws IOException if a synchronous fallback load fails
+     */
+    default void loadMissingBlocks(Path filePath, long startOffset, long blockCount) throws IOException {
+        // Default: no async prefetch support. Implementations that wire a PrefetchTracker override this.
+        loadForPrefetch(filePath, startOffset, blockCount);
+    }
+
+    /**
      * Returns cache statistics as a formatted string.
      *
      * @return string representation of cache statistics including hit/miss ratios, sizes, etc.
