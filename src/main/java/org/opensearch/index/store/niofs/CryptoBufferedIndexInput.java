@@ -45,7 +45,10 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private static final int CHUNK_SIZE = 16_384;
 
     private final FileChannel channel;
-    private final boolean isClone;
+    // Non-final because Object.clone() copies the value bitwise and clone() must
+    // reassign it to true so the clone doesn't try to close the shared channel.
+    // Same pattern Lucene's NIOFSDirectory.NIOFSIndexInput uses.
+    private boolean isClone;
     private final long off;
     private final long end;
     private final KeyResolver keyResolver;
@@ -144,6 +147,12 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     public CryptoBufferedIndexInput clone() {
         CryptoBufferedIndexInput clone = (CryptoBufferedIndexInput) super.clone();
         clone.tmpBuffer = EMPTY_BYTEBUFFER;
+        // Object.clone() is a shallow bitwise copy — the clone inherits the parent's
+        // isClone value. If we don't set this here, a clone of the root would have
+        // isClone=false and its close() would close the shared FileChannel, causing
+        // ClosedChannelException on any concurrent read via the parent or a sibling
+        // clone/slice. Matches Lucene NIOFSDirectory.NIOFSIndexInput.clone().
+        clone.isClone = true;
         return clone;
     }
 
