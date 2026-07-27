@@ -20,6 +20,7 @@ import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheBuilder;
 import org.opensearch.index.store.bufferpoolfs.RadixBlockTableRegistry;
 import org.opensearch.index.store.read_ahead.Worker;
+import org.opensearch.index.store.read_ahead.impl.NoopWorker;
 import org.opensearch.index.store.read_ahead.impl.QueuingWorker;
 import org.opensearch.index.store.read_ahead.impl.ReadAheadSizingPolicy;
 
@@ -313,22 +314,16 @@ public final class PoolBuilder {
         RadixBlockTableRegistry radixBlockTableRegistry = new RadixBlockTableRegistry();
         blockCache.setEvictionListener(radixBlockTableRegistry::onEviction);
 
-        // Calculate worker threads using principled drain-time approach
-        int threads = ReadAheadSizingPolicy.calculateWorkerThreads(readAheadQueueSize);
-
-        AtomicInteger threadId = new AtomicInteger();
-        ExecutorService readAheadExecutor = Executors.newFixedThreadPool(threads, r -> {
-            Thread t = new Thread(r, "readahead-worker-" + threadId.incrementAndGet());
-            t.setDaemon(true);
-            return t;
-        });
-        LOGGER.info("Creating shared read-ahead executor with threads={} (queue={})", threads, readAheadQueueSize);
-
-        // Create shared read-ahead worker (node-wide, single queue)
-        // Executor thread pool naturally limits concurrency - no need for separate maxRunners cap
-        // BlockCache is passed per-request to support directory-specific loaders
-        Worker sharedReadaheadWorker = new QueuingWorker(readAheadQueueSize, readAheadExecutor);
-        LOGGER.info("Created shared read-ahead worker: queueSize={} executorThreads={}", readAheadQueueSize, threads);
+        // Read-ahead is DISABLED — use a no-op worker so no threads are spawned, no queue is
+        // maintained, and no schedule() call ever queues work. Under concurrent search + peer
+        // recovery, the async QueuingWorker's lifecycle can race with shard-close: a still-live
+        // IndexInput keeps calling schedule() after the worker is closed, producing a large volume
+        // of "Attempted schedule on closed worker" DEBUG lines. Bypassing the whole path eliminates
+        // that noise and removes the race exposure. Re-enable by restoring the
+        // QueuingWorker + ExecutorService constructor below.
+        ExecutorService readAheadExecutor = null;
+        Worker sharedReadaheadWorker = new NoopWorker();
+        LOGGER.info("Read-ahead DISABLED — using NoopWorker (queueSize={}, threads=0)", readAheadQueueSize);
 
         // Start telemetry
         TelemetryThread telemetry = new TelemetryThread(segmentPool, blockCache, radixBlockTableRegistry);
