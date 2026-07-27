@@ -435,6 +435,12 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             case HYBRIDFS -> {
                 LOGGER.debug("Using HYBRIDFS directory with Direct I/O and block caching");
                 final Set<String> nioExtensions = new HashSet<>(indexSettings.getValue(IndexModule.INDEX_STORE_HYBRID_NIO_EXTENSIONS));
+                // Route stored-fields data (.fdt) through the BufferPool (Direct I/O + block cache) rather
+                // than the NIO path. The BufferPool IndexInput (CachedMemorySegmentIndexInput) implements
+                // IndexInput.prefetch() (async ForkJoinPool block loading); the NIO path does not, so with
+                // .fdt on NIO the Lucene stored-fields prefetch call hits a no-op. Removing "fdt" here lets
+                // stored-fields reads use the block cache and participate in async prefetch.
+                nioExtensions.remove("fdt");
                 BufferPoolDirectory bufferPoolDirectory = createCryptoBufferPoolFSDirectory(
                     location,
                     lockFactory,
