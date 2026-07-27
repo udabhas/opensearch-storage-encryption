@@ -68,10 +68,17 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
     );
 
     private final FileChannel channel;
-    // Non-final because Object.clone() copies the value bitwise and clone() must
-    // reassign it to true so the clone doesn't try to close the shared channel.
+    // Channel-ownership flag: true means this instance shares a FileChannel owned by another
+    // instance and must NOT close it. Set on slices and on clones (see clone()). Non-final
+    // because Object.clone() copies the value bitwise and clone() must reassign it to true.
     // Same pattern Lucene's NIOFSDirectory.NIOFSIndexInput uses.
     private boolean isClone;
+    // Slice flag: true only for sub-range windows created by slice(). Drives length():
+    // a slice reports its exact passed-in length, while a whole-file instance (root or a
+    // clone of the root) subtracts the trailing encryption footer. Kept SEPARATE from
+    // isClone so a clone (which shares the channel, isClone=true) still reports whole-file
+    // length (isSlice=false) instead of wrongly including the footer.
+    private final boolean isSlice;
     private final long off;
     private final long end;
     private final KeyResolver keyResolver;
@@ -145,6 +152,7 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.end = fc.size();
         this.keyResolver = keyResolver;
         this.isClone = false;
+        this.isSlice = false;
         this.filePath = filePath;
         this.normalizedFilePath = EncryptionMetadataCache.normalizePath(filePath);
         this.encryptionMetadataCache = encryptionMetadataCache;
@@ -195,6 +203,7 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.off = off;
         this.end = off + length;
         this.isClone = true;
+        this.isSlice = true;
         this.keyResolver = keyResolver;
         this.keySpec = keySpec;
         this.footerLength = footerLength;
@@ -265,11 +274,15 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     @Override
     public long length() {
-        // Exclude footer from logical file length (only for main file, not slices)
-        if (isClone) {
-            return end - off;  // Slices use exact length passed in
+        // Footer handling is driven by isSlice (NOT isClone): a slice was already given an
+        // exact sub-range length, so report it verbatim. A whole-file instance — the root OR
+        // a clone of the root — must subtract the trailing encryption footer so callers only
+        // see logical data length. (A clone has isClone=true for channel-ownership but
+        // isSlice=false, so it correctly lands in the footer-excluding branch here.)
+        if (isSlice) {
+            return end - off;  // slice: exact length passed in
         } else {
-            return end - off - footerLength;  // Main file excludes variable footer
+            return end - off - footerLength;  // whole file (root or clone): exclude footer
         }
     }
 
