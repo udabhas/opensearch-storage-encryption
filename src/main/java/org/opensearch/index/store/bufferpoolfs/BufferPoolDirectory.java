@@ -36,6 +36,7 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.niofs.CryptoOutputStreamIndexOutput;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.index.store.pool.Pool;
@@ -83,6 +84,7 @@ public class BufferPoolDirectory extends FSDirectory {
     private final Provider provider;
     private final Path dirPath;
     private final byte[] masterKeyBytes;
+    private final KeyResolver keyResolver;
     private final EncryptionMetadataCache encryptionMetadataCache;
     private final RadixBlockTableRegistry radixBlockTableRegistry;
 
@@ -120,6 +122,7 @@ public class BufferPoolDirectory extends FSDirectory {
         this.readAheadworker = worker;
         this.provider = provider;
         this.dirPath = getDirectory();
+        this.keyResolver = keyResolver;
         this.masterKeyBytes = keyResolver.getDataKey().getEncoded();
         this.encryptionMetadataCache = encryptionMetadataCache;
         this.radixBlockTableRegistry = radixBlockTableRegistry;
@@ -173,14 +176,18 @@ public class BufferPoolDirectory extends FSDirectory {
             Path path = directory.resolve(name);
             OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-            return new BufferIOWithCaching(
+            // Use the non-caching encrypted output: encrypts data to disk without acquiring pool
+            // segments or putting plaintext blocks into the cache. The read path fills the cache
+            // on demand (first read after write pays a disk read + decrypt).
+            // This eliminates pool exhaustion, cache thrashing, and GC storms during writes.
+            return new CryptoOutputStreamIndexOutput(
                 name,
                 path,
                 fos,
-                masterKeyBytes,
-                this.memorySegmentPool,
-                this.blockCache,
+                this.keyResolver,
                 this.provider,
+                EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM,
+                path,
                 this.encryptionMetadataCache
             );
         } catch (Exception e) {
@@ -196,14 +203,14 @@ public class BufferPoolDirectory extends FSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new BufferIOWithCaching(
+        return new CryptoOutputStreamIndexOutput(
             name,
             path,
             fos,
-            masterKeyBytes,
-            this.memorySegmentPool,
-            this.blockCache,
+            this.keyResolver,
             this.provider,
+            EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM,
+            path,
             this.encryptionMetadataCache
         );
     }
