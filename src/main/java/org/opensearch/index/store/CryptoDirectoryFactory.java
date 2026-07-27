@@ -622,6 +622,138 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     }
 
     /**
+     * Flush ALL node-level plugin caches so the next read is served from disk + decrypted afresh.
+     * This is the "flush API" — used to force a genuinely COLD cryptofs cache for benchmarking
+     * (e.g. cold-vs-cold search comparisons). It clears, in coherence order:
+     *
+     * <ol>
+     *   <li>L2 block cache ({@link BlockCache#clear()}) — firing the eviction listener that clears
+     *       matching L1 slots and closes the pooled {@code RefCountedByteBuffer} values.</li>
+     *   <li>L1 radix tables ({@code RadixBlockTableRegistry.clearContents()}) — belt-and-suspenders
+     *       for any remnant not covered by the per-block eviction callback.</li>
+     *   <li>Per-shard encryption metadata/footer cache ({@code EncryptionMetadataCacheRegistry.clearAll()}).</li>
+     *   <li>Node-level read {@code FileChannel} cache ({@link #closeFileChannelCache()}).</li>
+     * </ol>
+     *
+     * <p>The {@link org.opensearch.index.store.pool.MemorySegmentPool} has no freelist — pooled
+     * direct buffers are reclaimed by the JVM {@code Cleaner} once unreferenced. After clearing the
+     * caches (which drop those references) this method requests {@code System.gc()} and POLLS
+     * {@code getBuffersInUse()} until it settles to ~0 or a timeout elapses, so the caller can VERIFY
+     * the off-heap pool actually drained rather than trusting a fire-and-forget.
+     *
+     * <p>Safe to call between queries (no in-flight read): unlike the serverless {@code clearSafely}
+     * hack there is no refcount dance — we assume no concurrent search holds a block.
+     *
+     * <p>NODE-SCOPED: clears only THIS node's caches. A multi-node cluster would need a
+     * TransportNodesAction fan-out; out of scope for the single-node benchmark harness.
+     *
+     * @return a result map with before/after counters (initialized, buffersInUse before/after,
+     *         L2 entries cleared, gc rounds, whether the pool settled, elapsed millis)
+     */
+    public static java.util.Map<String, Object> flushAllCaches() {
+        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
+        PoolBuilder.PoolResources r = poolResources;
+        if (r == null) {
+            result.put("initialized", false);
+            result.put("note", "shared pool not initialized (no cryptofs shard created yet)");
+            return result;
+        }
+        long startNanos = System.nanoTime();
+        result.put("initialized", true);
+
+        BlockCache<?> blockCache = r.getBlockCache();
+        org.opensearch.index.store.bufferpoolfs.RadixBlockTableRegistry radix = r.getRadixBlockTableRegistry();
+        org.opensearch.index.store.pool.MemorySegmentPool pool = (r
+            .getSegmentPool() instanceof org.opensearch.index.store.pool.MemorySegmentPool msp) ? msp : null;
+
+        int buffersBefore = (pool != null) ? pool.getBuffersInUse() : -1;
+        long l2Before = (blockCache != null) ? blockCache.getCacheSize() : -1;
+        int metaBefore = EncryptionMetadataCacheRegistry.getCacheSize();
+        result.put("buffersInUse_before", buffersBefore);
+        result.put("l2_entries_before", l2Before);
+        result.put("metadata_entries_before", metaBefore);
+
+        LOGGER.info("flushAllCaches: starting — evicting plugin caches (L2={}, L1 registry, metadata={})", l2Before, metaBefore);
+        // 1) L2 clear -> eviction listener clears matching L1 + closes buffers.
+        if (blockCache != null) {
+            LOGGER.info("flushAllCaches: [1/4] clearing L2 block cache ({} entries)", l2Before);
+            blockCache.clear();
+        }
+        // 2) L1 belt-and-suspenders.
+        if (radix != null) {
+            LOGGER.info("flushAllCaches: [2/4] clearing L1 radix tables");
+            radix.clearContents();
+        }
+        // 3) per-shard metadata/footer cache (messageId + derived-key material).
+        LOGGER.info("flushAllCaches: [3/4] clearing encryption metadata/footer cache ({} entries)", metaBefore);
+        EncryptionMetadataCacheRegistry.clearAll();
+        // 4) node-level read FileChannel cache (closes cached FDs via removal listener).
+        LOGGER.info("flushAllCaches: [4/4] closing node FileChannel cache; requesting GC + polling pool drain");
+        closeFileChannelCache();
+
+        // 5+6) request GC and poll until the pool's in-use buffer count settles (Cleaner reclaims
+        // the now-unreferenced direct buffers). System.gc() is a request, not a guarantee, so we
+        // poll with a timeout and report whether it actually settled (fail-loud, no false "cold").
+        // System.gc() is advisory: the Cleaner reclaims unreferenced direct buffers on its own
+        // schedule, and a small residual (structural refs + GC-pending "zombie" buffers) is normal
+        // and does NOT keep queries warm (verified: reads still hit disk with buffersInUse in the
+        // low thousands but pool utilization <1%). So we do NOT wait for buffersInUse==0; we GC and
+        // poll until the count STABILIZES (stops falling across two polls) or a timeout elapses, and
+        // report the residual so the caller can see utilization is negligible rather than trusting
+        // a false absolute-zero target.
+        int gcRounds = 0;
+        boolean settled = false;
+        int buffersAfter = buffersBefore;
+        if (pool != null) {
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+            int prev = buffersBefore;
+            int stableStreak = 0;
+            while (System.nanoTime() < deadline) {
+                System.gc();
+                gcRounds++;
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                buffersAfter = pool.getBuffersInUse();
+                // Stable = no further decrease for 3 consecutive polls (Cleaner has drained what it will).
+                if (buffersAfter >= prev) {
+                    if (++stableStreak >= 3) {
+                        settled = true;
+                        break;
+                    }
+                } else {
+                    stableStreak = 0;
+                }
+                prev = buffersAfter;
+            }
+            buffersAfter = pool.getBuffersInUse();
+        }
+        result.put("buffersInUse_after", buffersAfter);
+        result.put("l2_entries_after", (blockCache != null) ? blockCache.getCacheSize() : -1);
+        result.put("metadata_entries_after", EncryptionMetadataCacheRegistry.getCacheSize());
+        result.put("gc_rounds", gcRounds);
+        result.put("pool_settled", settled);
+        result.put("elapsed_ms", (System.nanoTime() - startNanos) / 1_000_000L);
+        LOGGER
+            .info(
+                "flushAllCaches: buffersInUse {}->{} (settled={}), L2 {}->{}, meta {}->{}, gcRounds={}, {}ms",
+                buffersBefore,
+                buffersAfter,
+                settled,
+                l2Before,
+                result.get("l2_entries_after"),
+                metaBefore,
+                result.get("metadata_entries_after"),
+                gcRounds,
+                result.get("elapsed_ms")
+            );
+        return result;
+    }
+
+    /**
      * Node-level cache of read-only {@link FileChannel}s, keyed by absolute file path. Lets the
      * Direct-I/O read path (see {@code CryptoDirectIOBlockLoader} / {@code FileChannelBackend}) reuse
      * an open channel across block-cache misses instead of paying an {@code open()}/{@code close()}

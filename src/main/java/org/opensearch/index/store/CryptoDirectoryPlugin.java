@@ -283,6 +283,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
             .asList(
                 new org.opensearch.index.store.rest.RestRegisterCryptoAction(),
                 new org.opensearch.index.store.rest.RestUnregisterCryptoAction(),
+                new org.opensearch.index.store.rest.RestFlushCacheAction(),
                 new RestGetIndexCountForKeyAction()
             );
     }
