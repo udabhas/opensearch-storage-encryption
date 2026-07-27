@@ -181,6 +181,24 @@ public class RadixBlockTableRegistry {
     }
 
     /**
+     * Human-readable single-line summary of L1 (RadixBlockTable) cache effectiveness for the 10s
+     * log-line telemetry path in {@code BufferPoolDirectory.logCacheAndPoolStats}. Counters are
+     * lifetime cumulative sums, matching the sibling {@code CaffeineBlockCache.cacheStats} and
+     * {@code MemorySegmentPool.poolStats} log-line format; the per-interval delta view is emitted
+     * separately via {@link #recordStats()} to the OTLP metrics path.
+     */
+    public String l1Stats() {
+        long hits = l1Hits.sum();
+        long misses = l1Misses.sum();
+        long total = hits + misses;
+        double hitRate = total > 0 ? (double) hits / total * 100.0 : 0.0;
+        return String.format(
+            "L1[tables=%d, hits=%d, misses=%d, hitRate=%.2f%%, evictions=%d]",
+            tables.size(), hits, misses, hitRate, l1Evictions.sum()
+        );
+    }
+
+    /**
      * Emit L1 (RadixBlockTable) cache-effectiveness metrics on the telemetry tick. These counters are
      * incremented on every read (hit/miss) and every L2-eviction callback but are not otherwise
      * surfaced; a dropping L1 hit rate is the leading indicator of the cold-segment decrypt latency the

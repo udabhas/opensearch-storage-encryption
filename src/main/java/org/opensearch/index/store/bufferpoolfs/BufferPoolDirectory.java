@@ -399,6 +399,12 @@ public class BufferPoolDirectory extends FSDirectory {
                 LOGGER.info("Pool[{}]", msp.poolStats());
             }
 
+            // L1 (RadixBlockTable) stats — hit rate is the leading indicator of cold-segment
+            // decrypt latency. Emitted alongside Cache[ and Pool[ for one-line telemetry view.
+            if (radixBlockTableRegistry != null) {
+                LOGGER.info("{}", radixBlockTableRegistry.l1Stats());
+            }
+
         } catch (Exception e) {
             LOGGER.warn("Failed to log cache/pool stats", e);
         }
