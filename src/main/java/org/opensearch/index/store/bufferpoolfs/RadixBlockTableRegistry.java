@@ -192,10 +192,15 @@ public class RadixBlockTableRegistry {
         long misses = l1Misses.sum();
         long total = hits + misses;
         double hitRate = total > 0 ? (double) hits / total * 100.0 : 0.0;
-        return String.format(
-            "L1[tables=%d, hits=%d, misses=%d, hitRate=%.2f%%, evictions=%d]",
-            tables.size(), hits, misses, hitRate, l1Evictions.sum()
-        );
+        return String
+            .format(
+                "L1[tables=%d, hits=%d, misses=%d, hitRate=%.2f%%, evictions=%d]",
+                tables.size(),
+                hits,
+                misses,
+                hitRate,
+                l1Evictions.sum()
+            );
     }
 
     /**

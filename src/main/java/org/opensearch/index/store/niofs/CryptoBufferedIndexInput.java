@@ -61,11 +61,16 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
      * block-cache overhead worse than direct NIO decrypt. These bypass the cache even in
      * randomAccessSlice().
      */
-    private static final Set<String> RANDOM_ACCESS_BYPASS_EXTS = Set.of(
-        "dvd", "dvm",         // doc-values (data + metadata)
-        "kdd", "kdi", "kdm",  // points / BKD
-        "nvd", "nvm"          // norms
-    );
+    private static final Set<String> RANDOM_ACCESS_BYPASS_EXTS = Set
+        .of(
+            "dvd",
+            "dvm",         // doc-values (data + metadata)
+            "kdd",
+            "kdi",
+            "kdm",  // points / BKD
+            "nvd",
+            "nvm"          // norms
+        );
 
     private final FileChannel channel;
     // Channel-ownership flag: true means this instance shares a FileChannel owned by another
@@ -360,10 +365,12 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
     // ---- randomAccessSlice: selective block cache usage for random access patterns ----
 
     private static boolean isRandomAccessBypassFile(Path path) {
-        if (path == null) return false;
+        if (path == null)
+            return false;
         String name = path.getFileName().toString();
         int dot = name.lastIndexOf('.');
-        if (dot < 0) return false;
+        if (dot < 0)
+            return false;
         return RANDOM_ACCESS_BYPASS_EXTS.contains(name.substring(dot + 1));
     }
 
@@ -400,8 +407,8 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
             // Lazy acquire: only files that actually use randomAccessSlice get a RadixBlockTable.
             // Sequential-only files never reach here and pay zero overhead.
             if (radixBlockTable == null && radixBlockTableRegistry != null) {
-                radixBlockTable = (RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>>)
-                    (RadixBlockTable<?>) radixBlockTableRegistry.acquire(absPath);
+                radixBlockTable = (RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>>) (RadixBlockTable<?>) radixBlockTableRegistry
+                    .acquire(absPath);
             }
 
             // Pre-load missing blocks in the range
@@ -409,8 +416,16 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
             // Create a fallback slice for cross-block reads or cache failures
             IndexInput fallback = slice("randomaccess-fallback", offset, length);
-            return new CachedRandomAccessInput(absPath, fileOffset, length, blockMask,
-                blockCache, radixBlockTable, radixBlockTableRegistry, fallback);
+            return new CachedRandomAccessInput(
+                absPath,
+                fileOffset,
+                length,
+                blockMask,
+                blockCache,
+                radixBlockTable,
+                radixBlockTableRegistry,
+                fallback
+            );
         } catch (IOException e) {
             return super.randomAccessSlice(offset, length);
         }
@@ -436,7 +451,10 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         private final IndexInput diskFallback;
 
         CachedRandomAccessInput(
-            Path path, long base, long len, long mask,
+            Path path,
+            long base,
+            long len,
+            long mask,
             BlockCache<RefCountedByteBuffer> cache,
             RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>> radixTable,
             RadixBlockTableRegistry registry,
@@ -461,7 +479,8 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         public byte readByte(long pos) throws IOException {
             try {
                 MemorySegment seg = pinBlock(pos, Byte.BYTES);
-                if (seg == null) return readFallbackByte(pos);
+                if (seg == null)
+                    return readFallbackByte(pos);
                 long offsetInBlock = (base + pos) & mask;
                 return seg.get(LAYOUT_BYTE, offsetInBlock);
             } catch (IOException e) {
@@ -473,7 +492,8 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         public short readShort(long pos) throws IOException {
             try {
                 MemorySegment seg = pinBlock(pos, Short.BYTES);
-                if (seg == null) return readFallbackShort(pos);
+                if (seg == null)
+                    return readFallbackShort(pos);
                 long offsetInBlock = (base + pos) & mask;
                 if (offsetInBlock + Short.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
                     return readFallbackShort(pos);
@@ -488,7 +508,8 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         public int readInt(long pos) throws IOException {
             try {
                 MemorySegment seg = pinBlock(pos, Integer.BYTES);
-                if (seg == null) return readFallbackInt(pos);
+                if (seg == null)
+                    return readFallbackInt(pos);
                 long offsetInBlock = (base + pos) & mask;
                 if (offsetInBlock + Integer.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
                     return readFallbackInt(pos);
@@ -503,7 +524,8 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         public long readLong(long pos) throws IOException {
             try {
                 MemorySegment seg = pinBlock(pos, Long.BYTES);
-                if (seg == null) return readFallbackLong(pos);
+                if (seg == null)
+                    return readFallbackLong(pos);
                 long offsetInBlock = (base + pos) & mask;
                 if (offsetInBlock + Long.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
                     return readFallbackLong(pos);
@@ -527,10 +549,12 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
             if (radixTable != null) {
                 BlockCacheValue<RefCountedByteBuffer> entry = radixTable.get(blockId);
                 if (entry != null) {
-                    if (registry != null) registry.recordHit();
+                    if (registry != null)
+                        registry.recordHit();
                     return entry.value().segment();
                 }
-                if (registry != null) registry.recordMiss();
+                if (registry != null)
+                    registry.recordMiss();
             }
 
             // L2 lookup

@@ -36,10 +36,10 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
-import org.opensearch.index.store.niofs.CryptoBufferedIndexInput;
-import org.opensearch.index.store.niofs.CryptoOutputStreamIndexOutput;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
+import org.opensearch.index.store.niofs.CryptoBufferedIndexInput;
+import org.opensearch.index.store.niofs.CryptoOutputStreamIndexOutput;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
@@ -148,12 +148,12 @@ public class BufferPoolDirectory extends FSDirectory {
 
             // Routing by IOContext:
             // - MERGE: sequential bulk reads with occasional random access (term dict lookups).
-            //   Use NIO decrypt for sequential reads; randomAccessSlice() uses block cache.
+            // Use NIO decrypt for sequential reads; randomAccessSlice() uses block cache.
             // - READONCE: one-pass sequential streaming (snapshot source, recovery streaming).
-            //   Use NIO decrypt with no cache — data is never re-read.
+            // Use NIO decrypt with no cache — data is never re-read.
             // - DEFAULT: search queries and recovery source reads on started shards.
-            //   Use full BufferPool (L1→L2→disk + read-ahead). Recovery source with DEFAULT
-            //   reads the same files being searched, so caching them is not wasteful.
+            // Use full BufferPool (L1→L2→disk + read-ahead). Recovery source with DEFAULT
+            // reads the same files being searched, so caching them is not wasteful.
             if (context.context() == IOContext.Context.MERGE) {
                 return openNIOInput(file, context, false);
             }
