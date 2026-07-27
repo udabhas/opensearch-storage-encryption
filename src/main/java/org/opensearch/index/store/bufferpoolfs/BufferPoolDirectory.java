@@ -36,6 +36,7 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.niofs.CryptoBufferedIndexInput;
 import org.opensearch.index.store.niofs.CryptoOutputStreamIndexOutput;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
@@ -145,7 +146,22 @@ public class BufferPoolDirectory extends FSDirectory {
                 throw new IOException("Cannot open empty file with DirectIO: " + file);
             }
 
-            // Calculate content length with OSEF validation
+            // Routing by IOContext:
+            // - MERGE: sequential bulk reads with occasional random access (term dict lookups).
+            //   Use NIO decrypt for sequential reads; randomAccessSlice() uses block cache.
+            // - READONCE: one-pass sequential streaming (snapshot source, recovery streaming).
+            //   Use NIO decrypt with no cache — data is never re-read.
+            // - DEFAULT: search queries and recovery source reads on started shards.
+            //   Use full BufferPool (L1→L2→disk + read-ahead). Recovery source with DEFAULT
+            //   reads the same files being searched, so caching them is not wasteful.
+            if (context.context() == IOContext.Context.MERGE) {
+                return openNIOInput(file, context, false);
+            }
+            if (isReadOnce(context)) {
+                return openNIOInput(file, context, true);
+            }
+
+            // DEFAULT path: full block cache for search reads (and recovery source on started shards)
             long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
 
             ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker, blockCache);
@@ -167,6 +183,42 @@ public class BufferPoolDirectory extends FSDirectory {
             CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_INPUT_ERROR);
             throw e;
         }
+    }
+
+    /**
+     * Opens a file via the NIO decrypt path (CryptoBufferedIndexInput).
+     * Sequential reads bypass the pool entirely. If {@code disableCache} is false,
+     * randomAccessSlice() can still use the shared block cache for random reads.
+     */
+    private IndexInput openNIOInput(Path file, IOContext context, boolean disableCache) throws IOException {
+        FileChannel fc = FileChannel.open(file, StandardOpenOption.READ);
+        boolean success = false;
+        try {
+            BlockCache<RefCountedByteBuffer> cacheForRAS = disableCache ? null : blockCache;
+            RadixBlockTableRegistry registryForRAS = disableCache ? null : radixBlockTableRegistry;
+
+            IndexInput input = new CryptoBufferedIndexInput(
+                "CryptoBufferedIndexInput(path=\"" + file + "\")",
+                fc,
+                context,
+                this.keyResolver,
+                file,
+                this.encryptionMetadataCache,
+                cacheForRAS,
+                registryForRAS
+            );
+            success = true;
+            return input;
+        } finally {
+            if (!success) {
+                fc.close();
+            }
+        }
+    }
+
+    /** Check if this context represents a READONCE (sequential one-pass) read. */
+    private static boolean isReadOnce(IOContext context) {
+        return context == IOContext.READONCE;
     }
 
     @Override
