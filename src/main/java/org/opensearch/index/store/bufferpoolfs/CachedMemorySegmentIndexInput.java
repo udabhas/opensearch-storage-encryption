@@ -275,11 +275,15 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      */
     private BlockCacheValue<RefCountedByteBuffer> acquireBlock(long blockOffset) throws IOException {
         final long blockId = blockOffset >>> CACHE_BLOCK_SIZE_POWER;
+        // Query-profiler handle (null unless a ?profile=true query is scoring on this thread).
+        final org.opensearch.index.store.profile.CryptoQueryProfile prof = org.opensearch.index.store.profile.CryptoQueryProfile.current();
 
         // ---- L1 lookup: two plain array reads, no fences, no CAS ----
         BlockCacheValue<RefCountedByteBuffer> entry = radixBlockTable.get(blockId);
         if (entry != null) {
             lastAccessWasCacheHit = true;
+            if (prof != null)
+                prof.incL1Hits();
             if (radixBlockTableRegistry != null)
                 radixBlockTableRegistry.recordHit();
             // Damp signal: every 4096th L1 hit, touch L2 so Caffeine sees access frequency
@@ -288,6 +292,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             }
             return entry;
         }
+        if (prof != null)
+            prof.incL1Misses();
         if (radixBlockTableRegistry != null)
             radixBlockTableRegistry.recordMiss();
         // ---- L2 lookup + disk load ----
@@ -295,6 +301,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // Try L2 hit
         BlockCacheValue<RefCountedByteBuffer> v = blockCache.get(key);
         if (v != null) {
+            if (prof != null)
+                prof.incL2Hits();
             // Never insert a transient (degraded-mode, non-pooled, non-cacheable) buffer into the L1
             // RadixBlockTable: it is not accounted in the pool's buffersInUse, and an L1 reference would
             // pin its direct memory indefinitely (the Cleaner can't free it while L1 holds it), re-creating
@@ -306,6 +314,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             return v;
         }
         // L2 miss — load from disk (deduped by Caffeine)
+        if (prof != null)
+            prof.incL2Misses();
         BlockCacheValue<RefCountedByteBuffer> loaded = blockCache.getOrLoad(key);
         if (loaded != null) {
             if (!loaded.isTransient()) {

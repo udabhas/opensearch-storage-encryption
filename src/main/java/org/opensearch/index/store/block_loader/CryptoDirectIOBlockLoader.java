@@ -113,10 +113,24 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
         int fsBlockSize = Math.toIntExact(Files.getFileStore(filePath).getBlockSize());
 
         try (Arena arena = Arena.ofConfined()) {
+            // Query-profiler handle (null unless a ?profile=true query is scoring on this thread).
+            final org.opensearch.index.store.profile.CryptoQueryProfile prof = org.opensearch.index.store.profile.CryptoQueryProfile
+                .current();
+            final org.opensearch.search.profile.Timer directIoTimer = (prof != null) ? prof.directIoReadTimer() : null;
             // Read via the shared FileChannel backend (node-level cached, positional Direct I/O reads).
             // Reusing the open channel across block-cache misses avoids an open()/close() syscall per load.
-            MemorySegment readBytes = readWithZeroByteRetry(filePath, startOffset, readLength, arena, fsBlockSize);
+            if (directIoTimer != null)
+                directIoTimer.start();
+            MemorySegment readBytes;
+            try {
+                readBytes = readWithZeroByteRetry(filePath, startOffset, readLength, arena, fsBlockSize);
+            } finally {
+                if (directIoTimer != null)
+                    directIoTimer.stop();
+            }
             long bytesRead = readBytes.byteSize();
+            if (prof != null)
+                prof.addBytesRead(bytesRead);
 
             String normalizedPath = filePath.toAbsolutePath().normalize().toString();
             byte[] masterKey = keyResolver.getDataKey().getEncoded();
@@ -126,16 +140,25 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             // straight from THIS footer rather than re-fetching via the path-based getOrLoadMetadata: a
             // re-fetch would re-stat the name and could bind this read's footer to a concurrently-recreated
             // inode (TOCTOU). The footer here is authoritative for the bytes we just read.
-            EncryptionFooter footer = readFooterFromDisk(filePath, masterKey);
-            byte[] messageId = footer.getMessageId();
-            byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveFileKey(masterKey, messageId);
+            final org.opensearch.search.profile.Timer footerTimer = (prof != null) ? prof.footerHkdfTimer() : null;
+            if (footerTimer != null)
+                footerTimer.start();
+            EncryptionFooter footer;
+            byte[] messageId;
+            byte[] fileKey;
+            try {
+                footer = readFooterFromDisk(filePath, masterKey);
+                messageId = footer.getMessageId();
+                fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveFileKey(masterKey, messageId);
+            } finally {
+                if (footerTimer != null)
+                    footerTimer.stop();
+            }
 
             // Use frame-based decryption with derived file key.
             // Query-profiler: time the decrypt into the current leaf's crypto_decrypt Timer (no-op when
             // not profiling — current() returns null).
-            org.opensearch.index.store.profile.CryptoQueryProfile cryptoProfile = org.opensearch.index.store.profile.CryptoQueryProfile
-                .current();
-            org.opensearch.search.profile.Timer decryptTimer = (cryptoProfile != null) ? cryptoProfile.decryptTimer() : null;
+            org.opensearch.search.profile.Timer decryptTimer = (prof != null) ? prof.decryptTimer() : null;
             if (decryptTimer != null) {
                 decryptTimer.start();
             }
@@ -186,8 +209,13 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                     // the GC heap and cannot raise the direct-memory OOM. (This differs from the write path,
                     // which on pool-acquire failure allocates nothing and simply skips the cache-warm.)
                     RefCountedByteBuffer handle;
+                    final org.opensearch.search.profile.Timer poolWaitTimer = (prof != null) ? prof.poolWaitTimer() : null;
+                    if (poolWaitTimer != null)
+                        poolWaitTimer.start();
                     try {
                         handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
+                        if (poolWaitTimer != null)
+                            poolWaitTimer.stop();
                     } catch (InterruptedException e) {
                         releaseHandles(result, blockIndex);
                         Thread.currentThread().interrupt();
@@ -203,6 +231,10 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                         // uncached reads under memory pressure look identical to a healthy one, hiding the
                         // exact saturation signal needed during an incident.
                         // Bare call — the metrics singleton is initialized at node startup.
+                        if (poolWaitTimer != null)
+                            poolWaitTimer.stop();
+                        if (prof != null)
+                            prof.incDegradedReads();
                         CryptoMetricsService.getInstance().recordDegradedRead();
                         long nowMs = System.currentTimeMillis();
                         long lastWarn = DEGRADED_WARN_GATE.get();
@@ -239,6 +271,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                     }
 
                     result[blockIndex++] = handle;  // Store the handle, not the segment
+                    if (prof != null)
+                        prof.incBlocksDecrypted();
                     bytesCopied += toCopy;
                 }
             } catch (IOException e) {

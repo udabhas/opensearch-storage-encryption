@@ -89,12 +89,16 @@ public class CryptoDirectoryPlugin extends Plugin
      */
     @Override
     public java.util.Optional<SearchPlugin.ProfileMetricsProvider> getQueryProfileMetricsProvider() {
-        return java.util.Optional
-            .of(
-                (searchContext, query) -> java.util.List.<java.util.function.Supplier<ProfileMetric>>of(
-                    () -> new Timer(CryptoProfileNames.DECRYPT)
-                )
-            );
+        return java.util.Optional.of((searchContext, query) -> {
+            java.util.List<java.util.function.Supplier<ProfileMetric>> suppliers = new java.util.ArrayList<>();
+            for (String t : CryptoProfileNames.TIMERS) {
+                suppliers.add(() -> new Timer(t));
+            }
+            for (String c : CryptoProfileNames.COUNTERS) {
+                suppliers.add(() -> new org.opensearch.index.store.profile.CryptoCounterMetric(c));
+            }
+            return suppliers;
+        });
     }
 
     private static final Logger log = LogManager.getLogger(CryptoDirectoryPlugin.class);

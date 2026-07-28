@@ -6,20 +6,18 @@ package org.opensearch.index.store.profile;
 
 import org.opensearch.search.profile.AbstractProfileBreakdown;
 import org.opensearch.search.profile.ProfileBreakdownHolder;
+import org.opensearch.search.profile.ProfileMetric;
 import org.opensearch.search.profile.Timer;
 
 /**
  * Per-query-node accessor for the storage-encryption profiler metrics.
  *
- * <p>The plugin registers its {@link org.opensearch.search.profile.ProfileMetric}s (e.g. a
- * {@code crypto_decrypt} {@link Timer}) via {@code SearchPlugin.getQueryProfileMetricsProvider()};
- * the core creates one metric-set per (query-node, leaf) breakdown. During leaf scoring,
+ * <p>The plugin registers its metrics via {@code SearchPlugin.getQueryProfileMetricsProvider()}; the
+ * core creates one metric-set per (query-node, leaf) breakdown. During leaf scoring,
  * {@link ProfileBreakdownHolder} exposes that breakdown on the search thread. Deep read-path code
- * calls {@link #current()} to get a handle (null when not profiling) and records into the timers/
- * counters it needs.
+ * calls {@link #current()} (null when not profiling) and records into the timers/counters by name.
  *
- * <p>This is intentionally thin: it just looks up our metrics by name in the current breakdown.
- * Extendable — add a getter here per new metric and one call at the new cost center.
+ * <p>Extendable: add an accessor here per new metric and one record call at the new cost center.
  */
 public final class CryptoQueryProfile {
 
@@ -29,18 +27,79 @@ public final class CryptoQueryProfile {
         this.breakdown = breakdown;
     }
 
-    /**
-     * @return a handle to the current leaf's crypto profile, or {@code null} when not profiling
-     *         (no active breakdown on this thread).
-     */
+    /** @return a handle to the current leaf's crypto profile, or {@code null} when not profiling. */
     public static CryptoQueryProfile current() {
         AbstractProfileBreakdown b = ProfileBreakdownHolder.get();
         return b == null ? null : new CryptoQueryProfile(b);
     }
 
-    /** @return the {@code crypto_decrypt} Timer for this node, or {@code null} if not registered. */
-    public Timer decryptTimer() {
-        var m = breakdown.getMetric(CryptoProfileNames.DECRYPT);
+    private Timer timer(String name) {
+        ProfileMetric m = breakdown.getMetric(name);
         return (m instanceof Timer t) ? t : null;
+    }
+
+    private CryptoCounterMetric counter(String name) {
+        ProfileMetric m = breakdown.getMetric(name);
+        return (m instanceof CryptoCounterMetric c) ? c : null;
+    }
+
+    // ---- Timers ----
+    public Timer decryptTimer() {
+        return timer(CryptoProfileNames.DECRYPT);
+    }
+
+    public Timer directIoReadTimer() {
+        return timer(CryptoProfileNames.DIRECTIO_READ);
+    }
+
+    public Timer footerHkdfTimer() {
+        return timer(CryptoProfileNames.FOOTER_HKDF);
+    }
+
+    public Timer poolWaitTimer() {
+        return timer(CryptoProfileNames.POOL_WAIT);
+    }
+
+    // ---- Counters ----
+    public void incL1Hits() {
+        CryptoCounterMetric c = counter(CryptoProfileNames.L1_HITS);
+        if (c != null)
+            c.increment();
+    }
+
+    public void incL1Misses() {
+        CryptoCounterMetric c = counter(CryptoProfileNames.L1_MISSES);
+        if (c != null)
+            c.increment();
+    }
+
+    public void incL2Hits() {
+        CryptoCounterMetric c = counter(CryptoProfileNames.L2_HITS);
+        if (c != null)
+            c.increment();
+    }
+
+    public void incL2Misses() {
+        CryptoCounterMetric c = counter(CryptoProfileNames.L2_MISSES);
+        if (c != null)
+            c.increment();
+    }
+
+    public void incBlocksDecrypted() {
+        CryptoCounterMetric c = counter(CryptoProfileNames.BLOCKS_DECRYPTED);
+        if (c != null)
+            c.increment();
+    }
+
+    public void addBytesRead(long n) {
+        CryptoCounterMetric c = counter(CryptoProfileNames.BYTES_READ);
+        if (c != null)
+            c.add(n);
+    }
+
+    public void incDegradedReads() {
+        CryptoCounterMetric c = counter(CryptoProfileNames.DEGRADED_READS);
+        if (c != null)
+            c.increment();
     }
 }
