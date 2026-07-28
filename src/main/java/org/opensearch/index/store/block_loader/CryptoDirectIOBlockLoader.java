@@ -130,19 +130,33 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             byte[] messageId = footer.getMessageId();
             byte[] fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveFileKey(masterKey, messageId);
 
-            // Use frame-based decryption with derived file key
-            MemorySegmentDecryptor
-                .decryptInPlaceFrameBased(
-                    readBytes.address(),
-                    readBytes.byteSize(),
-                    fileKey,                                    // Derived file key (matches write path)
-                    masterKey,                                  // Master key for IV computation
-                    messageId,                                  // Message ID from footer
-                    org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
-                    startOffset,                                 // File offset
-                    filePath.toAbsolutePath().normalize().toString(),
-                    encryptionMetadataCache
-                );
+            // Use frame-based decryption with derived file key.
+            // Query-profiler: time the decrypt into the current leaf's crypto_decrypt Timer (no-op when
+            // not profiling — current() returns null).
+            org.opensearch.index.store.profile.CryptoQueryProfile cryptoProfile = org.opensearch.index.store.profile.CryptoQueryProfile
+                .current();
+            org.opensearch.search.profile.Timer decryptTimer = (cryptoProfile != null) ? cryptoProfile.decryptTimer() : null;
+            if (decryptTimer != null) {
+                decryptTimer.start();
+            }
+            try {
+                MemorySegmentDecryptor
+                    .decryptInPlaceFrameBased(
+                        readBytes.address(),
+                        readBytes.byteSize(),
+                        fileKey,                                    // Derived file key (matches write path)
+                        masterKey,                                  // Master key for IV computation
+                        messageId,                                  // Message ID from footer
+                        org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
+                        startOffset,                                 // File offset
+                        filePath.toAbsolutePath().normalize().toString(),
+                        encryptionMetadataCache
+                    );
+            } finally {
+                if (decryptTimer != null) {
+                    decryptTimer.stop();
+                }
+            }
 
             if (bytesRead == 0) {
                 throw new java.io.EOFException("Unexpected EOF or empty read at offset " + startOffset + " for file " + filePath);

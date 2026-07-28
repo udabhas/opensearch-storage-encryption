@@ -43,6 +43,7 @@ import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.pool.PoolSizeCalculator;
+import org.opensearch.index.store.profile.CryptoProfileNames;
 import org.opensearch.index.store.rest.*;
 import org.opensearch.index.store.rest.RestGetIndexCountForKeyAction;
 import org.opensearch.indices.RemoteStoreSettings;
@@ -51,11 +52,14 @@ import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.EnginePlugin;
 import org.opensearch.plugins.IndexStorePlugin;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.plugins.SearchPlugin;
 import org.opensearch.plugins.TelemetryAwarePlugin;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.rest.RestController;
 import org.opensearch.rest.RestHandler;
 import org.opensearch.script.ScriptService;
+import org.opensearch.search.profile.ProfileMetric;
+import org.opensearch.search.profile.Timer;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.telemetry.tracing.Tracer;
 import org.opensearch.threadpool.ThreadPool;
@@ -65,7 +69,34 @@ import org.opensearch.watcher.ResourceWatcherService;
 /**
  * A plugin that enables index level encryption and decryption.
  */
-public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, EnginePlugin, TelemetryAwarePlugin, ActionPlugin {
+public class CryptoDirectoryPlugin extends Plugin
+    implements
+        IndexStorePlugin,
+        EnginePlugin,
+        TelemetryAwarePlugin,
+        ActionPlugin,
+        SearchPlugin {
+
+    /**
+     * Registers the storage-encryption query-profiler metrics. When a query runs with
+     * {@code ?profile=true}, these appear in each query node's {@code breakdown} map next to the
+     * built-in timers (build_scorer, next_doc, ...). One fresh metric-set is created per
+     * (query-node, leaf) breakdown by the core; the read path records into the current one via
+     * {@link org.opensearch.index.store.profile.CryptoQueryProfile#current()}.
+     *
+     * <p>POC: a single {@code crypto_decrypt} Timer. Add more by adding a supplier here and a
+     * recording call at the relevant cost center.
+     */
+    @Override
+    public java.util.Optional<SearchPlugin.ProfileMetricsProvider> getQueryProfileMetricsProvider() {
+        return java.util.Optional
+            .of(
+                (searchContext, query) -> java.util.List.<java.util.function.Supplier<ProfileMetric>>of(
+                    () -> new Timer(CryptoProfileNames.DECRYPT)
+                )
+            );
+    }
+
     private static final Logger log = LogManager.getLogger(CryptoDirectoryPlugin.class);
 
     /**
