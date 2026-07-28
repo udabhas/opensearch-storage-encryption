@@ -40,13 +40,42 @@ public class StaticConfigs {
      */
     public static final int DIRECT_IO_WRITE_BUFFER_SIZE_POWER = 18;
 
-    /** 
-     * Power of 2 for cache block size (2^13 = 8KB blocks).
+    /**
+     * System property to override the cache block size, expressed as a power of 2 (the log2 of the
+     * block size in bytes). Default {@code 13} = 8KB blocks. Example: {@code -Dopensearch.crypto.cache_block_size_power=15}
+     * gives 32KB blocks.
+     *
+     * <p>Read once at class initialization (see {@link #resolveCacheBlockSizePower()}); changing it
+     * requires a node restart, consistent with the static-config contract of this class. The whole
+     * read/write/pool/cache stack derives its block geometry from {@link #CACHE_BLOCK_SIZE_POWER}, so
+     * this single knob resizes every block uniformly. Kept {@code static final} so the JIT still
+     * constant-folds the bit-shifts on the hot path.
      */
-    public static final int CACHE_BLOCK_SIZE_POWER = 13;
+    public static final String CACHE_BLOCK_SIZE_POWER_PROPERTY = "opensearch.crypto.cache_block_size_power";
 
-    /** 
-     * Size of each cache block in bytes (8KB).
+    /** Default cache block size power (2^13 = 8KB). */
+    public static final int DEFAULT_CACHE_BLOCK_SIZE_POWER = 13;
+
+    /**
+     * Minimum allowed block-size power. Below 2^9 (512B) the block can be smaller than the Direct I/O
+     * alignment, which would break O_DIRECT block reads.
+     */
+    private static final int MIN_CACHE_BLOCK_SIZE_POWER = 9;
+
+    /**
+     * Maximum allowed block-size power. 2^24 = 16MB — well above any sensible block; a guard against
+     * a fat-fingered value that would exhaust the pool with a single block.
+     */
+    private static final int MAX_CACHE_BLOCK_SIZE_POWER = 24;
+
+    /**
+     * Power of 2 for cache block size. Defaults to {@value #DEFAULT_CACHE_BLOCK_SIZE_POWER} (8KB),
+     * overridable via {@link #CACHE_BLOCK_SIZE_POWER_PROPERTY}.
+     */
+    public static final int CACHE_BLOCK_SIZE_POWER = resolveCacheBlockSizePower();
+
+    /**
+     * Size of each cache block in bytes (default 8KB; see {@link #CACHE_BLOCK_SIZE_POWER}).
      */
     public static final int CACHE_BLOCK_SIZE = 1 << CACHE_BLOCK_SIZE_POWER;
 
@@ -54,6 +83,40 @@ public class StaticConfigs {
      * Bit mask for cache block alignment (block_size - 1).
      */
     public static final long CACHE_BLOCK_MASK = CACHE_BLOCK_SIZE - 1;
+
+    /**
+     * Resolve the cache block-size power from the system property, clamped to a safe range and
+     * validated against the Direct I/O alignment. Falls back to {@link #DEFAULT_CACHE_BLOCK_SIZE_POWER}
+     * on any parse error or out-of-range / mis-aligned value. Runs once at class init.
+     */
+    private static int resolveCacheBlockSizePower() {
+        int power = DEFAULT_CACHE_BLOCK_SIZE_POWER;
+        String raw = System.getProperty(CACHE_BLOCK_SIZE_POWER_PROPERTY);
+        if (raw != null && !raw.isBlank()) {
+            try {
+                int parsed = Integer.parseInt(raw.trim());
+                if (parsed < MIN_CACHE_BLOCK_SIZE_POWER || parsed > MAX_CACHE_BLOCK_SIZE_POWER) {
+                    throw new IllegalArgumentException(
+                        "must be in [" + MIN_CACHE_BLOCK_SIZE_POWER + ", " + MAX_CACHE_BLOCK_SIZE_POWER + "]"
+                    );
+                }
+                power = parsed;
+            } catch (RuntimeException e) {
+                throw new IllegalArgumentException(
+                    "Invalid " + CACHE_BLOCK_SIZE_POWER_PROPERTY + "=[" + raw + "]: " + e.getMessage()
+                );
+            }
+        }
+        // O_DIRECT requires the block to be a whole multiple of the device alignment. Since both are
+        // powers of two, this holds iff the block is >= the alignment.
+        if ((1 << power) < DIRECT_IO_ALIGNMENT) {
+            throw new IllegalArgumentException(
+                CACHE_BLOCK_SIZE_POWER_PROPERTY + "=" + power + " yields block " + (1 << power)
+                    + "B, smaller than Direct I/O alignment " + DIRECT_IO_ALIGNMENT + "B"
+            );
+        }
+        return power;
+    }
 
     /**
      * Feature flag for read-path CPU optimizations. Gates:
