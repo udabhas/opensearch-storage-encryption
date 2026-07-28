@@ -121,6 +121,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             // Reusing the open channel across block-cache misses avoids an open()/close() syscall per load.
             if (directIoTimer != null)
                 directIoTimer.start();
+            // Explicit nanoTime for the per-read latency histogram (Timer doesn't expose its per-call delta).
+            final long ioStartNs = (prof != null) ? System.nanoTime() : 0L;
             MemorySegment readBytes;
             try {
                 readBytes = readWithZeroByteRetry(filePath, startOffset, readLength, arena, fsBlockSize);
@@ -129,8 +131,11 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                     directIoTimer.stop();
             }
             long bytesRead = readBytes.byteSize();
-            if (prof != null)
+            if (prof != null) {
+                prof.recordIoLatency(System.nanoTime() - ioStartNs);
+                prof.recordReadSize(bytesRead);
                 prof.addBytesRead(bytesRead);
+            }
 
             String normalizedPath = filePath.toAbsolutePath().normalize().toString();
             byte[] masterKey = keyResolver.getDataKey().getEncoded();
@@ -162,6 +167,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             if (decryptTimer != null) {
                 decryptTimer.start();
             }
+            final long decryptStartNs = (prof != null) ? System.nanoTime() : 0L;
             try {
                 MemorySegmentDecryptor
                     .decryptInPlaceFrameBased(
@@ -178,6 +184,9 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             } finally {
                 if (decryptTimer != null) {
                     decryptTimer.stop();
+                }
+                if (prof != null) {
+                    prof.recordDecryptLatency(System.nanoTime() - decryptStartNs);
                 }
             }
 

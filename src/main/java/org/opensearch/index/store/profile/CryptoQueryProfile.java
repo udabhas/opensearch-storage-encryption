@@ -43,6 +43,11 @@ public final class CryptoQueryProfile {
         return (m instanceof CryptoCounterMetric c) ? c : null;
     }
 
+    private CryptoHistogramMetric histogram(String name) {
+        ProfileMetric m = breakdown.getMetric(name);
+        return (m instanceof CryptoHistogramMetric h) ? h : null;
+    }
+
     // ---- Timers ----
     public Timer decryptTimer() {
         return timer(CryptoProfileNames.DECRYPT);
@@ -58,6 +63,33 @@ public final class CryptoQueryProfile {
 
     public Timer poolWaitTimer() {
         return timer(CryptoProfileNames.POOL_WAIT);
+    }
+
+    public Timer l1LookupTimer() {
+        return timer(CryptoProfileNames.L1_LOOKUP);
+    }
+
+    public Timer l2LookupTimer() {
+        return timer(CryptoProfileNames.L2_LOOKUP);
+    }
+
+    // ---- Histograms (per-sample distributions) ----
+    public void recordIoLatency(long ns) {
+        CryptoHistogramMetric h = histogram(CryptoProfileNames.IO_LATENCY_DIST);
+        if (h != null)
+            h.record(ns);
+    }
+
+    public void recordReadSize(long bytes) {
+        CryptoHistogramMetric h = histogram(CryptoProfileNames.READ_SIZE_DIST);
+        if (h != null)
+            h.record(bytes);
+    }
+
+    public void recordDecryptLatency(long ns) {
+        CryptoHistogramMetric h = histogram(CryptoProfileNames.DECRYPT_DIST);
+        if (h != null)
+            h.record(ns);
     }
 
     // ---- Counters ----

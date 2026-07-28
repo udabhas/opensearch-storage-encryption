@@ -279,7 +279,12 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         final org.opensearch.index.store.profile.CryptoQueryProfile prof = org.opensearch.index.store.profile.CryptoQueryProfile.current();
 
         // ---- L1 lookup: two plain array reads, no fences, no CAS ----
+        final org.opensearch.search.profile.Timer l1Timer = (prof != null) ? prof.l1LookupTimer() : null;
+        if (l1Timer != null)
+            l1Timer.start();
         BlockCacheValue<RefCountedByteBuffer> entry = radixBlockTable.get(blockId);
+        if (l1Timer != null)
+            l1Timer.stop();
         if (entry != null) {
             lastAccessWasCacheHit = true;
             if (prof != null)
@@ -299,7 +304,12 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // ---- L2 lookup + disk load ----
         final FileBlockCacheKey key = new FileBlockCacheKey(path, blockOffset);
         // Try L2 hit
+        final org.opensearch.search.profile.Timer l2Timer = (prof != null) ? prof.l2LookupTimer() : null;
+        if (l2Timer != null)
+            l2Timer.start();
         BlockCacheValue<RefCountedByteBuffer> v = blockCache.get(key);
+        if (l2Timer != null)
+            l2Timer.stop();
         if (v != null) {
             if (prof != null)
                 prof.incL2Hits();

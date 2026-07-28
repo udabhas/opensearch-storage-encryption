@@ -97,6 +97,9 @@ public class CryptoDirectoryPlugin extends Plugin
             for (String c : CryptoProfileNames.COUNTERS) {
                 suppliers.add(() -> new org.opensearch.index.store.profile.CryptoCounterMetric(c));
             }
+            for (String h : CryptoProfileNames.HISTOGRAMS) {
+                suppliers.add(() -> new org.opensearch.index.store.profile.CryptoHistogramMetric(h));
+            }
             return suppliers;
         });
     }
