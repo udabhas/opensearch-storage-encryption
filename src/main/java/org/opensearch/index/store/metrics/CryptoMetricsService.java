@@ -25,6 +25,7 @@ public class CryptoMetricsService {
     private final Histogram memoryStatsHistogram;
     private final Histogram l1StatsHistogram;
     private final Histogram kmsCallHistogram;
+    private final Histogram fsIoStatsHistogram;
     private final Counter errorCounter;
     private final Counter throttleEngagedCounter;
     private final Counter degradedReadCounter;
@@ -39,6 +40,7 @@ public class CryptoMetricsService {
     private static final String KMS_CALL_NAME = "crypto.kms.call";
     private static final String THROTTLE_ENGAGED_COUNTER_NAME = "crypto.pool.throttle.engaged.total";
     private static final String DEGRADED_READ_COUNTER_NAME = "crypto.read.degraded.total";
+    private static final String FS_IO_STATS_NAME = "crypto.fs.io.stats";
 
     // Metric descriptions
     private static final String POOL_STATS_DESC = "Crypto Pool statistics";
@@ -55,6 +57,10 @@ public class CryptoMetricsService {
         "Count of degraded (uncached, heap-fallback) block reads under pool exhaustion";
     private static final String KMS_CALL_DESC =
         "KMS call count + latency (tag op=generate_data_key|decrypt, result=ok|transient|error; transient=throttle/rate-limit/network per KeyCacheException.classify) — KMS throttling is a known latency cause";
+    private static final String FS_IO_STATS_DESC =
+        "Node block-device (EBS) IO rates from /proc/diskstats (FsInfo.IoStats), per telemetry interval "
+            + "(tag stat_type=read_iops|write_iops|read_kb_s|write_kb_s|read_await_ms|util_pct|read_io_size_kb). "
+            + "NODE-level, NOT per-query — answers 'is the volume saturated vs idle-but-slow'.";
 
     // Throttle-arm tag
     private static final String THROTTLE_ARM_TAG = "throttle_arm";
@@ -88,6 +94,7 @@ public class CryptoMetricsService {
         this.throttleEngagedCounter = createCounter(THROTTLE_ENGAGED_COUNTER_NAME, THROTTLE_ENGAGED_COUNTER_DESC, COUNT_UNIT);
         this.degradedReadCounter = createCounter(DEGRADED_READ_COUNTER_NAME, DEGRADED_READ_COUNTER_DESC, COUNT_UNIT);
         this.kmsCallHistogram = createHistogram(KMS_CALL_NAME, KMS_CALL_DESC, MS_UNIT);
+        this.fsIoStatsHistogram = createHistogram(FS_IO_STATS_NAME, FS_IO_STATS_DESC, COUNT_UNIT);
     }
 
     /**
@@ -130,6 +137,25 @@ public class CryptoMetricsService {
         poolStatsHistogram.record(free, baseTags.addTag(STAT_TYPE_TAG, "free"));
         poolStatsHistogram.record(utilization, baseTags.addTag(STAT_TYPE_TAG, "utilization"));
         poolStatsHistogram.record(allocation, baseTags.addTag(STAT_TYPE_TAG, "allocation"));
+    }
+
+    /**
+     * Records node block-device (EBS) IO rates for the current telemetry interval, from
+     * {@link CryptoFsStatsCollector.Sample}. NODE-level time-series (not per-query). Each field is one
+     * {@code stat_type} series. See {@link #FS_IO_STATS_DESC}.
+     *
+     * @param s the interval sample (no-op if null — e.g. the first tick has no baseline)
+     */
+    public void recordFsIoStats(CryptoFsStatsCollector.Sample s) {
+        if (fsIoStatsHistogram == null || s == null)
+            return;
+        fsIoStatsHistogram.record(s.readIops, Tags.create().addTag(STAT_TYPE_TAG, "read_iops"));
+        fsIoStatsHistogram.record(s.writeIops, Tags.create().addTag(STAT_TYPE_TAG, "write_iops"));
+        fsIoStatsHistogram.record(s.readKbPerSec, Tags.create().addTag(STAT_TYPE_TAG, "read_kb_s"));
+        fsIoStatsHistogram.record(s.writeKbPerSec, Tags.create().addTag(STAT_TYPE_TAG, "write_kb_s"));
+        fsIoStatsHistogram.record(s.readAwaitMs, Tags.create().addTag(STAT_TYPE_TAG, "read_await_ms"));
+        fsIoStatsHistogram.record(s.utilPct, Tags.create().addTag(STAT_TYPE_TAG, "util_pct"));
+        fsIoStatsHistogram.record(s.readIoSizeKb, Tags.create().addTag(STAT_TYPE_TAG, "read_io_size_kb"));
     }
 
     /**

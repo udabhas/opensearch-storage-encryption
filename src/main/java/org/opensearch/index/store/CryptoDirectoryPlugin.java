@@ -269,6 +269,23 @@ public class CryptoDirectoryPlugin extends Plugin
         CryptoDirectoryFactory.setNodeSettings(environment.settings());
         CryptoMetricsService.initialize(metricsRegistry);
 
+        // Node-level block-device (EBS) IO telemetry: sample /proc/diskstats (via FsProbe/FsInfo.IoStats)
+        // on a fixed cadence, diff to per-interval rates, and emit + log. NODE-level, not per-query.
+        // Uses the shared threadpool GENERIC pool so it shuts down cleanly with the node.
+        try {
+            final org.opensearch.index.store.metrics.CryptoFsStatsCollector fsCollector =
+                new org.opensearch.index.store.metrics.CryptoFsStatsCollector(nodeEnvironment);
+            threadPool.scheduleWithFixedDelay(() -> {
+                org.opensearch.index.store.metrics.CryptoFsStatsCollector.Sample s = fsCollector.sample();
+                if (s != null) {
+                    CryptoMetricsService.getInstance().recordFsIoStats(s);
+                    log.info("{}", s);
+                }
+            }, org.opensearch.common.unit.TimeValue.timeValueSeconds(10), ThreadPool.Names.GENERIC);
+        } catch (Exception e) {
+            log.warn("Failed to start FS IO stats collector; node block-device metrics disabled", e);
+        }
+
         // Proactive cache-shrink: seed from the node setting and register a dynamic update-consumer so
         // the (default-off) flag can be toggled at runtime. Applies to the live pool if already built,
         // else is picked up when the pool is lazily created on first cryptofs shard.
