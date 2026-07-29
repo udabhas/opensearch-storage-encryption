@@ -532,6 +532,21 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
             );
     }
 
+    /** Structured form of {@link #cacheStats()} for JSON telemetry (same fields, typed values). */
+    public java.util.Map<String, Object> statsMap() {
+        var stats = cache.stats();
+        java.util.LinkedHashMap<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("size", cache.estimatedSize());
+        m.put("secondary_files", secondary.size());
+        m.put("hits", stats.hitCount());
+        m.put("misses", stats.missCount());
+        m.put("hit_rate_pct", Math.round(stats.hitRate() * 10000.0) / 100.0);
+        m.put("loads", stats.loadCount());
+        m.put("eviction_count", stats.evictionCount());
+        m.put("avg_load_time_ms", Math.round(stats.averageLoadPenalty() / 1_000_000.0 * 100.0) / 100.0);
+        return m;
+    }
+
     /**
      * Get the underlying Caffeine cache instance.
      * This is used for sharing the cache storage across multiple BlockCache instances

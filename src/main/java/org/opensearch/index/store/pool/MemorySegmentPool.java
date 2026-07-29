@@ -600,6 +600,23 @@ public class MemorySegmentPool implements Pool<RefCountedByteBuffer>, AutoClosea
             );
     }
 
+    /** Structured form of {@link #poolStats()} for JSON telemetry (same fields, typed values). */
+    public java.util.Map<String, Object> statsMap() {
+        int inUse = getBuffersInUse();
+        long trackedBytes = getAllocatedBytes();
+        long nativeUsed = getDirectMemoryUsed();
+        long zombieBytes = nativeUsed >= 0 ? nativeUsed - trackedBytes : -1;
+        java.util.LinkedHashMap<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("max", maxSegments);
+        m.put("in_use", inUse);
+        m.put("utilization_pct", maxSegments > 0 ? Math.round((double) inUse / maxSegments * 10000.0) / 100.0 : 0.0);
+        m.put("stalls", stallCount.sum());
+        m.put("tracked_mb", trackedBytes / (1024 * 1024));
+        m.put("native_mb", nativeUsed / (1024 * 1024));
+        m.put("zombie_mb", zombieBytes / (1024 * 1024));
+        return m;
+    }
+
     @Override
     public void recordStats() {
         int inUse = buffersInUse.get();

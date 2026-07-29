@@ -203,6 +203,21 @@ public class RadixBlockTableRegistry {
             );
     }
 
+    /** Structured form of {@link #l1Stats()} for JSON telemetry (same fields, typed values). */
+    public java.util.Map<String, Object> statsMap() {
+        long hits = l1Hits.sum();
+        long misses = l1Misses.sum();
+        long total = hits + misses;
+        double hitRate = total > 0 ? (double) hits / total * 100.0 : 0.0;
+        java.util.LinkedHashMap<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("tables", tables.size());
+        m.put("hits", hits);
+        m.put("misses", misses);
+        m.put("hit_rate_pct", Math.round(hitRate * 100.0) / 100.0);
+        m.put("evictions", l1Evictions.sum());
+        return m;
+    }
+
     /**
      * Emit L1 (RadixBlockTable) cache-effectiveness metrics on the telemetry tick. These counters are
      * incremented on every read (hit/miss) and every L2-eviction callback but are not otherwise

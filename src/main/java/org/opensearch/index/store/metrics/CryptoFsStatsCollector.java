@@ -67,22 +67,36 @@ public final class CryptoFsStatsCollector {
             this.intervalMillis = intervalMillis;
         }
 
+        private static double r(double v) {
+            return Math.round(v * 100.0) / 100.0;
+        }
+
+        /** Structured form for JSON telemetry. */
+        public java.util.Map<String, Object> asMap() {
+            java.util.LinkedHashMap<String, Object> m = new java.util.LinkedHashMap<>();
+            m.put("telemetry", "node_block_device_io");
+            m.put("interval_ms", intervalMillis);
+            m.put("read_iops", r(readIops));
+            m.put("write_iops", r(writeIops));
+            m.put("read_kb_s", r(readKbPerSec));
+            m.put("write_kb_s", r(writeKbPerSec));
+            m.put("read_await_ms", r(readAwaitMs));
+            m.put("util_pct", r(utilPct));
+            m.put("read_io_size_kb", r(readIoSizeKb));
+            return m;
+        }
+
         @Override
         public String toString() {
-            return String
-                .format(
-                    java.util.Locale.ROOT,
-                    "FsIo[read_iops=%.1f write_iops=%.1f read_kb_s=%.1f write_kb_s=%.1f "
-                        + "read_await_ms=%.3f util_pct=%.1f read_io_size_kb=%.1f interval_ms=%d]",
-                    readIops,
-                    writeIops,
-                    readKbPerSec,
-                    writeKbPerSec,
-                    readAwaitMs,
-                    utilPct,
-                    readIoSizeKb,
-                    intervalMillis
-                );
+            try {
+                org.opensearch.core.xcontent.XContentBuilder b = org.opensearch.common.xcontent.XContentFactory
+                    .jsonBuilder()
+                    .prettyPrint();
+                b.map(asMap());
+                return "\n" + b.toString();
+            } catch (Exception e) {
+                return asMap().toString();
+            }
         }
     }
 
