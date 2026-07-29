@@ -234,6 +234,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                         if (poolWaitTimer != null)
                             poolWaitTimer.stop();
                     } catch (InterruptedException e) {
+                        if (poolWaitTimer != null)
+                            poolWaitTimer.stop();
                         releaseHandles(result, blockIndex);
                         Thread.currentThread().interrupt();
                         throw new IOException("Interrupted while acquiring pool segment", e);
