@@ -49,6 +49,11 @@ public final class CryptoQueryProfile {
     }
 
     // ---- Timers ----
+    /** Total time in {@code CryptoDirectIOBlockLoader.load()}. Subtract {@link #directIoReadTimer()} for non-IO time. */
+    public Timer loadTimer() {
+        return timer(CryptoProfileNames.LOAD);
+    }
+
     public Timer decryptTimer() {
         return timer(CryptoProfileNames.DECRYPT);
     }
@@ -74,6 +79,13 @@ public final class CryptoQueryProfile {
     }
 
     // ---- Histograms (per-sample distributions) ----
+    /** Record one total-{@code load()} latency sample (ns) → crypto_load_dist p50/p90/p99. */
+    public void recordLoadLatency(long ns) {
+        CryptoHistogramMetric h = histogram(CryptoProfileNames.LOAD_DIST);
+        if (h != null)
+            h.record(ns);
+    }
+
     public void recordIoLatency(long ns) {
         CryptoHistogramMetric h = histogram(CryptoProfileNames.IO_LATENCY_DIST);
         if (h != null)

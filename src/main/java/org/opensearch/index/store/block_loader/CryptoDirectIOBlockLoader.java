@@ -116,6 +116,14 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             // Query-profiler handle (null unless a ?profile=true query is scoring on this thread).
             final org.opensearch.index.store.profile.CryptoQueryProfile prof = org.opensearch.index.store.profile.CryptoQueryProfile
                 .current();
+            // Total-load timer + distribution: the WHOLE plugin load() operation (IO + footer/HKDF + decrypt
+            // + pool acquire + buffer copy + loop). crypto_load - crypto_directio_read = non-IO application
+            // time (the optimization target). Recorded in the finally so it covers return/throw/degraded.
+            final org.opensearch.search.profile.Timer loadTimer = (prof != null) ? prof.loadTimer() : null;
+            final long loadStartNs = (prof != null) ? System.nanoTime() : 0L;
+            if (loadTimer != null)
+                loadTimer.start();
+            try {
             final org.opensearch.search.profile.Timer directIoTimer = (prof != null) ? prof.directIoReadTimer() : null;
             // Read via the shared FileChannel backend (node-level cached, positional Direct I/O reads).
             // Reusing the open channel across block-cache misses avoids an open()/close() syscall per load.
@@ -292,6 +300,14 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             }
 
             return result;
+
+            } finally {
+                // Stop the total-load timer + record the per-call distribution, on every exit path.
+                if (loadTimer != null)
+                    loadTimer.stop();
+                if (prof != null)
+                    prof.recordLoadLatency(System.nanoTime() - loadStartNs);
+            }
 
         } catch (NoSuchFileException e) {
             throw e;

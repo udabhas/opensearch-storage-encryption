@@ -21,6 +21,13 @@ public final class CryptoProfileNames {
     private CryptoProfileNames() {}
 
     // ---- Timers (wall-clock phases; core reports the span across slices) ----
+    /**
+     * Total wall-clock time inside {@code CryptoDirectIOBlockLoader.load()} — the whole plugin
+     * block-load operation (disk read + footer/HKDF + decrypt + pool acquire + buffer copy + loop).
+     * This is the OUTER total; subtract {@link #DIRECTIO_READ} from it to get the non-IO
+     * ("application-side") time that is the optimization target: {@code crypto_load - crypto_directio_read}.
+     */
+    public static final String LOAD = "crypto_load";
     /** AES-CTR frame-based decrypt time. */
     public static final String DECRYPT = "crypto_decrypt";
     /** Direct-IO disk read time (readWithZeroByteRetry). */
@@ -52,14 +59,17 @@ public final class CryptoProfileNames {
     public static final String READ_SIZE_DIST = "crypto_read_size";
     /** Per-block AES-CTR decrypt latency (ns). */
     public static final String DECRYPT_DIST = "crypto_decrypt_dist";
+    /** Per-call total {@code load()} latency (ns) — distribution of the whole block-load operation. */
+    public static final String LOAD_DIST = "crypto_load_dist";
 
     /** All timer metric names. */
-    public static final List<String> TIMERS = Arrays.asList(DECRYPT, DIRECTIO_READ, FOOTER_HKDF, POOL_WAIT, L1_LOOKUP, L2_LOOKUP);
+    public static final List<String> TIMERS = Arrays
+        .asList(LOAD, DECRYPT, DIRECTIO_READ, FOOTER_HKDF, POOL_WAIT, L1_LOOKUP, L2_LOOKUP);
 
     /** All counter metric names. */
     public static final List<String> COUNTERS = Arrays
         .asList(L1_HITS, L1_MISSES, L2_HITS, L2_MISSES, BLOCKS_DECRYPTED, BYTES_READ, DEGRADED_READS);
 
     /** All histogram metric names. */
-    public static final List<String> HISTOGRAMS = Arrays.asList(IO_LATENCY_DIST, READ_SIZE_DIST, DECRYPT_DIST);
+    public static final List<String> HISTOGRAMS = Arrays.asList(IO_LATENCY_DIST, READ_SIZE_DIST, DECRYPT_DIST, LOAD_DIST);
 }
