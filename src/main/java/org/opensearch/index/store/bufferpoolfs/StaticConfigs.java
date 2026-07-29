@@ -53,8 +53,14 @@ public class StaticConfigs {
      */
     public static final String CACHE_BLOCK_SIZE_POWER_PROPERTY = "opensearch.crypto.cache_block_size_power";
 
-    /** Default cache block size power (2^13 = 8KB). */
-    public static final int DEFAULT_CACHE_BLOCK_SIZE_POWER = 13;
+    /**
+     * Default cache block size power (2^16 = 64KB). Chosen from the big5 block-size sweep: 64KB gave
+     * ~2.7x faster cold search vs 8KB (and eliminated the heavy-agg timeouts) while keeping warm/hot at
+     * ~mmap parity — the best cold-win-with-least-warm-regression point. 128KB improves the heavy cold
+     * tail slightly more but adds no hot benefit and larger small-query over-read. Override via
+     * {@link #CACHE_BLOCK_SIZE_POWER_PROPERTY}.
+     */
+    public static final int DEFAULT_CACHE_BLOCK_SIZE_POWER = 16;
 
     /**
      * Minimum allowed block-size power. Below 2^9 (512B) the block can be smaller than the Direct I/O
@@ -69,7 +75,7 @@ public class StaticConfigs {
     private static final int MAX_CACHE_BLOCK_SIZE_POWER = 24;
 
     /**
-     * Power of 2 for cache block size. Defaults to {@value #DEFAULT_CACHE_BLOCK_SIZE_POWER} (8KB),
+     * Power of 2 for cache block size. Defaults to {@value #DEFAULT_CACHE_BLOCK_SIZE_POWER} (2^16 = 64KB),
      * overridable via {@link #CACHE_BLOCK_SIZE_POWER_PROPERTY}.
      */
     public static final int CACHE_BLOCK_SIZE_POWER = resolveCacheBlockSizePower();
