@@ -438,25 +438,21 @@ public class BufferPoolDirectory extends FSDirectory {
 
     private void logCacheAndPoolStats() {
         try {
-
+            // Single consolidated telemetry line so the background dumper emits ONE record per tick
+            // (cache + pool + L1 together) instead of three separate lines. Signals: cache stats,
+            // pool direct-memory/OS-free/throttle history (correlate with recovery-time WARNs), and
+            // L1 (RadixBlockTable) hit rate (leading indicator of cold-segment decrypt latency).
+            StringBuilder sb = new StringBuilder("CryptoTelemetry ");
             if (blockCache instanceof CaffeineBlockCache) {
-                String cacheStats = ((CaffeineBlockCache<?, ?>) blockCache).cacheStats();
-                LOGGER.info("{}", cacheStats);
+                sb.append(((CaffeineBlockCache<?, ?>) blockCache).cacheStats());
             }
-
-            // Pool stats — direct-memory usage, OS-free tracking, throttle-engaged history — the
-            // signals we need to correlate with recovery-time Track 6 WARNs (see delete_optimisation
-            // journal §32-34). Runs on the background telemetry thread, never on the hot path.
             if (memorySegmentPool instanceof org.opensearch.index.store.pool.MemorySegmentPool msp) {
-                LOGGER.info("Pool[{}]", msp.poolStats());
+                sb.append(" Pool[").append(msp.poolStats()).append(']');
             }
-
-            // L1 (RadixBlockTable) stats — hit rate is the leading indicator of cold-segment
-            // decrypt latency. Emitted alongside Cache[ and Pool[ for one-line telemetry view.
             if (radixBlockTableRegistry != null) {
-                LOGGER.info("{}", radixBlockTableRegistry.l1Stats());
+                sb.append(' ').append(radixBlockTableRegistry.l1Stats());
             }
-
+            LOGGER.info("{}", sb);
         } catch (Exception e) {
             LOGGER.warn("Failed to log cache/pool stats", e);
         }
