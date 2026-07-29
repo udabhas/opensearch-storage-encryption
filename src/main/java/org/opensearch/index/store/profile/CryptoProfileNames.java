@@ -25,21 +25,21 @@ public final class CryptoProfileNames {
      * Total wall-clock time inside {@code CryptoDirectIOBlockLoader.load()} — the whole plugin
      * block-load operation (disk read + footer/HKDF + decrypt + pool acquire + buffer copy + loop).
      * This is the OUTER total; subtract {@link #DIRECTIO_READ} from it to get the non-IO
-     * ("application-side") time that is the optimization target: {@code crypto_load - crypto_directio_read}.
+     * ("application-side") time that is the optimization target: {@code crypto_load_time - crypto_io_time}.
      */
-    public static final String LOAD = "crypto_load";
+    public static final String LOAD = "crypto_load_time";
     /** AES-CTR frame-based decrypt time. */
-    public static final String DECRYPT = "crypto_decrypt";
+    public static final String DECRYPT = "crypto_decrypt_time";
     /** Direct-IO disk read time (readWithZeroByteRetry). */
-    public static final String DIRECTIO_READ = "crypto_directio_read";
+    public static final String DIRECTIO_READ = "crypto_io_time";
     /** Footer read + HKDF file-key derivation time. */
-    public static final String FOOTER_HKDF = "crypto_footer_hkdf";
+    public static final String FOOTER_HKDF = "crypto_footer_hkdf_time";
     /** Time blocked acquiring pool segments (includes stall/throttle waits). */
-    public static final String POOL_WAIT = "crypto_pool_wait";
+    public static final String POOL_WAIT = "crypto_pool_wait_time";
     /** L1 (RadixBlockTable) lookup time. */
-    public static final String L1_LOOKUP = "crypto_l1_lookup";
+    public static final String L1_LOOKUP = "crypto_l1_lookup_time";
     /** L2 (Caffeine) lookup time (hit path; excludes disk load). */
-    public static final String L2_LOOKUP = "crypto_l2_lookup";
+    public static final String L2_LOOKUP = "crypto_l2_lookup_time";
 
     // ---- Counters (LongAdder; core sums across slices) ----
     public static final String L1_HITS = "crypto_l1_hits";
@@ -54,13 +54,13 @@ public final class CryptoProfileNames {
     // NOTE: percentile keys are valid ONLY under search.concurrent_segment_search.mode=none. See
     // CryptoHistogramMetric javadoc — the concurrent path sums keys, which is meaningless for percentiles.
     /** Per-block direct-IO disk-read latency (ns). */
-    public static final String IO_LATENCY_DIST = "crypto_io_latency";
+    public static final String IO_LATENCY_DIST = "crypto_io_time_dist";
     /** Per-read size (bytes) fetched from disk. */
-    public static final String READ_SIZE_DIST = "crypto_read_size";
+    public static final String READ_SIZE_DIST = "crypto_read_size_bytes";
     /** Per-block AES-CTR decrypt latency (ns). */
-    public static final String DECRYPT_DIST = "crypto_decrypt_dist";
+    public static final String DECRYPT_DIST = "crypto_decrypt_time_dist";
     /** Per-call total {@code load()} latency (ns) — distribution of the whole block-load operation. */
-    public static final String LOAD_DIST = "crypto_load_dist";
+    public static final String LOAD_DIST = "crypto_load_time_dist";
 
     /** All timer metric names. */
     public static final List<String> TIMERS = Arrays
