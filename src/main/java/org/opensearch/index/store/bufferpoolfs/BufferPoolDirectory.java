@@ -438,23 +438,21 @@ public class BufferPoolDirectory extends FSDirectory {
 
     private void logCacheAndPoolStats() {
         try {
-            // ONE pretty-printed JSON telemetry record per tick (cache + pool + L1 nested), emitted with a
-            // single LOGGER.info. Signals: cache effectiveness; pool direct-memory/OS-free/throttle history
-            // (correlate with recovery-time WARNs); L1 (RadixBlockTable) hit rate (leading indicator of
-            // cold-segment decrypt latency). Uses XContent (already on classpath) — no string parsing.
-            org.opensearch.core.xcontent.XContentBuilder b = org.opensearch.common.xcontent.XContentFactory.jsonBuilder().prettyPrint();
-            b.startObject().field("telemetry", "crypto_bufferpool");
+            // ONE consolidated single-line telemetry record per tick (cache + pool + L1 in [key=val] form),
+            // emitted with a single LOGGER.info. Signals: cache effectiveness; pool direct-memory/OS-free/
+            // throttle history (correlate with recovery-time WARNs); L1 (RadixBlockTable) hit rate (leading
+            // indicator of cold-segment decrypt latency).
+            StringBuilder sb = new StringBuilder(256).append("CryptoTelemetry");
             if (blockCache instanceof CaffeineBlockCache) {
-                b.field("cache", ((CaffeineBlockCache<?, ?>) blockCache).statsMap());
+                sb.append(' ').append(((CaffeineBlockCache<?, ?>) blockCache).cacheStats());
             }
             if (memorySegmentPool instanceof org.opensearch.index.store.pool.MemorySegmentPool msp) {
-                b.field("pool", msp.statsMap());
+                sb.append(" Pool[").append(msp.poolStats()).append(']');
             }
             if (radixBlockTableRegistry != null) {
-                b.field("l1", radixBlockTableRegistry.statsMap());
+                sb.append(' ').append(radixBlockTableRegistry.l1Stats());
             }
-            b.endObject();
-            LOGGER.info("\n{}", b.toString());
+            LOGGER.info("{}", sb);
         } catch (Exception e) {
             LOGGER.warn("Failed to log cache/pool stats", e);
         }

@@ -88,15 +88,20 @@ public final class CryptoFsStatsCollector {
 
         @Override
         public String toString() {
-            try {
-                org.opensearch.core.xcontent.XContentBuilder b = org.opensearch.common.xcontent.XContentFactory
-                    .jsonBuilder()
-                    .prettyPrint();
-                b.map(asMap());
-                return "\n" + b.toString();
-            } catch (Exception e) {
-                return asMap().toString();
-            }
+            return String
+                .format(
+                    java.util.Locale.ROOT,
+                    "FsIo[read_iops=%.1f, write_iops=%.1f, read_kb_s=%.1f, write_kb_s=%.1f, "
+                        + "read_await_ms=%.3f, util_pct=%.1f, read_io_size_kb=%.1f, interval_ms=%d]",
+                    readIops,
+                    writeIops,
+                    readKbPerSec,
+                    writeKbPerSec,
+                    readAwaitMs,
+                    utilPct,
+                    readIoSizeKb,
+                    intervalMillis
+                );
         }
     }
 
