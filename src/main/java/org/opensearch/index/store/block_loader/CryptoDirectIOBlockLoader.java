@@ -116,29 +116,24 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             // Query-profiler handle (null unless a ?profile=true query is scoring on this thread).
             final org.opensearch.index.store.profile.CryptoQueryProfile prof = org.opensearch.index.store.profile.CryptoQueryProfile
                 .current();
-            // Total-load timer + distribution: the WHOLE plugin load() operation (IO + footer/HKDF + decrypt
-            // + pool acquire + buffer copy + loop). crypto_load - crypto_directio_read = non-IO application
-            // time (the optimization target). Recorded in the finally so it covers return/throw/degraded.
-            final org.opensearch.search.profile.Timer loadTimer = (prof != null) ? prof.loadTimer() : null;
+            // Total-load latency: the WHOLE plugin load() operation (IO + footer/HKDF + decrypt + pool
+            // acquire + buffer copy + loop). Recorded into the crypto_load_time_dist histogram in the
+            // finally, so it covers return/throw/degraded.
             final long loadStartNs = (prof != null) ? System.nanoTime() : 0L;
-            if (loadTimer != null)
-                loadTimer.start();
             try {
-            final org.opensearch.search.profile.Timer directIoTimer = (prof != null) ? prof.directIoReadTimer() : null;
             // Read via the shared FileChannel backend (node-level cached, positional Direct I/O reads).
             // Reusing the open channel across block-cache misses avoids an open()/close() syscall per load.
-            if (directIoTimer != null)
-                directIoTimer.start();
-            // Explicit nanoTime for the per-read latency histogram (Timer doesn't expose its per-call delta).
+            // Per-read disk-IO latency for the crypto_io_time_dist histogram.
             final long ioStartNs = (prof != null) ? System.nanoTime() : 0L;
-            MemorySegment readBytes;
-            try {
-                readBytes = readWithZeroByteRetry(filePath, startOffset, readLength, arena, fsBlockSize);
-            } finally {
-                if (directIoTimer != null)
-                    directIoTimer.stop();
-            }
+            MemorySegment readBytes = readWithZeroByteRetry(filePath, startOffset, readLength, arena, fsBlockSize);
             long bytesRead = readBytes.byteSize();
+
+            // Reject an empty read before recording read metrics, so a zero-size sample is not folded
+            // into crypto_read_size_bytes / crypto_bytes_read for a load that is about to throw.
+            if (bytesRead == 0) {
+                throw new java.io.EOFException("Unexpected EOF or empty read at offset " + startOffset + " for file " + filePath);
+            }
+
             if (prof != null) {
                 prof.recordIoLatency(System.nanoTime() - ioStartNs);
                 prof.recordReadSize(bytesRead);
@@ -153,9 +148,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             // straight from THIS footer rather than re-fetching via the path-based getOrLoadMetadata: a
             // re-fetch would re-stat the name and could bind this read's footer to a concurrently-recreated
             // inode (TOCTOU). The footer here is authoritative for the bytes we just read.
-            final org.opensearch.search.profile.Timer footerTimer = (prof != null) ? prof.footerHkdfTimer() : null;
-            if (footerTimer != null)
-                footerTimer.start();
+            final org.opensearch.index.store.profile.CryptoNanosMetric footerTimer = (prof != null) ? prof.footerHkdfTimer() : null;
+            final long footerStartNs = (footerTimer != null) ? footerTimer.start() : 0L;
             EncryptionFooter footer;
             byte[] messageId;
             byte[] fileKey;
@@ -165,16 +159,12 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                 fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveFileKey(masterKey, messageId);
             } finally {
                 if (footerTimer != null)
-                    footerTimer.stop();
+                    footerTimer.stop(footerStartNs);
             }
 
             // Use frame-based decryption with derived file key.
-            // Query-profiler: time the decrypt into the current leaf's crypto_decrypt Timer (no-op when
-            // not profiling — current() returns null).
-            org.opensearch.search.profile.Timer decryptTimer = (prof != null) ? prof.decryptTimer() : null;
-            if (decryptTimer != null) {
-                decryptTimer.start();
-            }
+            // Per-block decrypt latency for the crypto_decrypt_time_dist histogram (no-op when not
+            // profiling — current() returns null).
             final long decryptStartNs = (prof != null) ? System.nanoTime() : 0L;
             try {
                 MemorySegmentDecryptor
@@ -190,16 +180,9 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                         encryptionMetadataCache
                     );
             } finally {
-                if (decryptTimer != null) {
-                    decryptTimer.stop();
-                }
                 if (prof != null) {
                     prof.recordDecryptLatency(System.nanoTime() - decryptStartNs);
                 }
-            }
-
-            if (bytesRead == 0) {
-                throw new java.io.EOFException("Unexpected EOF or empty read at offset " + startOffset + " for file " + filePath);
             }
 
             int blockIndex = 0;
@@ -226,16 +209,15 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                     // the GC heap and cannot raise the direct-memory OOM. (This differs from the write path,
                     // which on pool-acquire failure allocates nothing and simply skips the cache-warm.)
                     RefCountedByteBuffer handle;
-                    final org.opensearch.search.profile.Timer poolWaitTimer = (prof != null) ? prof.poolWaitTimer() : null;
-                    if (poolWaitTimer != null)
-                        poolWaitTimer.start();
+                    final org.opensearch.index.store.profile.CryptoNanosMetric poolWaitTimer = (prof != null) ? prof.poolWaitTimer() : null;
+                    final long poolStartNs = (poolWaitTimer != null) ? poolWaitTimer.start() : 0L;
                     try {
                         handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
                         if (poolWaitTimer != null)
-                            poolWaitTimer.stop();
+                            poolWaitTimer.stop(poolStartNs);
                     } catch (InterruptedException e) {
                         if (poolWaitTimer != null)
-                            poolWaitTimer.stop();
+                            poolWaitTimer.stop(poolStartNs);
                         releaseHandles(result, blockIndex);
                         Thread.currentThread().interrupt();
                         throw new IOException("Interrupted while acquiring pool segment", e);
@@ -251,7 +233,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                         // exact saturation signal needed during an incident.
                         // Bare call — the metrics singleton is initialized at node startup.
                         if (poolWaitTimer != null)
-                            poolWaitTimer.stop();
+                            poolWaitTimer.stop(poolStartNs);
                         if (prof != null)
                             prof.incDegradedReads();
                         CryptoMetricsService.getInstance().recordDegradedRead();
@@ -304,9 +286,6 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             return result;
 
             } finally {
-                // Stop the total-load timer + record the per-call distribution, on every exit path.
-                if (loadTimer != null)
-                    loadTimer.stop();
                 if (prof != null)
                     prof.recordLoadLatency(System.nanoTime() - loadStartNs);
             }

@@ -7,7 +7,6 @@ package org.opensearch.index.store.profile;
 import org.opensearch.search.profile.AbstractProfileBreakdown;
 import org.opensearch.search.profile.ProfileBreakdownHolder;
 import org.opensearch.search.profile.ProfileMetric;
-import org.opensearch.search.profile.Timer;
 
 /**
  * Per-query-node accessor for the storage-encryption profiler metrics.
@@ -33,9 +32,9 @@ public final class CryptoQueryProfile {
         return b == null ? null : new CryptoQueryProfile(b);
     }
 
-    private Timer timer(String name) {
+    private CryptoNanosMetric nanos(String name) {
         ProfileMetric m = breakdown.getMetric(name);
-        return (m instanceof Timer t) ? t : null;
+        return (m instanceof CryptoNanosMetric n) ? n : null;
     }
 
     private CryptoCounterMetric counter(String name) {
@@ -48,34 +47,21 @@ public final class CryptoQueryProfile {
         return (m instanceof CryptoHistogramMetric h) ? h : null;
     }
 
-    // ---- Timers ----
-    /** Total time in {@code CryptoDirectIOBlockLoader.load()}. Subtract {@link #directIoReadTimer()} for non-IO time. */
-    public Timer loadTimer() {
-        return timer(CryptoProfileNames.LOAD);
+    // ---- Nanos totals (phases with no histogram; not Timers, so not summed into time_in_nanos) ----
+    public CryptoNanosMetric footerHkdfTimer() {
+        return nanos(CryptoProfileNames.FOOTER_HKDF);
     }
 
-    public Timer decryptTimer() {
-        return timer(CryptoProfileNames.DECRYPT);
+    public CryptoNanosMetric poolWaitTimer() {
+        return nanos(CryptoProfileNames.POOL_WAIT);
     }
 
-    public Timer directIoReadTimer() {
-        return timer(CryptoProfileNames.DIRECTIO_READ);
+    public CryptoNanosMetric l1LookupTimer() {
+        return nanos(CryptoProfileNames.L1_LOOKUP);
     }
 
-    public Timer footerHkdfTimer() {
-        return timer(CryptoProfileNames.FOOTER_HKDF);
-    }
-
-    public Timer poolWaitTimer() {
-        return timer(CryptoProfileNames.POOL_WAIT);
-    }
-
-    public Timer l1LookupTimer() {
-        return timer(CryptoProfileNames.L1_LOOKUP);
-    }
-
-    public Timer l2LookupTimer() {
-        return timer(CryptoProfileNames.L2_LOOKUP);
+    public CryptoNanosMetric l2LookupTimer() {
+        return nanos(CryptoProfileNames.L2_LOOKUP);
     }
 
     // ---- Histograms (per-sample distributions) ----

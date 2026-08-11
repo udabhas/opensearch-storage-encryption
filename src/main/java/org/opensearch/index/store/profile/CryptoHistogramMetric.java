@@ -17,9 +17,8 @@ import org.opensearch.search.profile.ProfileMetric;
  * percentiles carry ~10% relative error — plenty for a "where does the time go" diagnostic. {@code min}
  * and {@code max} are tracked exactly (not bucketed). No HdrHistogram dependency, no version-set change.
  *
- * <p><b>Threading.</b> The core creates one metric-set per (query-node, leaf) breakdown; a given
- * instance is touched only by the single search thread scoring that leaf (prefetch runs off-thread and
- * never sees a non-null {@link CryptoQueryProfile}). So no synchronization is needed.
+ * <p><b>Threading.</b> Under intra-segment concurrency the same leaf breakdown is shared across slice
+ * threads, so {@code record} and {@code toBreakdownMap} are synchronized. Only runs under profiling.
  *
  * <p><b>Concurrent-search caveat.</b> {@code toBreakdownMap()} returns one {@code long} per key, and the
  * core's concurrent-segment-search path SUMS same-named keys across leaves/slices. Summing is correct for
@@ -45,7 +44,7 @@ public final class CryptoHistogramMetric extends ProfileMetric {
     }
 
     /** Record one sample (ns, bytes, ...). Non-positive values count toward count/min but bucket 0. */
-    public void record(long value) {
+    public synchronized void record(long value) {
         count++;
         total += value;
         if (value < min)
@@ -86,9 +85,12 @@ public final class CryptoHistogramMetric extends ProfileMetric {
     }
 
     @Override
-    public Map<String, Long> toBreakdownMap() {
+    public synchronized Map<String, Long> toBreakdownMap() {
         Map<String, Long> m = new LinkedHashMap<>();
         String n = getName();
+        // A key equal to the bare metric name is required for the concurrent-segment-search reduce path,
+        // which looks up map.get(name) per slice; emit the total under it (sums correctly across slices).
+        m.put(n, total);
         m.put(n + "_count", count);
         m.put(n + "_total", total);
         m.put(n + "_min", count == 0 ? 0L : min);

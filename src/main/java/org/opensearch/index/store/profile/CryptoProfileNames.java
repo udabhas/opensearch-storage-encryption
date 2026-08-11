@@ -12,26 +12,19 @@ import java.util.List;
  * registration site ({@code CryptoDirectoryPlugin.getQueryProfileMetricsProvider}), the read-path
  * recording sites, and any dashboards share identical keys.
  *
- * <p>To add a new cost center: (1) add a name here (and to {@link #TIMERS}, {@link #COUNTERS}, or
+ * <p>To add a new cost center: (1) add a name here (and to {@link #NANO_TIMERS}, {@link #COUNTERS}, or
  * {@link #HISTOGRAMS}), (2) add an accessor in {@link CryptoQueryProfile}, (3) record into it at the
  * call site. The provider registers every name in these three lists automatically.
+ *
+ * <p>None of these use the core {@code Timer} type, so none are summed into a query node's headline
+ * {@code time_in_nanos}. Phases with a per-sample distribution are histograms (which also report the
+ * aggregate via {@code _total}/{@code _count}); the rest are elapsed-nanos totals ({@link #NANO_TIMERS}).
  */
 public final class CryptoProfileNames {
 
     private CryptoProfileNames() {}
 
-    // ---- Timers (wall-clock phases; core reports the span across slices) ----
-    /**
-     * Total wall-clock time inside {@code CryptoDirectIOBlockLoader.load()} — the whole plugin
-     * block-load operation (disk read + footer/HKDF + decrypt + pool acquire + buffer copy + loop).
-     * This is the OUTER total; subtract {@link #DIRECTIO_READ} from it to get the non-IO
-     * ("application-side") time that is the optimization target: {@code crypto_load_time - crypto_io_time}.
-     */
-    public static final String LOAD = "crypto_load_time";
-    /** AES-CTR frame-based decrypt time. */
-    public static final String DECRYPT = "crypto_decrypt_time";
-    /** Direct-IO disk read time (readWithZeroByteRetry). */
-    public static final String DIRECTIO_READ = "crypto_io_time";
+    // ---- Elapsed-nanos totals (wall-clock phases with no histogram) ----
     /** Footer read + HKDF file-key derivation time. */
     public static final String FOOTER_HKDF = "crypto_footer_hkdf_time";
     /** Time blocked acquiring pool segments (includes stall/throttle waits). */
@@ -62,9 +55,8 @@ public final class CryptoProfileNames {
     /** Per-call total {@code load()} latency (ns) — distribution of the whole block-load operation. */
     public static final String LOAD_DIST = "crypto_load_time_dist";
 
-    /** All timer metric names. */
-    public static final List<String> TIMERS = Arrays
-        .asList(LOAD, DECRYPT, DIRECTIO_READ, FOOTER_HKDF, POOL_WAIT, L1_LOOKUP, L2_LOOKUP);
+    /** Elapsed-nanos total metric names (phases with no histogram). */
+    public static final List<String> NANO_TIMERS = Arrays.asList(FOOTER_HKDF, POOL_WAIT, L1_LOOKUP, L2_LOOKUP);
 
     /** All counter metric names. */
     public static final List<String> COUNTERS = Arrays

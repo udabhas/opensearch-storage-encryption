@@ -59,7 +59,6 @@ import org.opensearch.rest.RestController;
 import org.opensearch.rest.RestHandler;
 import org.opensearch.script.ScriptService;
 import org.opensearch.search.profile.ProfileMetric;
-import org.opensearch.search.profile.Timer;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.telemetry.tracing.Tracer;
 import org.opensearch.threadpool.ThreadPool;
@@ -84,15 +83,16 @@ public class CryptoDirectoryPlugin extends Plugin
      * (query-node, leaf) breakdown by the core; the read path records into the current one via
      * {@link org.opensearch.index.store.profile.CryptoQueryProfile#current()}.
      *
-     * <p>POC: a single {@code crypto_decrypt} Timer. Add more by adding a supplier here and a
-     * recording call at the relevant cost center.
+     * <p>Registers elapsed-nanos totals, counters and histograms. Add a cost center by adding a name to
+     * the relevant list in {@code CryptoProfileNames}, an accessor in {@code CryptoQueryProfile}, and one
+     * recording call at the cost center.
      */
     @Override
     public java.util.Optional<SearchPlugin.ProfileMetricsProvider> getQueryProfileMetricsProvider() {
         return java.util.Optional.of((searchContext, query) -> {
             java.util.List<java.util.function.Supplier<ProfileMetric>> suppliers = new java.util.ArrayList<>();
-            for (String t : CryptoProfileNames.TIMERS) {
-                suppliers.add(() -> new Timer(t));
+            for (String t : CryptoProfileNames.NANO_TIMERS) {
+                suppliers.add(() -> new org.opensearch.index.store.profile.CryptoNanosMetric(t));
             }
             for (String c : CryptoProfileNames.COUNTERS) {
                 suppliers.add(() -> new org.opensearch.index.store.profile.CryptoCounterMetric(c));
