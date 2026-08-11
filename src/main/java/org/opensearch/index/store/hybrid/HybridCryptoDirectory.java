@@ -124,13 +124,8 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public void deleteFile(String name) throws IOException {
-        String extension = FileSwitchDirectory.getExtension(name);
-
-        if (delegeteBufferPool(extension)) {
-            bufferPoolDirectory.deleteFile(name);
-        } else {
-            super.deleteFile(name);
-        }
+        // Route all deletes through NIOFS (super); do not delegate to the buffer-pool directory.
+        super.deleteFile(name);
     }
 
     /**
