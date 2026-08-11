@@ -38,7 +38,9 @@ import org.opensearch.test.OpenSearchTestCase;
 @SuppressWarnings("preview")
 public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTestCase {
 
-    private static final int BLOCK_SIZE = 8192;
+    // Derive from the production constant instead of hardcoding, so the test's block geometry tracks
+    // CACHE_BLOCK_SIZE (currently 64KB) rather than a stale literal.
+    private static final int BLOCK_SIZE = StaticConfigs.CACHE_BLOCK_SIZE;
     private static final ValueLayout.OfByte LAYOUT_BYTE = ValueLayout.JAVA_BYTE;
     private static final ValueLayout.OfInt LAYOUT_LE_INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(java.nio.ByteOrder.LITTLE_ENDIAN);
 
@@ -458,7 +460,7 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
         when(value.value()).thenReturn(refSegment);
         when(value.tryPin()).thenReturn(true);
 
-        long blockId = offset >>> 13; // CACHE_BLOCK_SIZE_POWER for 8 KiB blocks
+        long blockId = offset >>> StaticConfigs.CACHE_BLOCK_SIZE_POWER; // derive shift from production geometry
         radixBlockTable.put(blockId, value);
         when(mockCache.get(any(FileBlockCacheKey.class))).thenReturn(value);
         when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenReturn(value);
