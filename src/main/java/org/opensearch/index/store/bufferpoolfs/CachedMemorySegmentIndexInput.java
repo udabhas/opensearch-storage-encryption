@@ -18,7 +18,6 @@ import java.nio.file.Path;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
-import org.apache.lucene.util.GroupVIntUtil;
 import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheValue;
@@ -619,21 +618,14 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
 
     @Override
     public void readGroupVInt(int[] dst, int offset) throws IOException {
-        try {
-            final MemorySegment segment = getCacheBlockWithOffset(curPosition);
-            final int offsetInBlock = lastOffsetInBlock;
-
-            // "remaining" tells GroupVIntUtil how many bytes it may read in-segment before falling back
-            // to this input's byte-by-byte path. Clamp it to the logical (footer-excluded) length so a
-            // group near EOF cannot be assembled from the pooled block's zero-fill / footer-ciphertext
-            // tail; when fewer than a full group remains it defers to the length-guarded readByte path.
-            final long remaining = Math.min(segment.byteSize() - offsetInBlock, length - curPosition);
-
-            final int len = GroupVIntUtil.readGroupVInt(this, remaining, p -> segment.get(LAYOUT_LE_INT, p), offsetInBlock, dst, offset);
-            curPosition += len;
-        } catch (IllegalStateException | NullPointerException e) {
-            throw alreadyClosed(e);
-        }
+        // Lucene 10.5.0 removed the segment/reader fast-path overload
+        // GroupVIntUtil.readGroupVInt(DataInput, long, IntReader, long, int[], int) — it now
+        // unconditionally throws UnsupportedOperationException ("No longer implemented."). The
+        // optimization moved into Lucene's baseline decoder, which detects RandomAccessInput and reads
+        // group-varint values through this input's positional readInt(long). Delegate to that default;
+        // the bytes it reads are already-decrypted plaintext from the cached block (decryption happens
+        // once at block-load time in CryptoDirectIOBlockLoader, not per read).
+        super.readGroupVInt(dst, offset);
     }
 
     @Override
