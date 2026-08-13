@@ -183,26 +183,29 @@ public class HybridCryptoDirectoryTests {
         }
     }
 
-    // Disabled: deleteFile now routes all files through NIOFS (super), so it no longer delegates to the
-    // buffer-pool directory for data-file extensions. This test asserted the old data-file -> DirectIO
-    // routing contract.
-    // @Test
-    // public void testDeleteFileRoutesToDirectIOForDataFiles() throws Exception {
-    //     try (
-    //         HybridCryptoDirectory hybridDir = new HybridCryptoDirectory(
-    //             lockFactory,
-    //             bufferPoolDirectory,
-    //             provider,
-    //             keyResolver,
-    //             encryptionMetadataCache,
-    //             nioExtensions
-    //         )
-    //     ) {
-    //         // .cfs is NOT in nioExtensions, should route to DirectIO
-    //         hybridDir.deleteFile("test.cfs");
-    //         verify(bufferPoolDirectory).deleteFile("test.cfs");
-    //     }
-    // }
+    @Test
+    public void testDeleteFileDoesNotRouteToDirectIOForDataFiles() throws Exception {
+        HybridCryptoDirectory hybridDir = spy(
+            new HybridCryptoDirectory(lockFactory, bufferPoolDirectory, provider, keyResolver, encryptionMetadataCache, nioExtensions)
+        );
+
+        try {
+            // Create a file first
+            Files.createFile(tempDir.resolve("test.cfs"));
+
+            // .cfs is NOT in nioExtensions, but deleteFile now routes ALL files through NIOFS (super) —
+            // never the buffer-pool directory.
+            hybridDir.deleteFile("test.cfs");
+
+            // Verify the buffer-pool (DirectIO) path was NOT used
+            verify(bufferPoolDirectory, never()).deleteFile("test.cfs");
+
+            // Verify the file was actually deleted via NIOFS (not a no-op)
+            assertTrue(!Files.exists(tempDir.resolve("test.cfs")));
+        } finally {
+            hybridDir.close();
+        }
+    }
 
     @Test
     public void testDeleteFileRoutesToNIOForMetadataFiles() throws Exception {

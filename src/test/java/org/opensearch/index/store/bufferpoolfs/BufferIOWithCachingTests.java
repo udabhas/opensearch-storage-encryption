@@ -38,7 +38,9 @@ import org.opensearch.test.OpenSearchTestCase;
 @SuppressWarnings("unchecked")
 public class BufferIOWithCachingTests extends OpenSearchTestCase {
 
-    private static final int CACHE_BLOCK_SIZE = 8192; // DirectIoConfigs.CACHE_BLOCK_SIZE
+    // Track production geometry (currently 64KB) — a stale 8KB literal makes "full block" writes smaller
+    // than the real cache block, so they are never cached immediately. Mirrors the 31d69af fix.
+    private static final int CACHE_BLOCK_SIZE = StaticConfigs.CACHE_BLOCK_SIZE;
     private static final int BUFFER_SIZE = 65_536;
     private static final int FRAME_SIZE = 4 * 1024 * 1024; // Default frame size
 

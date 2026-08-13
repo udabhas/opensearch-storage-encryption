@@ -121,169 +121,171 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
             // finally, so it covers return/throw/degraded.
             final long loadStartNs = (prof != null) ? System.nanoTime() : 0L;
             try {
-            // Read via the shared FileChannel backend (node-level cached, positional Direct I/O reads).
-            // Reusing the open channel across block-cache misses avoids an open()/close() syscall per load.
-            // Per-read disk-IO latency for the crypto_io_time_dist histogram.
-            final long ioStartNs = (prof != null) ? System.nanoTime() : 0L;
-            MemorySegment readBytes = readWithZeroByteRetry(filePath, startOffset, readLength, arena, fsBlockSize);
-            long bytesRead = readBytes.byteSize();
+                // Read via the shared FileChannel backend (node-level cached, positional Direct I/O reads).
+                // Reusing the open channel across block-cache misses avoids an open()/close() syscall per load.
+                // Per-read disk-IO latency for the crypto_io_time_dist histogram.
+                final long ioStartNs = (prof != null) ? System.nanoTime() : 0L;
+                MemorySegment readBytes = readWithZeroByteRetry(filePath, startOffset, readLength, arena, fsBlockSize);
+                long bytesRead = readBytes.byteSize();
 
-            // Reject an empty read before recording read metrics, so a zero-size sample is not folded
-            // into crypto_read_size_bytes / crypto_bytes_read for a load that is about to throw.
-            if (bytesRead == 0) {
-                throw new java.io.EOFException("Unexpected EOF or empty read at offset " + startOffset + " for file " + filePath);
-            }
-
-            if (prof != null) {
-                prof.recordIoLatency(System.nanoTime() - ioStartNs);
-                prof.recordReadSize(bytesRead);
-                prof.addBytesRead(bytesRead);
-            }
-
-            String normalizedPath = filePath.toAbsolutePath().normalize().toString();
-            byte[] masterKey = keyResolver.getDataKey().getEncoded();
-
-            // Get footer from disk (readFooterFromDisk populates the metadata cache with an inode-stamped
-            // entry when the inode is stable — see EncryptionFooter.readViaFileChannel). Derive messageId/key
-            // straight from THIS footer rather than re-fetching via the path-based getOrLoadMetadata: a
-            // re-fetch would re-stat the name and could bind this read's footer to a concurrently-recreated
-            // inode (TOCTOU). The footer here is authoritative for the bytes we just read.
-            final org.opensearch.index.store.profile.CryptoNanosMetric footerTimer = (prof != null) ? prof.footerHkdfTimer() : null;
-            final long footerStartNs = (footerTimer != null) ? footerTimer.start() : 0L;
-            EncryptionFooter footer;
-            byte[] messageId;
-            byte[] fileKey;
-            try {
-                footer = readFooterFromDisk(filePath, masterKey);
-                messageId = footer.getMessageId();
-                fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveFileKey(masterKey, messageId);
-            } finally {
-                if (footerTimer != null)
-                    footerTimer.stop(footerStartNs);
-            }
-
-            // Use frame-based decryption with derived file key.
-            // Per-block decrypt latency for the crypto_decrypt_time_dist histogram (no-op when not
-            // profiling — current() returns null).
-            final long decryptStartNs = (prof != null) ? System.nanoTime() : 0L;
-            try {
-                MemorySegmentDecryptor
-                    .decryptInPlaceFrameBased(
-                        readBytes.address(),
-                        readBytes.byteSize(),
-                        fileKey,                                    // Derived file key (matches write path)
-                        masterKey,                                  // Master key for IV computation
-                        messageId,                                  // Message ID from footer
-                        org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
-                        startOffset,                                 // File offset
-                        filePath.toAbsolutePath().normalize().toString(),
-                        encryptionMetadataCache
-                    );
-            } finally {
-                if (prof != null) {
-                    prof.recordDecryptLatency(System.nanoTime() - decryptStartNs);
+                // Reject an empty read before recording read metrics, so a zero-size sample is not folded
+                // into crypto_read_size_bytes / crypto_bytes_read for a load that is about to throw.
+                if (bytesRead == 0) {
+                    throw new java.io.EOFException("Unexpected EOF or empty read at offset " + startOffset + " for file " + filePath);
                 }
-            }
 
-            int blockIndex = 0;
-            long bytesCopied = 0;
+                if (prof != null) {
+                    prof.recordIoLatency(System.nanoTime() - ioStartNs);
+                    prof.recordReadSize(bytesRead);
+                    prof.addBytesRead(bytesRead);
+                }
 
-            try {
-                while (blockIndex < blockCount && bytesCopied < bytesRead) {
-                    int remaining = (int) (bytesRead - bytesCopied);
-                    int toCopy = Math.min(CACHE_BLOCK_SIZE, remaining);
+                String normalizedPath = filePath.toAbsolutePath().normalize().toString();
+                byte[] masterKey = keyResolver.getDataKey().getEncoded();
 
-                    // Acquire a pooled buffer (5s for critical loads, 50ms for prefetch). If the pool
-                    // is exhausted/throttled and the timeout elapses, DEGRADE rather than fail the read:
-                    // back this block with a transient, non-pooled, non-cacheable buffer so the read
-                    // completes uncached instead of turning a memory-pressure throttle into a fatal
-                    // RecoveryFailedException (shard RED). The decrypted bytes are already in
-                    // {@code readBytes}; only the cache-warm of this block is sacrificed.
-                    //
-                    // The fallback MUST use a HEAP buffer (ByteBuffer.allocate), NOT allocateDirect: the
-                    // throttle/exhaustion we are recovering from means the -XX:MaxDirectMemorySize budget
-                    // is the scarce resource, so allocating MORE direct memory here would (a) add to the
-                    // pressure and (b) risk an OutOfMemoryError — an Error, not an IOException, which would
-                    // escape every catch on this path and propagate fatally through Caffeine to recovery,
-                    // re-creating the exact RED this fallback exists to prevent. Heap allocation draws from
-                    // the GC heap and cannot raise the direct-memory OOM. (This differs from the write path,
-                    // which on pool-acquire failure allocates nothing and simply skips the cache-warm.)
-                    RefCountedByteBuffer handle;
-                    final org.opensearch.index.store.profile.CryptoNanosMetric poolWaitTimer = (prof != null) ? prof.poolWaitTimer() : null;
-                    final long poolStartNs = (poolWaitTimer != null) ? poolWaitTimer.start() : 0L;
-                    try {
-                        handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
-                        if (poolWaitTimer != null)
-                            poolWaitTimer.stop(poolStartNs);
-                    } catch (InterruptedException e) {
-                        if (poolWaitTimer != null)
-                            poolWaitTimer.stop(poolStartNs);
-                        releaseHandles(result, blockIndex);
-                        Thread.currentThread().interrupt();
-                        throw new IOException("Interrupted while acquiring pool segment", e);
-                    } catch (IOException | OutOfMemoryError e) {
-                        // Degraded fallback: serve the block from a transient HEAP buffer that is NOT
-                        // pool-accounted and MUST NOT be cached (see RefCountedByteBuffer.transientFallback).
-                        // We also catch OutOfMemoryError defensively: if the pool's own allocateDirect
-                        // exhausted direct memory and rethrew the OOM, we degrade here rather than let the
-                        // Error fail the shard.
-                        // Count every degraded read (always — cheap) and WARN on the first occurrence in
-                        // each rate-limit window. DEBUG alone (off in prod) made a node silently serving
-                        // uncached reads under memory pressure look identical to a healthy one, hiding the
-                        // exact saturation signal needed during an incident.
-                        // Bare call — the metrics singleton is initialized at node startup.
-                        if (poolWaitTimer != null)
-                            poolWaitTimer.stop(poolStartNs);
-                        if (prof != null)
-                            prof.incDegradedReads();
-                        CryptoMetricsService.getInstance().recordDegradedRead();
-                        long nowMs = System.currentTimeMillis();
-                        long lastWarn = DEGRADED_WARN_GATE.get();
-                        if (nowMs - lastWarn >= DEGRADED_WARN_INTERVAL_MS && DEGRADED_WARN_GATE.compareAndSet(lastWarn, nowMs)) {
-                            LOGGER
-                                .warn(
-                                    "Pool exhausted/throttled — serving DEGRADED (uncached, heap-fallback) read for path={} "
-                                        + "offset={} block={}: {}. Node is shedding cache under memory pressure "
-                                        + "(see crypto.read.degraded.total).",
-                                    filePath,
-                                    startOffset,
-                                    blockIndex,
-                                    e.toString()
-                                );
-                        } else {
-                            LOGGER
-                                .debug(
-                                    "Pool acquire failed (degraded, uncached, heap fallback) for path={} offset={} block={}: {}",
-                                    filePath,
-                                    startOffset,
-                                    blockIndex,
-                                    e.toString()
+                // Get footer from disk (readFooterFromDisk populates the metadata cache with an inode-stamped
+                // entry when the inode is stable — see EncryptionFooter.readViaFileChannel). Derive messageId/key
+                // straight from THIS footer rather than re-fetching via the path-based getOrLoadMetadata: a
+                // re-fetch would re-stat the name and could bind this read's footer to a concurrently-recreated
+                // inode (TOCTOU). The footer here is authoritative for the bytes we just read.
+                final org.opensearch.index.store.profile.CryptoNanosMetric footerTimer = (prof != null) ? prof.footerHkdfTimer() : null;
+                final long footerStartNs = (footerTimer != null) ? footerTimer.start() : 0L;
+                EncryptionFooter footer;
+                byte[] messageId;
+                byte[] fileKey;
+                try {
+                    footer = readFooterFromDisk(filePath, masterKey);
+                    messageId = footer.getMessageId();
+                    fileKey = org.opensearch.index.store.key.HkdfKeyDerivation.deriveFileKey(masterKey, messageId);
+                } finally {
+                    if (footerTimer != null)
+                        footerTimer.stop(footerStartNs);
+                }
+
+                // Use frame-based decryption with derived file key.
+                // Per-block decrypt latency for the crypto_decrypt_time_dist histogram (no-op when not
+                // profiling — current() returns null).
+                final long decryptStartNs = (prof != null) ? System.nanoTime() : 0L;
+                try {
+                    MemorySegmentDecryptor
+                        .decryptInPlaceFrameBased(
+                            readBytes.address(),
+                            readBytes.byteSize(),
+                            fileKey,                                    // Derived file key (matches write path)
+                            masterKey,                                  // Master key for IV computation
+                            messageId,                                  // Message ID from footer
+                            org.opensearch.index.store.footer.EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE, // Frame size
+                            startOffset,                                 // File offset
+                            filePath.toAbsolutePath().normalize().toString(),
+                            encryptionMetadataCache
+                        );
+                } finally {
+                    if (prof != null) {
+                        prof.recordDecryptLatency(System.nanoTime() - decryptStartNs);
+                    }
+                }
+
+                int blockIndex = 0;
+                long bytesCopied = 0;
+
+                try {
+                    while (blockIndex < blockCount && bytesCopied < bytesRead) {
+                        int remaining = (int) (bytesRead - bytesCopied);
+                        int toCopy = Math.min(CACHE_BLOCK_SIZE, remaining);
+
+                        // Acquire a pooled buffer (5s for critical loads, 50ms for prefetch). If the pool
+                        // is exhausted/throttled and the timeout elapses, DEGRADE rather than fail the read:
+                        // back this block with a transient, non-pooled, non-cacheable buffer so the read
+                        // completes uncached instead of turning a memory-pressure throttle into a fatal
+                        // RecoveryFailedException (shard RED). The decrypted bytes are already in
+                        // {@code readBytes}; only the cache-warm of this block is sacrificed.
+                        //
+                        // The fallback MUST use a HEAP buffer (ByteBuffer.allocate), NOT allocateDirect: the
+                        // throttle/exhaustion we are recovering from means the -XX:MaxDirectMemorySize budget
+                        // is the scarce resource, so allocating MORE direct memory here would (a) add to the
+                        // pressure and (b) risk an OutOfMemoryError — an Error, not an IOException, which would
+                        // escape every catch on this path and propagate fatally through Caffeine to recovery,
+                        // re-creating the exact RED this fallback exists to prevent. Heap allocation draws from
+                        // the GC heap and cannot raise the direct-memory OOM. (This differs from the write path,
+                        // which on pool-acquire failure allocates nothing and simply skips the cache-warm.)
+                        RefCountedByteBuffer handle;
+                        final org.opensearch.index.store.profile.CryptoNanosMetric poolWaitTimer = (prof != null)
+                            ? prof.poolWaitTimer()
+                            : null;
+                        final long poolStartNs = (poolWaitTimer != null) ? poolWaitTimer.start() : 0L;
+                        try {
+                            handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
+                            if (poolWaitTimer != null)
+                                poolWaitTimer.stop(poolStartNs);
+                        } catch (InterruptedException e) {
+                            if (poolWaitTimer != null)
+                                poolWaitTimer.stop(poolStartNs);
+                            releaseHandles(result, blockIndex);
+                            Thread.currentThread().interrupt();
+                            throw new IOException("Interrupted while acquiring pool segment", e);
+                        } catch (IOException | OutOfMemoryError e) {
+                            // Degraded fallback: serve the block from a transient HEAP buffer that is NOT
+                            // pool-accounted and MUST NOT be cached (see RefCountedByteBuffer.transientFallback).
+                            // We also catch OutOfMemoryError defensively: if the pool's own allocateDirect
+                            // exhausted direct memory and rethrew the OOM, we degrade here rather than let the
+                            // Error fail the shard.
+                            // Count every degraded read (always — cheap) and WARN on the first occurrence in
+                            // each rate-limit window. DEBUG alone (off in prod) made a node silently serving
+                            // uncached reads under memory pressure look identical to a healthy one, hiding the
+                            // exact saturation signal needed during an incident.
+                            // Bare call — the metrics singleton is initialized at node startup.
+                            if (poolWaitTimer != null)
+                                poolWaitTimer.stop(poolStartNs);
+                            if (prof != null)
+                                prof.incDegradedReads();
+                            CryptoMetricsService.getInstance().recordDegradedRead();
+                            long nowMs = System.currentTimeMillis();
+                            long lastWarn = DEGRADED_WARN_GATE.get();
+                            if (nowMs - lastWarn >= DEGRADED_WARN_INTERVAL_MS && DEGRADED_WARN_GATE.compareAndSet(lastWarn, nowMs)) {
+                                LOGGER
+                                    .warn(
+                                        "Pool exhausted/throttled — serving DEGRADED (uncached, heap-fallback) read for path={} "
+                                            + "offset={} block={}: {}. Node is shedding cache under memory pressure "
+                                            + "(see crypto.read.degraded.total).",
+                                        filePath,
+                                        startOffset,
+                                        blockIndex,
+                                        e.toString()
+                                    );
+                            } else {
+                                LOGGER
+                                    .debug(
+                                        "Pool acquire failed (degraded, uncached, heap fallback) for path={} offset={} block={}: {}",
+                                        filePath,
+                                        startOffset,
+                                        blockIndex,
+                                        e.toString()
+                                    );
+                            }
+                            handle = RefCountedByteBuffer
+                                .transientFallback(
+                                    java.nio.ByteBuffer.allocate(CACHE_BLOCK_SIZE).order(java.nio.ByteOrder.LITTLE_ENDIAN),
+                                    CACHE_BLOCK_SIZE
                                 );
                         }
-                        handle = RefCountedByteBuffer
-                            .transientFallback(
-                                java.nio.ByteBuffer.allocate(CACHE_BLOCK_SIZE).order(java.nio.ByteOrder.LITTLE_ENDIAN),
-                                CACHE_BLOCK_SIZE
-                            );
-                    }
 
-                    if (toCopy > 0) {
-                        MemorySegment.copy(readBytes, bytesCopied, handle.segment(), 0, toCopy);
-                    }
+                        if (toCopy > 0) {
+                            MemorySegment.copy(readBytes, bytesCopied, handle.segment(), 0, toCopy);
+                        }
 
-                    result[blockIndex++] = handle;  // Store the handle, not the segment
-                    if (prof != null)
-                        prof.incBlocksDecrypted();
-                    bytesCopied += toCopy;
+                        result[blockIndex++] = handle;  // Store the handle, not the segment
+                        if (prof != null)
+                            prof.incBlocksDecrypted();
+                        bytesCopied += toCopy;
+                    }
+                } catch (IOException e) {
+                    // Only reached for the genuinely-fatal interrupt path above; pool exhaustion no longer
+                    // reaches here (it degrades). Release any handles acquired so far, then propagate.
+                    releaseHandles(result, blockIndex);
+                    throw e;
                 }
-            } catch (IOException e) {
-                // Only reached for the genuinely-fatal interrupt path above; pool exhaustion no longer
-                // reaches here (it degrades). Release any handles acquired so far, then propagate.
-                releaseHandles(result, blockIndex);
-                throw e;
-            }
 
-            return result;
+                return result;
 
             } finally {
                 if (prof != null)

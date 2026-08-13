@@ -34,7 +34,10 @@ import org.opensearch.test.OpenSearchTestCase;
 @SuppressWarnings("unchecked")
 public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
 
-    private static final int BLOCK_SIZE = 8192; // DirectIoConfigs.CACHE_BLOCK_SIZE
+    // Derive from production geometry (StaticConfigs.CACHE_BLOCK_SIZE, currently 64KB) rather than a
+    // stale 8KB literal — the block-offset math uses CACHE_BLOCK_SIZE_POWER, so a hardcoded 8192 made
+    // boundary reads land out of bounds (read-past-EOF). Mirrors the concurrency-test fix (31d69af).
+    private static final int BLOCK_SIZE = StaticConfigs.CACHE_BLOCK_SIZE;
     private static final ValueLayout.OfByte LAYOUT_BYTE = ValueLayout.JAVA_BYTE;
     private static final ValueLayout.OfShort LAYOUT_LE_SHORT = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfInt LAYOUT_LE_INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -1714,7 +1717,7 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         when(value.value()).thenReturn(refSegment);
         when(value.tryPin()).thenReturn(true);
 
-        long blockId = offset >>> 13; // CACHE_BLOCK_SIZE_POWER for 8 KiB blocks
+        long blockId = offset >>> StaticConfigs.CACHE_BLOCK_SIZE_POWER; // derive shift from production geometry
         radixBlockTable.put(blockId, value);
         when(mockCache.get(any(FileBlockCacheKey.class))).thenReturn(value);
         when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenReturn(value);

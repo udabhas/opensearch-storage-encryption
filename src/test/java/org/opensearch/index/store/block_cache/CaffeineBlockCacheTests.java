@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Before;
 import org.opensearch.index.store.block_loader.BlockLoader;
+import org.opensearch.index.store.bufferpoolfs.StaticConfigs;
 import org.opensearch.test.OpenSearchTestCase;
 
 import com.github.benmanes.caffeine.cache.Cache;
@@ -359,7 +360,7 @@ public class CaffeineBlockCacheTests extends OpenSearchTestCase {
         blockCache.loadForPrefetch(path, startOffset, blockCount);
 
         BlockCacheKey key0 = new FileBlockCacheKey(path, 0L);
-        BlockCacheKey key1 = new FileBlockCacheKey(path, 8192L); // CACHE_BLOCK_SIZE = 8192
+        BlockCacheKey key1 = new FileBlockCacheKey(path, StaticConfigs.CACHE_BLOCK_SIZE); // block 1 at the real block size
 
         assertNotNull("Block 0 should be cached", blockCache.get(key0));
         assertNotNull("Block 1 should be cached", blockCache.get(key1));

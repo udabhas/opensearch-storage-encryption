@@ -16,6 +16,8 @@ import java.nio.file.Path;
 import java.security.Provider;
 import java.security.Security;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -43,6 +45,7 @@ import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
 import org.opensearch.index.store.bufferpoolfs.RadixBlockTableRegistry;
+import org.opensearch.index.store.bufferpoolfs.StaticConfigs;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
@@ -90,6 +93,10 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
     private Pool<RefCountedByteBuffer> memorySegmentPool;
     private CaffeineBlockCache<RefCountedByteBuffer, RefCountedByteBuffer> blockCache;
     private Worker readAheadWorker;
+    // Per-test DirectIO executors created inside test methods; drained in tearDown so their threads
+    // don't leak past the suite (randomized-runner ThreadLeakError). The methods create local workers
+    // whose threads come from these executors.
+    private final List<ExecutorService> testExecutors = new ArrayList<>();
 
     /**
      * Helper method to register the resolver in the ShardKeyResolverRegistry
@@ -147,12 +154,12 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
         // Initialize EncryptionMetadataCache for each test
         encryptionMetadataCache = new EncryptionMetadataCache();
 
-        // Initialize DirectIO-specific components
-        // MemorySegmentPool(totalMemoryBytes, segmentSize)
-        // 16 segments * 8192 bytes = 131072 bytes total
+        // Initialize DirectIO-specific components. Segment size MUST equal the production cache block
+        // size (StaticConfigs.CACHE_BLOCK_SIZE, currently 64KB) — the block loader keys/reads blocks at
+        // CACHE_BLOCK_SIZE_POWER, so an 8KB segment can't hold a block and every read fails. 16 segments.
         memorySegmentPool = new MemorySegmentPool(
-            131072, // total memory in bytes (16 * 8192)
-            8192    // segment size (block size)
+            16 * StaticConfigs.CACHE_BLOCK_SIZE, // total memory (16 blocks)
+            StaticConfigs.CACHE_BLOCK_SIZE        // segment size == cache block size
         );
 
         // Create first key provider (Key A) with specific key bytes
@@ -244,6 +251,10 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
     @Override
     public void tearDown() throws Exception {
         // Clean up DirectIO resources
+        for (ExecutorService e : testExecutors) {
+            e.shutdownNow();
+        }
+        testExecutors.clear();
         if (readAheadWorker != null) {
             readAheadWorker.close();
         }
@@ -473,6 +484,7 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
         );
 
         ExecutorService executorA = Executors.newFixedThreadPool(4);
+        testExecutors.add(executorA);
         Worker readAheadWorkerA = new QueuingWorker(
             100, // queue capacity
             executorA
@@ -552,6 +564,7 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
         );
 
         ExecutorService executorA = Executors.newFixedThreadPool(4);
+        testExecutors.add(executorA);
         Worker readAheadWorkerA = new QueuingWorker(
             100, // queue capacity
             executorA
@@ -630,6 +643,7 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
         );
 
         ExecutorService executorA = Executors.newFixedThreadPool(4);
+        testExecutors.add(executorA);
         Worker readAheadWorkerA = new QueuingWorker(
             100, // queue capacity
             executorA
@@ -709,6 +723,7 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
         );
 
         ExecutorService executorA = Executors.newFixedThreadPool(4);
+        testExecutors.add(executorA);
         Worker readAheadWorkerA = new QueuingWorker(
             100, // queue capacity
             executorA

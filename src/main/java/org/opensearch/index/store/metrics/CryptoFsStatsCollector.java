@@ -43,7 +43,7 @@ public final class CryptoFsStatsCollector {
         public final double readKbPerSec;    // read throughput KB/s
         public final double writeKbPerSec;   // write throughput KB/s
         public final double readAwaitMs;     // avg ms per read op (Δreadtime / Δreadops)
-        public final double utilPct;         // device busy %  (Δio_time / Δwall) * 100
+        public final double utilPct;         // device busy % (Δio_time / Δwall) * 100
         public final double readIoSizeKb;    // avg KB per read op (Δreadkb / Δreadops)
         public final long intervalMillis;
 

@@ -108,17 +108,21 @@ public class StaticConfigs {
                 }
                 power = parsed;
             } catch (RuntimeException e) {
-                throw new IllegalArgumentException(
-                    "Invalid " + CACHE_BLOCK_SIZE_POWER_PROPERTY + "=[" + raw + "]: " + e.getMessage()
-                );
+                throw new IllegalArgumentException("Invalid " + CACHE_BLOCK_SIZE_POWER_PROPERTY + "=[" + raw + "]: " + e.getMessage());
             }
         }
         // O_DIRECT requires the block to be a whole multiple of the device alignment. Since both are
         // powers of two, this holds iff the block is >= the alignment.
         if ((1 << power) < DIRECT_IO_ALIGNMENT) {
             throw new IllegalArgumentException(
-                CACHE_BLOCK_SIZE_POWER_PROPERTY + "=" + power + " yields block " + (1 << power)
-                    + "B, smaller than Direct I/O alignment " + DIRECT_IO_ALIGNMENT + "B"
+                CACHE_BLOCK_SIZE_POWER_PROPERTY
+                    + "="
+                    + power
+                    + " yields block "
+                    + (1 << power)
+                    + "B, smaller than Direct I/O alignment "
+                    + DIRECT_IO_ALIGNMENT
+                    + "B"
             );
         }
         return power;
