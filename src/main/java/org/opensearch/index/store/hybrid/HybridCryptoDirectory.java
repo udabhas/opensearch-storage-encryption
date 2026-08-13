@@ -5,6 +5,7 @@
 package org.opensearch.index.store.hybrid;
 
 import java.io.IOException;
+import java.nio.file.NoSuchFileException;
 import java.security.Provider;
 import java.util.Set;
 
@@ -150,6 +151,13 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
         String destExtension = FileSwitchDirectory.getExtension(dest);
 
         if (delegeteBufferPool(sourceExtension) || delegeteBufferPool(destExtension)) {
+            // BufferPoolDirectory.rename issues a bare Files.move and does not consult FSDirectory's
+            // pendingDeletes set (which is populated here because deleteFile() routes to super/NIOFS).
+            // Mirror FSDirectory.rename's guard so renaming a pending-delete source fails with
+            // NoSuchFileException instead of silently moving a file that is logically deleted.
+            if (getPendingDeletions().contains(source)) {
+                throw new NoSuchFileException("file \"" + source + "\" is pending delete and cannot be moved");
+            }
             bufferPoolDirectory.rename(source, dest);
         } else {
             super.rename(source, dest);
