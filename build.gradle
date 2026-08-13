@@ -117,11 +117,14 @@ tasks.named('internalClusterTest').configure {
         // fast otherwise). The test cluster JVM does not set one by default, so provide it here.
         '-XX:MaxDirectMemorySize=1g'
     ]
-    // Temporarily disabled: these real-cluster tests need harness tuning (heap sizing,
-    // MaxDirectMemorySize, thread-leak filters) to run reliably here. The task is turned into a
-    // no-op so `check`/`build` skip it; sources are kept compilable.
-    // TODO: revisit and re-enable internalClusterTest.
-    enabled = false
+    // Runnable on demand (./gradlew internalClusterTest [--tests ...]) but kept OUT of check/build:
+    // these real-cluster tests still need harness tuning (heap sizing, MaxDirectMemorySize, thread-leak
+    // filters) to run reliably, so they must not gate the default lifecycle. onlyIf runs the task when it
+    // is explicitly requested on the command line and skips it when only pulled in transitively by
+    // check/build. TODO: revisit harness tuning, then fold back into check.
+    onlyIf {
+        gradle.startParameter.taskNames.any { it == 'internalClusterTest' || it.endsWith(':internalClusterTest') }
+    }
 }
 
 tasks.named('yamlRestTest').configure {
