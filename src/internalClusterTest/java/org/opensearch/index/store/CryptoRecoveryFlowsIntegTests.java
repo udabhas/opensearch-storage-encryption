@@ -4,10 +4,10 @@
  */
 package org.opensearch.index.store;
 
-import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
+import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -122,6 +122,82 @@ public class CryptoRecoveryFlowsIntegTests extends OpenSearchIntegTestCase {
         }
     }
 
+    // Read every doc from the replica copy so the REPLICA node's caches are warm before the primary churns.
+    private void warmReplicaReadAll(String index) {
+        SearchResponse response = client()
+            .prepareSearch(index)
+            .setPreference("_replica")
+            .setQuery(QueryBuilders.matchAllQuery())
+            .setSize(NUM_DOCS)
+            .get();
+        assertThat("warm replica read", response.getHits().getTotalHits().value(), equalTo((long) NUM_DOCS));
+    }
+
+    // Content assertion against a specific copy, using an explicit per-doc expected-value prefix.
+    private void assertAllDocsExpected(String index, String preference, String valuePrefix) {
+        SearchResponse response = client()
+            .prepareSearch(index)
+            .setPreference(preference)
+            .setQuery(QueryBuilders.matchAllQuery())
+            .setSize(NUM_DOCS)
+            .get();
+        assertThat(response.getHits().getTotalHits().value(), equalTo((long) NUM_DOCS));
+        boolean[] seen = new boolean[NUM_DOCS];
+        for (SearchHit hit : response.getHits().getHits()) {
+            int i = Integer.parseInt(hit.getId());
+            assertThat("doc " + i + " stale/corrupt on " + preference, hit.getSourceAsMap().get("field"), equalTo(valuePrefix + i));
+            seen[i] = true;
+        }
+        for (int i = 0; i < NUM_DOCS; i++) {
+            assertThat("doc " + i + " missing from " + preference + " copy", seen[i], is(true));
+        }
+    }
+
+    /**
+     * Replica under sustained primary churn: a warm, LIVE (never-closed) replica directory processes many
+     * delete-and-recreate cycles (its own merges of the replicated ops) while its block/FD caches hold the
+     * original generation. This is the §34 "strong vehicle" for the deleteFile->NIOFS stale-cache hazard —
+     * unlike relocate-back/restore, no {@code close()} runs between warm and reuse, so coherence here rests on
+     * Lucene's monotonic file naming rather than on close() invalidation. Coverage + gross-regression guard:
+     * a stale-cache read (or an encrypt/decrypt regression like the segments-on-recovery bug) surfaces as a
+     * per-doc value mismatch on the replica copy — a count-only check would not catch it.
+     */
+    public void testReplicaCatchUpUnderPrimaryChurnReadsCorrectContent() throws Exception {
+        internalCluster().startNodes(2);
+        String index = "test-replica-churn-content";
+        createIndex(index, cryptoIndexSettings(1, 1)); // 1 primary + 1 replica, one per node
+        ensureGreen(index);
+
+        indexDocsAndConsolidate(index); // gen-1 content, consolidated to one segment
+        warmReplicaReadAll(index); // warm the replica's caches for the gen-1 segment paths
+
+        // Churn the primary: full-overwrite rounds + periodic force-merge. Document-based replication applies
+        // the same ops on the replica and force-merges its copy too -> delete+recreate on the warm replica dir.
+        final int rounds = 5;
+        for (int r = 1; r <= rounds; r++) {
+            for (int i = 0; i < NUM_DOCS; i++) {
+                index(index, "_doc", String.valueOf(i), "field", "r" + r + "-" + i, "number", i);
+            }
+            client().admin().indices().prepareRefresh(index).get();
+            if (r % 2 == 0) {
+                client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+            }
+        }
+
+        // Deterministic final state so the assertion is race-free.
+        for (int i = 0; i < NUM_DOCS; i++) {
+            index(index, "_doc", String.valueOf(i), "field", "final-" + i, "number", i);
+        }
+        client().admin().indices().prepareRefresh(index).get();
+        client().admin().indices().prepareFlush(index).get();
+        client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+        ensureGreen(TimeValue.timeValueSeconds(60), index);
+
+        // Both copies must read the exact final content — the warm replica must not serve any earlier round.
+        assertAllDocsExpected(index, "_replica", "final-");
+        assertAllDocsExpected(index, "_primary", "final-");
+    }
+
     /**
      * Replica peer recovery: build a replica from a warmed primary and read the replica copy back. Proves the
      * peer-recovered (file + translog) bytes decrypt correctly on the target node.
@@ -137,11 +213,7 @@ public class CryptoRecoveryFlowsIntegTests extends OpenSearchIntegTestCase {
 
         // Add a replica -> peer recovery builds it on the other node.
         assertAcked(
-            client()
-                .admin()
-                .indices()
-                .prepareUpdateSettings(index)
-                .setSettings(Settings.builder().put("index.number_of_replicas", 1))
+            client().admin().indices().prepareUpdateSettings(index).setSettings(Settings.builder().put("index.number_of_replicas", 1))
         );
         ensureGreen(TimeValue.timeValueSeconds(60), index);
 
