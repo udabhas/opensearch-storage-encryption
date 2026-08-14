@@ -229,4 +229,94 @@ public class CryptoRecoveryFlowsIntegTests extends OpenSearchIntegTestCase {
 
         assertAllDocsContent(index, "_primary");
     }
+
+    /**
+     * Restore over a CLOSED index whose on-disk files have DIVERGED from the snapshot. This is the only
+     * restore scenario that actually drives the plugin's {@code deleteFile}: {@code FileRestoreContext} first
+     * reads the pre-existing (diverged) files via {@code store.getMetadata(...)} — warming the block/FD caches
+     * for those paths — then deletes same-named files before re-download and sweeps orphan files not in the
+     * snapshot ({@code store.directory().deleteFile(...)}), which under the deleteFile->NIOFS routing no longer
+     * clears the path-keyed caches. Guards that the reconcile + delete + re-download restore path reconstructs
+     * the snapshot's EXACT content and never serves stale bytes from the diverged generation.
+     */
+    public void testRestoreOverDivergedClosedIndexReadsCorrectContent() throws Exception {
+        internalCluster().startNodes(1);
+        String index = "test-restore-diverged";
+        createIndex(index, cryptoIndexSettings(1, 0));
+        ensureGreen(index);
+
+        // State S1: the content we snapshot and expect back.
+        for (int i = 0; i < NUM_DOCS; i++) {
+            index(index, "_doc", String.valueOf(i), "field", "v1-" + i, "number", i);
+        }
+        client().admin().indices().prepareRefresh(index).get();
+        client().admin().indices().prepareFlush(index).get();
+        client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+
+        assertAcked(
+            client()
+                .admin()
+                .cluster()
+                .preparePutRepository("test-repo")
+                .setType("fs")
+                .setSettings(Settings.builder().put("location", repoPath.resolve("snap-diverged").toString()))
+        );
+        CreateSnapshotResponse create = client()
+            .admin()
+            .cluster()
+            .prepareCreateSnapshot("test-repo", "snap-1")
+            .setWaitForCompletion(true)
+            .setIndices(index)
+            .get();
+        assertThat(create.getSnapshotInfo().state(), equalTo(SnapshotState.SUCCESS));
+
+        // Diverge on disk (state S2): overwrite every doc with a different value AND add extra docs, then
+        // consolidate so the on-disk segment files differ from the snapshot's.
+        for (int i = 0; i < NUM_DOCS; i++) {
+            index(index, "_doc", String.valueOf(i), "field", "v2-" + i, "number", i);
+        }
+        for (int i = NUM_DOCS; i < 2 * NUM_DOCS; i++) {
+            index(index, "_doc", String.valueOf(i), "field", "v2-" + i, "number", i);
+        }
+        client().admin().indices().prepareRefresh(index).get();
+        client().admin().indices().prepareFlush(index).get();
+        client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+
+        // Warm the node's caches on the diverged (S2) files before the restore reconciles/deletes them.
+        for (int i = 0; i < 2 * NUM_DOCS; i++) {
+            assertThat("warm read of diverged doc " + i, client().prepareGet(index, String.valueOf(i)).get().isExists(), is(true));
+        }
+
+        // Restore requires the index closed (RestoreService rejects restoring over an open index).
+        assertAcked(client().admin().indices().prepareClose(index));
+
+        RestoreSnapshotResponse restore = client()
+            .admin()
+            .cluster()
+            .prepareRestoreSnapshot("test-repo", "snap-1")
+            .setWaitForCompletion(true)
+            .get();
+        assertThat(restore.getRestoreInfo().successfulShards(), greaterThan(0));
+        ensureGreen(TimeValue.timeValueSeconds(60), index);
+
+        // The restored index must be EXACTLY S1: NUM_DOCS docs, each with its v1 value, and none of the
+        // overwritten/extra S2 content leaking through (which a stale path-keyed cache would surface).
+        SearchResponse response = client()
+            .prepareSearch(index)
+            .setPreference("_primary")
+            .setQuery(QueryBuilders.matchAllQuery())
+            .setSize(2 * NUM_DOCS)
+            .get();
+        assertThat(response.getHits().getTotalHits().value(), equalTo((long) NUM_DOCS));
+        boolean[] seen = new boolean[NUM_DOCS];
+        for (SearchHit hit : response.getHits().getHits()) {
+            int i = Integer.parseInt(hit.getId());
+            assertThat("restored doc " + i + " outside S1 range (extra S2 doc leaked)", i < NUM_DOCS, is(true));
+            assertThat("restored doc " + i + " has stale/diverged content", hit.getSourceAsMap().get("field"), equalTo("v1-" + i));
+            seen[i] = true;
+        }
+        for (int i = 0; i < NUM_DOCS; i++) {
+            assertThat("restored doc " + i + " missing", seen[i], is(true));
+        }
+    }
 }
