@@ -232,6 +232,117 @@ public final class CryptoTestDirectoryFactory {
     }
 
     /**
+     * A pair of {@link HybridCryptoDirectory} instances over the SAME on-disk path that SHARE one
+     * node-global block cache, memory pool, key resolver, and metadata cache. Models production, where the
+     * block/FD caches are node-global and each shard incarnation gets a fresh directory over a reused path.
+     * Close the pair (not the individual directories) to release the shared native pool.
+     */
+    public static final class SharedCacheHybridPair implements java.io.Closeable {
+        /** First incarnation — call {@link Directory#close()} on it to simulate the shard leaving the node. */
+        public final HybridCryptoDirectory first;
+        /** Second incarnation over the same path — models the shard returning / a new directory. */
+        public final HybridCryptoDirectory second;
+        private final MemorySegmentPool pool;
+        private final ExecutorService executorA;
+        private final ExecutorService executorB;
+
+        private SharedCacheHybridPair(
+            HybridCryptoDirectory first,
+            HybridCryptoDirectory second,
+            MemorySegmentPool pool,
+            ExecutorService executorA,
+            ExecutorService executorB
+        ) {
+            this.first = first;
+            this.second = second;
+            this.pool = pool;
+            this.executorA = executorA;
+            this.executorB = executorB;
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                second.close();
+            } finally {
+                executorA.shutdownNow();
+                executorB.shutdownNow();
+                pool.close();
+            }
+        }
+    }
+
+    /**
+     * Builds two {@link HybridCryptoDirectory} instances over {@code path} that SHARE one block cache, memory
+     * pool, key resolver, and metadata cache — the production shape (node-global caches, per-incarnation
+     * directory). The FIRST directory's {@code close()} runs the real {@code BufferPoolDirectory} prefix
+     * invalidation (block + FD caches) but does NOT close the shared pool, so the second directory stays usable.
+     * Used to prove that {@code close()}'s cache invalidation is what keeps a path reuse coherent.
+     */
+    public static SharedCacheHybridPair createSharedCacheHybridPair(Path path, LockFactory lockFactory) throws IOException {
+        initMetrics();
+        KeyResolver keyResolver = createKeyResolver();
+        EncryptionMetadataCache metadataCache = new EncryptionMetadataCache();
+
+        final int segmentSize = StaticConfigs.CACHE_BLOCK_SIZE;
+        final long maxCachedBlocks = 256;
+        final long totalMemory = 512L * segmentSize;
+        MemorySegmentPool pool = new MemorySegmentPool(totalMemory, segmentSize);
+        CryptoDirectIOBlockLoader blockLoader = new CryptoDirectIOBlockLoader(pool, keyResolver, metadataCache);
+
+        Cache<BlockCacheKey, BlockCacheValue<RefCountedByteBuffer>> caffeineCache = Caffeine
+            .newBuilder()
+            .maximumSize(maxCachedBlocks)
+            .expireAfterAccess(Duration.ofMinutes(5))
+            .recordStats()
+            .build();
+        CaffeineBlockCache<RefCountedByteBuffer, RefCountedByteBuffer> blockCache = new CaffeineBlockCache<>(
+            caffeineCache,
+            blockLoader,
+            maxCachedBlocks
+        );
+
+        // Shared L1 registry over the shared L2 cache (node-global in prod).
+        RadixBlockTableRegistry radixRegistry = new RadixBlockTableRegistry();
+
+        // Each directory gets its OWN read-ahead worker so closing the first does not close the second's worker;
+        // everything else (pool, block cache, loader, metadata cache, key resolver, L1 registry) is shared.
+        ExecutorService executorA = Executors.newFixedThreadPool(2);
+        ExecutorService executorB = Executors.newFixedThreadPool(2);
+        Worker workerA = new QueuingWorker(100, executorA);
+        Worker workerB = new QueuingWorker(100, executorB);
+
+        BufferPoolDirectory bpA = new BufferPoolDirectory(
+            path,
+            lockFactory,
+            PROVIDER,
+            keyResolver,
+            pool,
+            blockCache,
+            blockLoader,
+            workerA,
+            metadataCache,
+            radixRegistry
+        );
+        BufferPoolDirectory bpB = new BufferPoolDirectory(
+            path,
+            lockFactory,
+            PROVIDER,
+            keyResolver,
+            pool,
+            blockCache,
+            blockLoader,
+            workerB,
+            metadataCache,
+            radixRegistry
+        );
+
+        HybridCryptoDirectory first = new HybridCryptoDirectory(lockFactory, bpA, PROVIDER, keyResolver, metadataCache, NIO_EXTENSIONS);
+        HybridCryptoDirectory second = new HybridCryptoDirectory(lockFactory, bpB, PROVIDER, keyResolver, metadataCache, NIO_EXTENSIONS);
+        return new SharedCacheHybridPair(first, second, pool, executorA, executorB);
+    }
+
+    /**
      * Test-only HybridCryptoDirectory that routes ALL files through BufferPool,
      * overriding the extension-based routing logic. This ensures Lucene contract tests
      * exercise the encrypted BufferPool I/O path rather than the NIO pass-through.
