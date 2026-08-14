@@ -243,21 +243,11 @@ public final class CryptoTestDirectoryFactory {
         /** Second incarnation over the same path — models the shard returning / a new directory. */
         public final HybridCryptoDirectory second;
         private final MemorySegmentPool pool;
-        private final ExecutorService executorA;
-        private final ExecutorService executorB;
 
-        private SharedCacheHybridPair(
-            HybridCryptoDirectory first,
-            HybridCryptoDirectory second,
-            MemorySegmentPool pool,
-            ExecutorService executorA,
-            ExecutorService executorB
-        ) {
+        private SharedCacheHybridPair(HybridCryptoDirectory first, HybridCryptoDirectory second, MemorySegmentPool pool) {
             this.first = first;
             this.second = second;
             this.pool = pool;
-            this.executorA = executorA;
-            this.executorB = executorB;
         }
 
         @Override
@@ -265,11 +255,54 @@ public final class CryptoTestDirectoryFactory {
             try {
                 second.close();
             } finally {
-                executorA.shutdownNow();
-                executorB.shutdownNow();
                 pool.close();
             }
         }
+    }
+
+    /**
+     * A read-ahead worker that does nothing. Used by {@link #createSharedCacheHybridPair} so the ONLY thing
+     * that populates the shared block cache is the synchronous read path — no async prefetch can race
+     * {@code close()}'s invalidation and re-insert a stale block after it. That determinism is what makes the
+     * close()-invalidation guard reliable across seeds (a real QueuingWorker prefetch completing just after
+     * invalidation intermittently re-warms the reused path).
+     */
+    private static final class NoOpWorker implements Worker {
+        @Override
+        public <T extends AutoCloseable> boolean schedule(
+            org.opensearch.index.store.block_cache.BlockCache<T> blockCache,
+            Path path,
+            long offset,
+            long blockCount
+        ) {
+            return false;
+        }
+
+        @Override
+        public boolean isRunning() {
+            return false;
+        }
+
+        @Override
+        public int getQueueSize() {
+            return 0;
+        }
+
+        @Override
+        public int getQueueCapacity() {
+            return 0;
+        }
+
+        @Override
+        public void cancel(Path path) {}
+
+        @Override
+        public boolean isReadAheadPaused() {
+            return false;
+        }
+
+        @Override
+        public void close() {}
     }
 
     /**
@@ -305,12 +338,10 @@ public final class CryptoTestDirectoryFactory {
         // Shared L1 registry over the shared L2 cache (node-global in prod).
         RadixBlockTableRegistry radixRegistry = new RadixBlockTableRegistry();
 
-        // Each directory gets its OWN read-ahead worker so closing the first does not close the second's worker;
-        // everything else (pool, block cache, loader, metadata cache, key resolver, L1 registry) is shared.
-        ExecutorService executorA = Executors.newFixedThreadPool(2);
-        ExecutorService executorB = Executors.newFixedThreadPool(2);
-        Worker workerA = new QueuingWorker(100, executorA);
-        Worker workerB = new QueuingWorker(100, executorB);
+        // No-op read-ahead so the ONLY cache population is the synchronous read path; this removes the async
+        // prefetch-vs-close()-invalidation race that otherwise makes the guard flaky across seeds. A single
+        // stateless no-op worker is safe to share between both directories.
+        Worker worker = new NoOpWorker();
 
         BufferPoolDirectory bpA = new BufferPoolDirectory(
             path,
@@ -320,7 +351,7 @@ public final class CryptoTestDirectoryFactory {
             pool,
             blockCache,
             blockLoader,
-            workerA,
+            worker,
             metadataCache,
             radixRegistry
         );
@@ -332,14 +363,14 @@ public final class CryptoTestDirectoryFactory {
             pool,
             blockCache,
             blockLoader,
-            workerB,
+            worker,
             metadataCache,
             radixRegistry
         );
 
         HybridCryptoDirectory first = new HybridCryptoDirectory(lockFactory, bpA, PROVIDER, keyResolver, metadataCache, NIO_EXTENSIONS);
         HybridCryptoDirectory second = new HybridCryptoDirectory(lockFactory, bpB, PROVIDER, keyResolver, metadataCache, NIO_EXTENSIONS);
-        return new SharedCacheHybridPair(first, second, pool, executorA, executorB);
+        return new SharedCacheHybridPair(first, second, pool);
     }
 
     /**
