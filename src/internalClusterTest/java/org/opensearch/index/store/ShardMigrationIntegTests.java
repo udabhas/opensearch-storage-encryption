@@ -563,7 +563,7 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
         // the relocation silently failed/reverted). Assert the shard actually moved to B.
         assertPrimaryOnNode(index, nodeB);
 
-        // B -> A  (back onto the previously-hosting node; recovery recreates the same paths on A)
+        // B -> A (back onto the previously-hosting node; recovery recreates the same paths on A)
         updateAllocationRequire(index, nodeA);
         ensureGreen(TimeValue.timeValueSeconds(60), index);
         // And that it genuinely came back to A (the previously-hosting node) — this is the leg that exercises
