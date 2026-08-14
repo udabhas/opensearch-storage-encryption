@@ -126,8 +126,9 @@ public class NodeLevelKeyCache {
         String indexUuid = key.getIndexUuid();
         String indexName = key.getIndexName();
 
-        // Get resolver from registry
-        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(indexUuid, key.getShardId(), indexName);
+        // Get resolver from registry (node-scoped: the key carries the node scope, so a shard-close on one
+        // in-process node cannot make another node's live shard see a missing resolver)
+        KeyResolver resolver = ShardKeyResolverRegistry.getResolver(indexUuid, key.getShardId(), indexName, key.getNodeScope());
         if (resolver == null) {
             throw new IllegalStateException("No resolver registered for shard: " + key);
         }
@@ -169,11 +170,19 @@ public class NodeLevelKeyCache {
      * @throws Exception if key loading fails
      */
     public Key get(String indexUuid, int shardId, String indexName) throws Exception {
+        return get(indexUuid, shardId, indexName, null);
+    }
+
+    /**
+     * Node-scoped key fetch. A null {@code nodeScope} means "any node" (index-level / health lookups); a
+     * non-null scope isolates each in-process node's cache entry (see {@link ShardCacheKey}).
+     */
+    public Key get(String indexUuid, int shardId, String indexName, String nodeScope) throws Exception {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
         Objects.requireNonNull(indexName, "indexName cannot be null");
 
         try {
-            return keyCache.get(new ShardCacheKey(indexUuid, shardId, indexName));
+            return keyCache.get(new ShardCacheKey(indexUuid, shardId, indexName, nodeScope));
         } catch (CompletionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) {
@@ -193,9 +202,14 @@ public class NodeLevelKeyCache {
      * @param indexName the index name
      */
     public void evict(String indexUuid, int shardId, String indexName) {
+        evict(indexUuid, shardId, indexName, null);
+    }
+
+    /** Node-scoped eviction (see {@link ShardCacheKey}). */
+    public void evict(String indexUuid, int shardId, String indexName, String nodeScope) {
         Objects.requireNonNull(indexUuid, "indexUuid cannot be null");
         Objects.requireNonNull(indexName, "indexName cannot be null");
-        keyCache.invalidate(new ShardCacheKey(indexUuid, shardId, indexName));
+        keyCache.invalidate(new ShardCacheKey(indexUuid, shardId, indexName, nodeScope));
     }
 
     /**

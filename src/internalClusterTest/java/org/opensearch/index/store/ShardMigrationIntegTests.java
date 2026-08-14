@@ -79,12 +79,6 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
      * Tests explicit shard relocation between nodes with encrypted data.
      * Validates that encrypted shards can be moved and data remains accessible.
      */
-    // TODO(harness): still fails in isolation with KeyCacheException "No resolver registered for shard".
-    // Root: node-agnostic JVM-static ShardKeyResolverRegistry/NodeLevelKeyCache shared across in-process
-    // nodes — the relocation SOURCE's afterIndexShardClosed -> removeResolver evicts the shared resolver+key
-    // that the TARGET (still hosting the shard) needs. Distinct from the footer-auth key-value issue (fixed
-    // by the deterministic dummy key). Re-enable after node-scoping the registry/key-cache.
-    /*
     public void testShardRelocationBetweenNodes() throws Exception {
         // Start 3 nodes
         internalCluster().startNodes(3);
@@ -202,16 +196,11 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
             logger.info("No relocation performed - shards already optimally distributed");
         }
     }
-    */
 
     /**
      * Tests replica recovery when a node is restarted.
      * Validates encrypted replica shards can be properly recovered.
      */
-    // TODO(harness): node restart. Fails with KeyCacheException "No resolver registered for shard" — same
-    // node-agnostic JVM-static registry issue as testShardRelocationBetweenNodes (removeResolver on shard
-    // close evicts the shared resolver+key). Re-enable after node-scoping the registry (+ restart statics reset).
-    /*
     public void testReplicaRecoveryOnRestart() throws Exception {
         // Start 3 nodes
         internalCluster().startNodes(3);
@@ -288,7 +277,6 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
             assertThat(response3.getHits().getTotalHits().value(), equalTo((long) (finalNumDocs + newDocs)));
         }, 30, TimeUnit.SECONDS);
     }
-    */
 
     /**
      * Tests shard migration with concurrent read/write operations.
@@ -444,10 +432,6 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
      * Tests replica recovery after node restart with data added during downtime.
      * Validates that replicas can sync all changes from encrypted primaries.
      */
-    // TODO(harness): node restart + writes during downtime. Fails with KeyCacheException "No resolver
-    // registered for shard" — same node-agnostic JVM-static registry issue. Re-enable after node-scoping
-    // the registry (+ restart statics reset).
-    /*
     public void testReplicaRecoveryWithDataChanges() throws Exception {
         // Start 3 nodes
         internalCluster().startNodes(3);
@@ -527,7 +511,6 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
 
         logger.info("Replica recovery with data changes test completed successfully");
     }
-    */
 
     /**
      * Peer-recovery back onto a previously-hosting node, with a byte-level content check.

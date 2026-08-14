@@ -367,7 +367,15 @@ public class CryptoDirectoryPlugin extends Plugin
                 // and relocate-back returns it as a CACHE_HIT that skips keyfile regeneration -> keyless shard.
                 @Override
                 public void afterIndexShardClosed(ShardId shardId, @Nullable IndexShard indexShard, Settings shardIndexSettings) {
-                    ShardKeyResolverRegistry.removeResolver(shardId.getIndex().getUUID(), shardId.id(), shardId.getIndexName());
+                    // Node-scoped removal: derive THIS node's scope (its index-directory path) from the shard so
+                    // closing the shard here only evicts this node's resolver/key — never another in-process
+                    // node's live entry (the cross-node "No resolver registered" race). If the scope cannot be
+                    // derived, removeResolver skips removal (a bounded, harmless leak) rather than risk a clobber.
+                    String nodeScope = null;
+                    if (indexShard != null && indexShard.shardPath() != null && indexShard.shardPath().getDataPath() != null) {
+                        nodeScope = indexShard.shardPath().getDataPath().getParent().toString();
+                    }
+                    ShardKeyResolverRegistry.removeResolver(shardId.getIndex().getUUID(), shardId.id(), shardId.getIndexName(), nodeScope);
                 }
 
                 /*
@@ -397,11 +405,9 @@ public class CryptoDirectoryPlugin extends Plugin
                     * - Node restarts with replica recovery
                     * - Cluster topology changes
                     * */
-                    int nShards = idxSettings.getNumberOfShards();
-                    for (int i = 0; i < nShards; i++) {
-                        ShardKeyResolverRegistry.removeResolver(index.getUUID(), i, index.getName());
-                        NodeLevelKeyCache.getInstance().evict(index.getUUID(), i, index.getName());
-                    }
+                    // Index DELETE is cluster-wide: remove every node-scope's resolver + node-level key for this
+                    // index (across all in-process nodes), unlike shard-close which is per-node.
+                    ShardKeyResolverRegistry.removeAllForIndex(index.getUUID());
                 }
             });
         }

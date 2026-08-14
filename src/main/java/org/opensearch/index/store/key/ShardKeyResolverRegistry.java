@@ -14,6 +14,7 @@ import java.util.concurrent.ConcurrentMap;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.opensearch.common.crypto.MasterKeyProvider;
 
 /**
@@ -71,7 +72,8 @@ public class ShardKeyResolverRegistry {
         int shardId,
         String indexName
     ) {
-        ShardCacheKey key = new ShardCacheKey(indexUuid, shardId, indexName);
+        String nodeScope = nodeScopeOf(indexDirectory);
+        ShardCacheKey key = new ShardCacheKey(indexUuid, shardId, indexName, nodeScope);
 
         // Get or create index-level lock object for this index
         // This ensures all shards of the same index synchronize on the same lock
@@ -82,7 +84,7 @@ public class ShardKeyResolverRegistry {
         synchronized (indexLock) {
             return resolverCache.computeIfAbsent(key, k -> {
                 try {
-                    return new DefaultKeyResolver(indexUuid, indexName, indexDirectory, provider, keyProvider, shardId);
+                    return new DefaultKeyResolver(indexUuid, indexName, indexDirectory, provider, keyProvider, shardId, nodeScope);
                 } catch (KeyCacheException e) {
                     // KeyCacheException already has clean, actionable error message - just rethrow
                     throw e;
@@ -103,7 +105,37 @@ public class ShardKeyResolverRegistry {
      * @return the KeyResolver instance for this shard, or null if none exists
      */
     public static KeyResolver getResolver(String indexUuid, int shardId, String indexName) {
-        return resolverCache.get(new ShardCacheKey(indexUuid, shardId, indexName));
+        return getResolver(indexUuid, shardId, indexName, null);
+    }
+
+    /**
+     * Node-scoped resolver lookup. A null {@code nodeScope} means "any node" (index-level / health lookups)
+     * and falls back to {@link #getAnyResolverForIndex}; a non-null scope does an exact per-node lookup so one
+     * node's shard-close eviction cannot return another in-process node's resolver.
+     *
+     * @param indexUuid the index UUID
+     * @param shardId   the shard ID
+     * @param indexName the index name
+     * @param nodeScope the node-scope discriminator, or null for any-node lookup
+     * @return the resolver, or null if none matches
+     */
+    public static KeyResolver getResolver(String indexUuid, int shardId, String indexName, String nodeScope) {
+        if (nodeScope == null) {
+            return getAnyResolverForIndex(indexUuid);
+        }
+        return resolverCache.get(new ShardCacheKey(indexUuid, shardId, indexName, nodeScope));
+    }
+
+    /**
+     * Derives a node-unique scope string from the index directory. In production there is one node per JVM so
+     * this is effectively constant; across in-process test nodes the directory path differs per node, giving
+     * per-node isolation of the JVM-static resolver/key caches.
+     */
+    private static String nodeScopeOf(Directory indexDirectory) {
+        if (indexDirectory instanceof FSDirectory) {
+            return ((FSDirectory) indexDirectory).getDirectory().toString();
+        }
+        return indexDirectory.toString();
     }
 
     /**
@@ -117,8 +149,16 @@ public class ShardKeyResolverRegistry {
      * @param indexName the index name
      * @return the removed resolver, or null if no resolver was cached for this shard
      */
-    public static KeyResolver removeResolver(String indexUuid, int shardId, String indexName) {
-        ShardCacheKey key = new ShardCacheKey(indexUuid, shardId, indexName);
+    public static KeyResolver removeResolver(String indexUuid, int shardId, String indexName, String nodeScope) {
+        // Node-scoped: only remove THIS node's entry. A source node's shard-close must NOT evict another
+        // in-process node's resolver/key — that was the cross-node "No resolver registered" race. In production
+        // (one node per JVM) the node scope is the local node; across in-process test nodes it isolates them.
+        // If the node scope is unknown (null), skip removal — a bounded, harmless leak — rather than risk a
+        // cross-node evict.
+        if (nodeScope == null) {
+            return null;
+        }
+        ShardCacheKey key = new ShardCacheKey(indexUuid, shardId, indexName, nodeScope);
 
         // Lock-free by design: this runs on the cluster-applier thread, and getOrCreateResolver holds the
         // per-index lock across a synchronous KMS call. Taking that lock here could stall cluster-state
@@ -130,9 +170,52 @@ public class ShardKeyResolverRegistry {
         if (removed != null) {
             // Evict from node-level cache when shard is removed.
             try {
-                NodeLevelKeyCache.getInstance().evict(indexUuid, shardId, indexName);
+                NodeLevelKeyCache.getInstance().evict(indexUuid, shardId, indexName, nodeScope);
             } catch (IllegalStateException e) {
                 logger.debug("Could not evict from NodeLevelKeyCache: {}", e.getMessage());
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * Removes all cached resolvers for an index across every node scope, and evicts their node-level keys.
+     * Used on index DELETE, which is cluster-wide, so clearing every scope's entry is correct.
+     *
+     * @param indexUuid the index UUID whose resolvers should be removed
+     */
+    public static void removeAllForIndex(String indexUuid) {
+        for (ShardCacheKey key : new java.util.ArrayList<>(resolverCache.keySet())) {
+            if (key.getIndexUuid().equals(indexUuid) && resolverCache.remove(key) != null) {
+                try {
+                    NodeLevelKeyCache.getInstance().evict(key.getIndexUuid(), key.getShardId(), key.getIndexName(), key.getNodeScope());
+                } catch (IllegalStateException e) {
+                    logger.debug("Could not evict from NodeLevelKeyCache: {}", e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * Any-scope removal for the given shard (removes the (indexUuid, shardId) entry across every node scope).
+     * Retained for tests/legacy callers; production shard-close uses the node-scoped
+     * {@link #removeResolver(String, int, String, String)} to avoid evicting another node's entry.
+     *
+     * @return one of the removed resolvers, or null if none were cached
+     */
+    public static KeyResolver removeResolver(String indexUuid, int shardId, String indexName) {
+        KeyResolver removed = null;
+        for (ShardCacheKey k : new java.util.ArrayList<>(resolverCache.keySet())) {
+            if (k.getIndexUuid().equals(indexUuid) && k.getShardId() == shardId) {
+                KeyResolver r = resolverCache.remove(k);
+                if (r != null) {
+                    removed = r;
+                    try {
+                        NodeLevelKeyCache.getInstance().evict(k.getIndexUuid(), k.getShardId(), k.getIndexName(), k.getNodeScope());
+                    } catch (IllegalStateException e) {
+                        logger.debug("Could not evict from NodeLevelKeyCache: {}", e.getMessage());
+                    }
+                }
             }
         }
         return removed;

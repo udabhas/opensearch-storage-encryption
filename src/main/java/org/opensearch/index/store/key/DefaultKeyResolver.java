@@ -41,6 +41,9 @@ public class DefaultKeyResolver implements KeyResolver {
     private final Directory directory;
     private final MasterKeyProvider keyProvider;
     private final int shardId;
+    // Node-scope discriminator for the JVM-static NodeLevelKeyCache lookups (see ShardCacheKey). Ties this
+    // resolver's key-cache entry to this node so a shard-close on another in-process node cannot evict it.
+    private final String nodeScope;
 
     private static final String KEY_FILE = "keyfile";
 
@@ -55,6 +58,10 @@ public class DefaultKeyResolver implements KeyResolver {
      * @param shardId     the shard ID
      * @throws KeyCacheException if an I/O error occurs while reading or writing key metadata
      */
+    /**
+     * Backwards-compatible constructor (no explicit node scope). Used by unit tests; production creation goes
+     * through {@link ShardKeyResolverRegistry#getOrCreateResolver}, which supplies the node scope.
+     */
     public DefaultKeyResolver(
         String indexUuid,
         String indexName,
@@ -64,11 +71,25 @@ public class DefaultKeyResolver implements KeyResolver {
         int shardId
     )
         throws KeyCacheException {
+        this(indexUuid, indexName, directory, provider, keyProvider, shardId, null);
+    }
+
+    public DefaultKeyResolver(
+        String indexUuid,
+        String indexName,
+        Directory directory,
+        Provider provider,
+        MasterKeyProvider keyProvider,
+        int shardId,
+        String nodeScope
+    )
+        throws KeyCacheException {
         this.indexUuid = indexUuid;
         this.indexName = indexName;
         this.directory = directory;
         this.keyProvider = keyProvider;
         this.shardId = shardId;
+        this.nodeScope = nodeScope;
         initialize(shardId);
     }
 
@@ -197,7 +218,7 @@ public class DefaultKeyResolver implements KeyResolver {
     @Override
     public Key getDataKey() {
         try {
-            return NodeLevelKeyCache.getInstance().get(indexUuid, shardId, indexName);
+            return NodeLevelKeyCache.getInstance().get(indexUuid, shardId, indexName, nodeScope);
         } catch (Exception e) {
             // If it's already a KeyCacheException with clean message, just rethrow
             if (e instanceof KeyCacheException) {
