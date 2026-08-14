@@ -232,16 +232,28 @@ public class BufferPoolDirectory extends FSDirectory {
             // segments or putting plaintext blocks into the cache. The read path fills the cache
             // on demand (first read after write pays a disk read + decrypt).
             // This eliminates pool exhaustion, cache thrashing, and GC storms during writes.
-            return new CryptoOutputStreamIndexOutput(
-                name,
-                path,
-                fos,
-                this.keyResolver,
-                this.provider,
-                EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM,
-                path,
-                this.encryptionMetadataCache
-            );
+            try {
+                return new CryptoOutputStreamIndexOutput(
+                    name,
+                    path,
+                    fos,
+                    this.keyResolver,
+                    this.provider,
+                    EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM,
+                    path,
+                    this.encryptionMetadataCache
+                );
+            } catch (Throwable t) {
+                // Encrypting-output construction failed (e.g. key load threw): close the raw stream we just
+                // opened so it does not leak. Otherwise it is orphaned -> LeakFS failure in tests and a real
+                // FD leak in prod when getDataKey()/KMS errors mid-createOutput.
+                try {
+                    fos.close();
+                } catch (IOException ignore) {
+                    // best-effort close; propagate the original failure
+                }
+                throw t;
+            }
         } catch (Exception e) {
             CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_OUTPUT_ERROR);
             throw e;

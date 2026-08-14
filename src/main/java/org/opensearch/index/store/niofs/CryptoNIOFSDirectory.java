@@ -131,16 +131,24 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
             OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-            return new CryptoOutputStreamIndexOutput(
-                name,
-                path,
-                fos,
-                this.keyResolver,
-                provider,
-                algorithmId,
-                path,
-                this.encryptionMetadataCache
-            );
+            try {
+                return new CryptoOutputStreamIndexOutput(
+                    name,
+                    path,
+                    fos,
+                    this.keyResolver,
+                    provider,
+                    algorithmId,
+                    path,
+                    this.encryptionMetadataCache
+                );
+            } catch (Throwable t) {
+                // Encrypting-output construction failed (e.g. key load threw): close the raw stream we just
+                // opened so it does not leak. Otherwise the OutputStream is orphaned -> LeakFS failure in tests
+                // and a real FD leak in prod when getDataKey()/KMS errors mid-createOutput.
+                IOUtils.closeWhileHandlingException(fos);
+                throw t;
+            }
         } catch (Exception e) {
             CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_OUTPUT_ERROR);
             throw e;
@@ -160,16 +168,23 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(
-            name,
-            path,
-            fos,
-            this.keyResolver,
-            provider,
-            algorithmId,
-            path,
-            this.encryptionMetadataCache
-        );
+        try {
+            return new CryptoOutputStreamIndexOutput(
+                name,
+                path,
+                fos,
+                this.keyResolver,
+                provider,
+                algorithmId,
+                path,
+                this.encryptionMetadataCache
+            );
+        } catch (Throwable t) {
+            // See createOutput: close the raw stream if the encrypting wrapper fails to construct, so it does
+            // not leak (LeakFS failure in tests; real FD leak in prod on key/KMS errors).
+            IOUtils.closeWhileHandlingException(fos);
+            throw t;
+        }
     }
 
     @Override
