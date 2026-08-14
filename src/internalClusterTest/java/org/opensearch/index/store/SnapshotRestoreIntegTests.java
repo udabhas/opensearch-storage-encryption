@@ -18,6 +18,8 @@ import org.opensearch.plugins.Plugin;
 import org.opensearch.snapshots.SnapshotState;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 /**
  * Snapshot and restore integration tests for encrypted indices.
  * Tests that encrypted data can be successfully snapshotted and restored.
@@ -29,6 +31,7 @@ import org.opensearch.test.OpenSearchIntegTestCase;
  * - Survives multiple snapshot/restore cycles
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class SnapshotRestoreIntegTests extends OpenSearchIntegTestCase {
 
     @Override

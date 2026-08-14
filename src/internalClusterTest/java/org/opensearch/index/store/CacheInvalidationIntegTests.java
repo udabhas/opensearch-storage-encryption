@@ -19,12 +19,15 @@ import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 /**
  * Integration tests for cache invalidation when indices/shards are deleted.
  * Verifies that cache entries are properly cleaned up to prevent memory leaks
  * and stale data.
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
+@ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class CacheInvalidationIntegTests extends OpenSearchIntegTestCase {
 
     @Override
