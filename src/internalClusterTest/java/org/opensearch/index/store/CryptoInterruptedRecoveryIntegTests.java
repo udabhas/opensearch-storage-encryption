@@ -129,7 +129,11 @@ public class CryptoInterruptedRecoveryIntegTests extends OpenSearchIntegTestCase
         boolean[] seen = new boolean[NUM_DOCS];
         for (SearchHit hit : response.getHits().getHits()) {
             int i = Integer.parseInt(hit.getId());
-            assertThat("doc " + i + " stale/corrupt on source primary " + phase, hit.getSourceAsMap().get("field"), equalTo(valuePrefix + i));
+            assertThat(
+                "doc " + i + " stale/corrupt on source primary " + phase,
+                hit.getSourceAsMap().get("field"),
+                equalTo(valuePrefix + i)
+            );
             seen[i] = true;
         }
         for (int i = 0; i < NUM_DOCS; i++) {
@@ -158,10 +162,7 @@ public class CryptoInterruptedRecoveryIntegTests extends OpenSearchIntegTestCase
         String[] nodes = internalCluster().getNodeNames();
 
         String index = "test-source-inflight";
-        createIndex(
-            index,
-            Settings.builder().put(cryptoIndexSettings()).put("index.routing.allocation.require._name", nodes[0]).build()
-        );
+        createIndex(index, Settings.builder().put(cryptoIndexSettings()).put("index.routing.allocation.require._name", nodes[0]).build());
         ensureGreen(index);
         String source = copyHoldingNodeName(index);
         String target = source.equals(nodes[0]) ? nodes[1] : nodes[0];
