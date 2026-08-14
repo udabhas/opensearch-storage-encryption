@@ -79,11 +79,11 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
      * Tests explicit shard relocation between nodes with encrypted data.
      * Validates that encrypted shards can be moved and data remains accessible.
      */
-    // TODO(harness): temporarily disabled (with the two other recovery tests below). They fail on the
-    // JVM-static ShardKeyResolverRegistry being SHARED across in-process test nodes: on relocation/restart the
-    // source shard's removeResolver races the target's getOrCreateResolver, leaving no resolver ->
-    // KeyCacheException "No resolver registered for shard". Cannot happen in prod (one JVM per node).
-    // Harness artifact, orthogonal to the deleteFile->NIOFS change. Re-enable with a node-scoped test registry.
+    // TODO(harness): still fails in isolation with KeyCacheException "No resolver registered for shard".
+    // Root: node-agnostic JVM-static ShardKeyResolverRegistry/NodeLevelKeyCache shared across in-process
+    // nodes — the relocation SOURCE's afterIndexShardClosed -> removeResolver evicts the shared resolver+key
+    // that the TARGET (still hosting the shard) needs. Distinct from the footer-auth key-value issue (fixed
+    // by the deterministic dummy key). Re-enable after node-scoping the registry/key-cache.
     /*
     public void testShardRelocationBetweenNodes() throws Exception {
         // Start 3 nodes
@@ -208,8 +208,9 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
      * Tests replica recovery when a node is restarted.
      * Validates encrypted replica shards can be properly recovered.
      */
-    // TODO(harness): temporarily disabled — same JVM-static ShardKeyResolverRegistry cross-node race
-    // as testShardRelocationBetweenNodes above. Harness artifact, not the deleteFile->NIOFS change.
+    // TODO(harness): node restart. Fails with KeyCacheException "No resolver registered for shard" — same
+    // node-agnostic JVM-static registry issue as testShardRelocationBetweenNodes (removeResolver on shard
+    // close evicts the shared resolver+key). Re-enable after node-scoping the registry (+ restart statics reset).
     /*
     public void testReplicaRecoveryOnRestart() throws Exception {
         // Start 3 nodes
@@ -293,10 +294,6 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
      * Tests shard migration with concurrent read/write operations.
      * Validates that data operations continue successfully during shard relocation.
      */
-    // TODO(harness): temporarily disabled — relocation test that hits the same JVM-static
-    // ShardKeyResolverRegistry cross-node race; a mid-construction KeyCacheException leaks the
-    // already-opened OutputStream (file-handle leak flagged at suite teardown). Same bucket as the others.
-    /*
     public void testShardMigrationWithConcurrentOperations() throws Exception {
         // Start 3 nodes
         internalCluster().startNodes(3);
@@ -442,14 +439,14 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
             executor.awaitTermination(10, TimeUnit.SECONDS);
         }
     }
-    */
 
     /**
      * Tests replica recovery after node restart with data added during downtime.
      * Validates that replicas can sync all changes from encrypted primaries.
      */
-    // TODO(harness): temporarily disabled — same JVM-static ShardKeyResolverRegistry cross-node race as
-    // testShardRelocationBetweenNodes above. Harness artifact, not the deleteFile->NIOFS change.
+    // TODO(harness): node restart + writes during downtime. Fails with KeyCacheException "No resolver
+    // registered for shard" — same node-agnostic JVM-static registry issue. Re-enable after node-scoping
+    // the registry (+ restart statics reset).
     /*
     public void testReplicaRecoveryWithDataChanges() throws Exception {
         // Start 3 nodes
