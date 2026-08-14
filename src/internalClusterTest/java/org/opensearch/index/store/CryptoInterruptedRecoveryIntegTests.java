@@ -11,6 +11,8 @@ import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -113,6 +115,118 @@ public class CryptoInterruptedRecoveryIntegTests extends OpenSearchIntegTestCase
         for (int i = 0; i < NUM_DOCS; i++) {
             assertThat("doc " + i + " missing from replica after botched-recovery retry", seen[i], is(true));
         }
+    }
+
+    // Content assertion against the primary copy with an explicit per-doc expected-value prefix.
+    private void assertAllDocsPrimary(String index, String valuePrefix, String phase) {
+        SearchResponse response = client()
+            .prepareSearch(index)
+            .setPreference("_primary")
+            .setQuery(QueryBuilders.matchAllQuery())
+            .setSize(NUM_DOCS)
+            .get();
+        assertThat("doc count " + phase, response.getHits().getTotalHits().value(), equalTo((long) NUM_DOCS));
+        boolean[] seen = new boolean[NUM_DOCS];
+        for (SearchHit hit : response.getHits().getHits()) {
+            int i = Integer.parseInt(hit.getId());
+            assertThat("doc " + i + " stale/corrupt on source primary " + phase, hit.getSourceAsMap().get("field"), equalTo(valuePrefix + i));
+            seen[i] = true;
+        }
+        for (int i = 0; i < NUM_DOCS; i++) {
+            assertThat("doc " + i + " missing from source primary " + phase, seen[i], is(true));
+        }
+    }
+
+    private void assertPrimaryOnNode(String index, String expectedNode, String phase) {
+        ClusterState state = client().admin().cluster().prepareState().get().getState();
+        ShardRouting primary = state.routingTable().index(index).shard(0).primaryShard();
+        String actual = state.nodes().get(primary.currentNodeId()).getName();
+        assertThat("primary node " + phase, actual, equalTo(expectedNode));
+    }
+
+    /**
+     * Q2 — source-side reads during an in-flight relocation. Pause a relocation A-&gt;B mid file-transfer (hold
+     * the first FILE_CHUNK on a latch) so the SOURCE stays the live primary, then churn the source (force-merges
+     * delete old segments; deleteFile-&gt;NIOFS leaves the stale L2/FD entries behind) and search the source after
+     * each round. Every source-side search must return the exact current content. This exercises the source's
+     * bufferpool read path concurrently with recovery reads, which routing did NOT change. Coherence here rests
+     * on Lucene's monotonic segment naming (a merged-away name is never reused), so a stale read would only
+     * appear if that guarantee broke — a per-doc value mismatch would catch it. Regression/coverage guard.
+     */
+    public void testSourceReadsCorrectContentDuringInFlightRelocation() throws Exception {
+        internalCluster().startNodes(2);
+        String[] nodes = internalCluster().getNodeNames();
+
+        String index = "test-source-inflight";
+        createIndex(
+            index,
+            Settings.builder().put(cryptoIndexSettings()).put("index.routing.allocation.require._name", nodes[0]).build()
+        );
+        ensureGreen(index);
+        String source = copyHoldingNodeName(index);
+        String target = source.equals(nodes[0]) ? nodes[1] : nodes[0];
+
+        // gen-0 content, consolidated, and warm the source's caches.
+        for (int i = 0; i < NUM_DOCS; i++) {
+            index(index, "_doc", String.valueOf(i), "field", "v0-" + i, "number", i);
+        }
+        client().admin().indices().prepareRefresh(index).get();
+        client().admin().indices().prepareFlush(index).get();
+        client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+        assertAllDocsPrimary(index, "v0-", "before relocation");
+
+        // Hold the first recovery FILE_CHUNK on a latch so the relocation stays in-flight while we churn+read the
+        // source. Blocking this recovery send does NOT block the source's search/index thread pools.
+        MockTransportService sourceTransport = (MockTransportService) internalCluster().getInstance(TransportService.class, source);
+        TransportService targetTransport = internalCluster().getInstance(TransportService.class, target);
+        final CountDownLatch release = new CountDownLatch(1);
+        final AtomicBoolean held = new AtomicBoolean(false);
+        sourceTransport.addSendBehavior(targetTransport, (connection, requestId, action, request, options) -> {
+            if (action.equals(PeerRecoveryTargetService.Actions.FILE_CHUNK) && held.compareAndSet(false, true)) {
+                try {
+                    release.await(60, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            connection.sendRequest(requestId, action, request, options);
+        });
+
+        try {
+            // Start the relocation but do NOT wait for green; wait until a file chunk is actually being held.
+            client()
+                .admin()
+                .indices()
+                .prepareUpdateSettings(index)
+                .setSettings(Settings.builder().put("index.routing.allocation.require._name", target))
+                .get();
+            assertBusy(() -> assertThat("recovery reached in-flight file transfer", held.get(), is(true)), 60, TimeUnit.SECONDS);
+
+            // Source is still the live primary. Churn it (each round force-merges -> deletes old segments) and read
+            // it back; the source must serve correct content throughout the in-flight window.
+            for (int r = 1; r <= 3; r++) {
+                for (int i = 0; i < NUM_DOCS; i++) {
+                    index(index, "_doc", String.valueOf(i), "field", "r" + r + "-" + i, "number", i);
+                }
+                client().admin().indices().prepareRefresh(index).get();
+                client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+                assertPrimaryOnNode(index, source, "mid-flight round " + r + " (recovery must still be held)");
+                assertAllDocsPrimary(index, "r" + r + "-", "mid-flight round " + r);
+            }
+        } finally {
+            release.countDown();
+            sourceTransport.clearAllRules();
+        }
+
+        // Let the relocation finish, then assert correct content on the relocated primary.
+        ensureGreen(TimeValue.timeValueSeconds(120), index);
+        assertPrimaryOnNode(index, target, "after relocation completes");
+        for (int i = 0; i < NUM_DOCS; i++) {
+            index(index, "_doc", String.valueOf(i), "field", "final-" + i, "number", i);
+        }
+        client().admin().indices().prepareRefresh(index).get();
+        client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+        assertAllDocsPrimary(index, "final-", "after relocation completes");
     }
 
     /**
