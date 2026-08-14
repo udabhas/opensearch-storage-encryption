@@ -78,6 +78,13 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
+        // segments_N and .si are always plaintext; route to NIOFS on the raw NAME before extension-based
+        // routing, so a peer-recovery temp name (recovery.<id>.segments_N) — whose getExtension() returns
+        // "segments_N" (not in nioExtensions) — cannot mis-route the write to the encrypting buffer pool.
+        if (name.contains("segments_") || name.endsWith(".si")) {
+            return super.openInput(name, context);
+        }
+
         String extension = FileSwitchDirectory.getExtension(name);
 
         ensureOpen();
@@ -92,6 +99,12 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
+        // See openInput: keep segments_N/.si on the plaintext NIOFS path regardless of any temp prefix, so a
+        // recovery-written segments file (recovery.<id>.segments_N) is not encrypted then read back as plaintext.
+        if (name.contains("segments_") || name.endsWith(".si")) {
+            return super.createOutput(name, context);
+        }
+
         String extension = FileSwitchDirectory.getExtension(name);
 
         ensureOpen();
