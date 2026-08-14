@@ -126,12 +126,6 @@ public class CryptoRecoveryFlowsIntegTests extends OpenSearchIntegTestCase {
      * Replica peer recovery: build a replica from a warmed primary and read the replica copy back. Proves the
      * peer-recovered (file + translog) bytes decrypt correctly on the target node.
      */
-    // TODO(harness): temporarily disabled — the replica peer-recovers onto the OTHER in-process test node,
-    // whose JVM-static ShardKeyResolverRegistry/NodeLevelKeyCache state collides (no resolver registered for
-    // the recovering shard), so the replica shard fails to init and ensureGreen times out. Same statics-
-    // lifecycle harness bug as ShardMigrationIntegTests; cannot happen in production (one JVM per node).
-    // Re-enable once CryptoDirectoryPlugin.close() resets the singletons (or a node-scoped test registry lands).
-    /*
     public void testReplicaRecoveryReadsCorrectContent() throws Exception {
         internalCluster().startNodes(2);
         String index = "test-replica-recovery-content";
@@ -154,7 +148,6 @@ public class CryptoRecoveryFlowsIntegTests extends OpenSearchIntegTestCase {
         // Read specifically from the replica copy.
         assertAllDocsContent(index, "_replica");
     }
-    */
 
     /**
      * Primary relocation A -> B: warm node A, relocate the single shard to node B via allocation filtering,
