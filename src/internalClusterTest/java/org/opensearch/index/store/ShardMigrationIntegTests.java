@@ -20,6 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.opensearch.action.admin.cluster.reroute.ClusterRerouteResponse;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
 import org.opensearch.action.search.SearchResponse;
+import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.routing.allocation.command.MoveAllocationCommand;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
@@ -577,10 +579,16 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
         // A -> B
         updateAllocationRequire(index, nodeB);
         ensureGreen(TimeValue.timeValueSeconds(60), index);
+        // Guard against a false green: ensureGreen only needs a started primary (which could still be on A if
+        // the relocation silently failed/reverted). Assert the shard actually moved to B.
+        assertPrimaryOnNode(index, nodeB);
 
         // B -> A  (back onto the previously-hosting node; recovery recreates the same paths on A)
         updateAllocationRequire(index, nodeA);
         ensureGreen(TimeValue.timeValueSeconds(60), index);
+        // And that it genuinely came back to A (the previously-hosting node) — this is the leg that exercises
+        // the deleteFile->NIOFS path-keyed cache coherence, so it must really recover onto A, not stay on B.
+        assertPrimaryOnNode(index, nodeA);
 
         // CONTENT assertion, not just count: every doc must read back its exact value.
         for (int i = 0; i < nbDocs; i++) {
@@ -602,5 +610,14 @@ public class ShardMigrationIntegTests extends OpenSearchIntegTestCase {
             .prepareUpdateSettings(index)
             .setSettings(Settings.builder().put("index.routing.allocation.require._name", nodeName))
             .get();
+    }
+
+    /** Asserts the primary of shard 0 is actually assigned to the named node (proves the relocation completed). */
+    private void assertPrimaryOnNode(String index, String expectedNodeName) {
+        ClusterState state = client().admin().cluster().prepareState().get().getState();
+        ShardRouting primary = state.routingTable().index(index).shard(0).primaryShard();
+        assertThat("primary [" + index + "][0] should be assigned", primary.assignedToNode(), is(true));
+        String actualNodeName = state.nodes().get(primary.currentNodeId()).getName();
+        assertThat("shard [" + index + "][0] should be on " + expectedNodeName, actualNodeName, equalTo(expectedNodeName));
     }
 }
