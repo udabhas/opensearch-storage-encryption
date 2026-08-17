@@ -111,6 +111,20 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     }
 
     /**
+     * Current value of {@code node.store.crypto.write_cache_enabled} (dynamic node setting). When true,
+     * {@link org.opensearch.index.store.bufferpoolfs.BufferIOWithCaching} populates the plaintext block
+     * cache on write (write-through); when false it skips caching and behaves as encrypt-only streaming.
+     * Default OFF: A/B testing showed write-through caching is a net loss for indexing (pool saturation),
+     * so it is opt-in. Read by BufferIOWithCaching on the write path.
+     */
+    private static volatile boolean writeCacheEnabled = false;
+
+    /** @return whether write-through block caching is enabled (read by BufferIOWithCaching on writes). */
+    public static boolean isWriteCacheEnabled() {
+        return writeCacheEnabled;
+    }
+
+    /**
      * Lock for thread-safe initialization of shared resources.
      */
     private static final Object initLock = new Object();
@@ -230,6 +244,18 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             TimeValue.timeValueSeconds(-1),  // minimum: -1 means never expire
             Property.NodeScope
         );
+
+    /**
+     * Controls whether the buffer-pool write path populates the plaintext block cache on write
+     * (write-through). Default {@code false}: A/B testing showed write-through caching is a net loss for
+     * indexing (MemorySegmentPool saturation / throttling), so it is opt-in. When enabled,
+     * {@link org.opensearch.index.store.bufferpoolfs.BufferIOWithCaching} caches each written block so a
+     * read immediately after a write avoids a disk read + decrypt.
+     *
+     * <p>Dynamic node setting; the live value is mirrored into {@link #writeCacheEnabled}.
+     */
+    public static final Setting<Boolean> WRITE_CACHE_ENABLED_SETTING = Setting
+        .boolSetting("node.store.crypto.write_cache_enabled", false, Property.NodeScope, Property.Dynamic);
 
     /**
      * Get default encryption context from cluster metadata using the configured resolver.
@@ -568,6 +594,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      */
     public static void setNodeSettings(Settings settings) {
         nodeSettings = settings;
+        writeCacheEnabled = WRITE_CACHE_ENABLED_SETTING.get(settings);
     }
 
     /**
@@ -579,6 +606,14 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     public static void setClusterService(ClusterService service) {
         // Initialize encryption context resolver
         encryptionContextResolver = EncryptionContextResolverFactory.create(service);
+
+        // Register dynamic update consumer for the write-through cache toggle.
+        if (service != null && service.getClusterSettings() != null) {
+            service.getClusterSettings().addSettingsUpdateConsumer(WRITE_CACHE_ENABLED_SETTING, value -> {
+                LOGGER.info("Updating {} to {}", WRITE_CACHE_ENABLED_SETTING.getKey(), value);
+                writeCacheEnabled = value;
+            });
+        }
     }
 
     /**

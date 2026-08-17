@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -21,6 +22,8 @@ import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
 import org.junit.Before;
+import org.opensearch.common.settings.Settings;
+import org.opensearch.index.store.CryptoDirectoryFactory;
 import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheKey;
@@ -65,10 +68,18 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         new SecureRandom().nextBytes(testKey);
 
         tempFile = Files.createTempFile("test-buffer-io", ".dat");
+
+        // Write-through caching is opt-in (node.store.crypto.write_cache_enabled, default off). These
+        // tests exercise the caching path, so enable it. Reset in tearDown so the shared static toggle
+        // does not leak into other test classes.
+        CryptoDirectoryFactory
+            .setNodeSettings(Settings.builder().put(CryptoDirectoryFactory.WRITE_CACHE_ENABLED_SETTING.getKey(), true).build());
     }
 
     @After
     public void tearDown() throws Exception {
+        // Restore the toggle to its default (off) before leaving this class.
+        CryptoDirectoryFactory.setNodeSettings(Settings.EMPTY);
         super.tearDown();
         if (tempFile != null && Files.exists(tempFile)) {
             Files.delete(tempFile);
@@ -231,6 +242,39 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
 
         // Verify that block was cached
         verify(mockCache, atLeastOnce()).put(any(BlockCacheKey.class), any(RefCountedByteBuffer.class));
+    }
+
+    /**
+     * Tests that when write-through caching is disabled (node.store.crypto.write_cache_enabled=false,
+     * the default), a full-block write neither acquires a pool segment nor populates the block cache --
+     * i.e. the writer behaves as encrypt-only streaming.
+     */
+    public void testWriteCacheDisabledSkipsCaching() throws Exception {
+        // setUp enables the toggle; disable it for this test.
+        CryptoDirectoryFactory.setNodeSettings(Settings.EMPTY);
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+        try (
+            BufferIOWithCaching output = new BufferIOWithCaching(
+                "test",
+                tempFile,
+                baos,
+                testKey,
+                mockPool,
+                mockCache,
+                provider,
+                encryptionMetadataCache
+            )
+        ) {
+            byte[] fullBlock = new byte[CACHE_BLOCK_SIZE];
+            new SecureRandom().nextBytes(fullBlock);
+            output.writeBytes(fullBlock, fullBlock.length);
+        }
+
+        // No caching when disabled: no pool acquire and no cache put.
+        verify(mockPool, never()).tryAcquire(anyLong(), any(TimeUnit.class));
+        verify(mockCache, never()).put(any(BlockCacheKey.class), any(RefCountedByteBuffer.class));
     }
 
     /**

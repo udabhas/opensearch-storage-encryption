@@ -185,7 +185,8 @@ public class CryptoDirectoryPlugin extends Plugin
                 PoolSizeCalculator.NODE_POOL_SIZE_PERCENTAGE_SETTING,
                 PoolSizeCalculator.NODE_POOL_SIZE_PERCENTAGE_SMALL_SETTING,
                 PoolSizeCalculator.NODE_GC_HEADROOM_FRACTION_SETTING,
-                PoolSizeCalculator.NODE_PROACTIVE_SHRINK_ENABLED_SETTING
+                PoolSizeCalculator.NODE_PROACTIVE_SHRINK_ENABLED_SETTING,
+                CryptoDirectoryFactory.WRITE_CACHE_ENABLED_SETTING
             );
         return settings;
     }
