@@ -4,6 +4,7 @@
  */
 package org.opensearch.index.store.niofs;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -69,6 +70,7 @@ final class CachedRandomAccessInput implements RandomAccessInput {
 
     @Override
     public byte readByte(long pos) throws IOException {
+        ensureInBounds(pos, Byte.BYTES);
         try {
             MemorySegment seg = pinBlock(pos, Byte.BYTES);
             if (seg == null)
@@ -82,6 +84,7 @@ final class CachedRandomAccessInput implements RandomAccessInput {
 
     @Override
     public short readShort(long pos) throws IOException {
+        ensureInBounds(pos, Short.BYTES);
         try {
             MemorySegment seg = pinBlock(pos, Short.BYTES);
             if (seg == null)
@@ -98,6 +101,7 @@ final class CachedRandomAccessInput implements RandomAccessInput {
 
     @Override
     public int readInt(long pos) throws IOException {
+        ensureInBounds(pos, Integer.BYTES);
         try {
             MemorySegment seg = pinBlock(pos, Integer.BYTES);
             if (seg == null)
@@ -114,6 +118,7 @@ final class CachedRandomAccessInput implements RandomAccessInput {
 
     @Override
     public long readLong(long pos) throws IOException {
+        ensureInBounds(pos, Long.BYTES);
         try {
             MemorySegment seg = pinBlock(pos, Long.BYTES);
             if (seg == null)
@@ -125,6 +130,21 @@ final class CachedRandomAccessInput implements RandomAccessInput {
             return seg.get(LE_LONG, offsetInBlock);
         } catch (IOException e) {
             return readFallbackLong(pos);
+        }
+    }
+
+    /**
+     * Validates a read of {@code width} bytes at {@code pos} against the logical slice length before any
+     * block is resolved. A pooled block buffer is ALWAYS the full {@code CACHE_BLOCK_SIZE}, so the final
+     * block's tail past the logical length holds zero-fill or decrypted footer ciphertext; without this
+     * check an out-of-range read would return those bytes as data (silent under unauthenticated AES-CTR),
+     * while the disk-fallback path throws — so the two paths would disagree on EOF. Called FIRST in every
+     * reader, before the {@code try} that falls back to disk, so the {@link EOFException} propagates rather
+     * than being swallowed into a fallback. Written as {@code width > len - pos} so it cannot overflow.
+     */
+    private void ensureInBounds(long pos, int width) throws IOException {
+        if (pos < 0 || width > len - pos) {
+            throw new EOFException("read past EOF (pos=" + pos + ", width=" + width + ", len=" + len + "): " + path);
         }
     }
 

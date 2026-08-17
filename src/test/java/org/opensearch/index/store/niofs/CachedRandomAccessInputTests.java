@@ -81,6 +81,40 @@ public class CachedRandomAccessInputTests extends OpenSearchTestCase {
         assertEquals(123L, in.length());
     }
 
+    // ---- bounds enforcement (defect #1: the guard that stops a pooled block's tail being returned as data) ----
+
+    public void testReadPastEndThrowsEofForEachWidth() throws IOException {
+        final long len = 64;
+        final CachedRandomAccessInput in = inputWithBlockOfBytes(0L, len, (byte) 0xAB, diskWithBytes(len, (byte) 0xAB));
+
+        expectThrows(IOException.class, () -> in.readByte(len));
+        expectThrows(IOException.class, () -> in.readShort(len - 1));
+        expectThrows(IOException.class, () -> in.readInt(len - 3));
+        expectThrows(IOException.class, () -> in.readLong(len - 7));
+        expectThrows(IOException.class, () -> in.readBytes(len - 4, new byte[8], 0, 8));
+    }
+
+    public void testNegativePositionThrows() throws IOException {
+        final long len = 32;
+        final CachedRandomAccessInput in = inputWithBlockOfBytes(0L, len, (byte) 0x01, diskWithBytes(len, (byte) 0x01));
+        expectThrows(IOException.class, () -> in.readByte(-1));
+        expectThrows(IOException.class, () -> in.readLong(-8));
+    }
+
+    public void testLastValidReadOfEachWidthSucceeds() throws IOException {
+        final long len = 64;
+        final CachedRandomAccessInput in = inputWithBlockOfBytes(0L, len, (byte) 0x7F, diskWithBytes(len, (byte) 0x7F));
+
+        assertEquals("last byte", (byte) 0x7F, in.readByte(len - 1));
+        // widths that end exactly at the logical end must be allowed
+        in.readShort(len - 2);
+        in.readInt(len - 4);
+        in.readLong(len - 8);
+        final byte[] tail = new byte[8];
+        in.readBytes(len - 8, tail, 0, 8);
+        assertEquals("bulk tail byte", (byte) 0x7F, tail[7]);
+    }
+
     // ---- scalar reads served from the cached block ----
 
     public void testScalarReadsFromCachedBlock() throws IOException {
