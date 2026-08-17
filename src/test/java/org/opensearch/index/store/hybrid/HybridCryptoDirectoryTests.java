@@ -88,7 +88,12 @@ public class HybridCryptoDirectoryTests {
     }
 
     @Test
-    public void testCreateOutputRoutesToDirectIOForDataFiles() throws Exception {
+    public void testCreateOutputRoutesToNIOForDataFiles() throws Exception {
+        // Write routing is intentionally NIO-only: createOutput delegates to super (CryptoNIOFSDirectory)
+        // for ALL files, so BufferPool never sees a write. The extension-based BufferPool write route is
+        // commented out in HybridCryptoDirectory.createOutput; reads still route to BufferPool via openInput
+        // (see testOpenInputRoutesToDirectIOForDataFiles). .tim is a data extension but is no longer
+        // write-routed to BufferPool.
         try (
             HybridCryptoDirectory hybridDir = new HybridCryptoDirectory(
                 lockFactory,
@@ -99,14 +104,12 @@ public class HybridCryptoDirectoryTests {
                 nioExtensions
             )
         ) {
-            // Mock the createOutput for DirectIO
-            IndexOutput mockOutput = mock(IndexOutput.class);
-            when(bufferPoolDirectory.createOutput(eq("test.tim"), any(IOContext.class))).thenReturn(mockOutput);
-
-            // .tim is NOT in nioExtensions, should route to DirectIO
             IndexOutput output = hybridDir.createOutput("test.tim", IOContext.DEFAULT);
-            assertEquals(mockOutput, output);
-            verify(bufferPoolDirectory).createOutput(eq("test.tim"), any(IOContext.class));
+            assertNotNull(output);
+            output.close();
+
+            verify(bufferPoolDirectory, never()).createOutput(eq("test.tim"), any(IOContext.class));
+            assertTrue(Files.exists(tempDir.resolve("test.tim")));
         }
     }
 
@@ -231,7 +234,10 @@ public class HybridCryptoDirectoryTests {
     }
 
     @Test
-    public void testRoutingForVariousExtensions() throws Exception {
+    public void testCreateOutputRoutesToNIOForAllExtensions() throws Exception {
+        // Writes are NIO-only regardless of extension (the BufferPool write route is commented out in
+        // HybridCryptoDirectory.createOutput). Read routing by extension is unchanged and covered by the
+        // openInput tests.
         try (
             HybridCryptoDirectory hybridDir = new HybridCryptoDirectory(
                 lockFactory,
@@ -242,37 +248,16 @@ public class HybridCryptoDirectoryTests {
                 nioExtensions
             )
         ) {
-            IndexOutput mockOutput = mock(IndexOutput.class);
-
-            // Test data file extensions (should go to DirectIO)
-            String[] directIOExtensions = { "tim", "doc", "dvd", "nvd", "cfs", "kdd", "tip", "tmd" };
-            for (String ext : directIOExtensions) {
-                when(bufferPoolDirectory.createOutput(eq("test." + ext), any(IOContext.class))).thenReturn(mockOutput);
-                IndexOutput output = hybridDir.createOutput("test." + ext, IOContext.DEFAULT);
-                assertEquals("Extension ." + ext + " should route to DirectIO", mockOutput, output);
+            // data extensions that previously write-routed to BufferPool, plus an unknown extension
+            String[] extensions = { "tim", "doc", "dvd", "nvd", "cfs", "kdd", "tip", "tmd", "xyz" };
+            for (String ext : extensions) {
+                String fileName = "test." + ext;
+                IndexOutput output = hybridDir.createOutput(fileName, IOContext.DEFAULT);
+                assertNotNull(output);
+                output.close();
+                verify(bufferPoolDirectory, never()).createOutput(eq(fileName), any(IOContext.class));
+                assertTrue("write for ." + ext + " should land on disk via NIO", Files.exists(tempDir.resolve(fileName)));
             }
-        }
-    }
-
-    @Test
-    public void testUnknownExtensionRoutesToDirectIO() throws Exception {
-        try (
-            HybridCryptoDirectory hybridDir = new HybridCryptoDirectory(
-                lockFactory,
-                bufferPoolDirectory,
-                provider,
-                keyResolver,
-                encryptionMetadataCache,
-                nioExtensions
-            )
-        ) {
-            IndexOutput mockOutput = mock(IndexOutput.class);
-            // .xyz is not in nioExtensions, should route to DirectIO
-            when(bufferPoolDirectory.createOutput(eq("test.xyz"), any(IOContext.class))).thenReturn(mockOutput);
-
-            IndexOutput output = hybridDir.createOutput("test.xyz", IOContext.DEFAULT);
-            assertEquals(mockOutput, output);
-            verify(bufferPoolDirectory).createOutput(eq("test.xyz"), any(IOContext.class));
         }
     }
 }

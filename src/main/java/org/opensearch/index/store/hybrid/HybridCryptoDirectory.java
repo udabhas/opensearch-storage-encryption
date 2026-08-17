@@ -99,20 +99,26 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
-        // See openInput: keep segments_N/.si on the plaintext NIOFS path regardless of any temp prefix, so a
-        // recovery-written segments file (recovery.<id>.segments_N) is not encrypted then read back as plaintext.
-        if (name.contains("segments_") || name.endsWith(".si")) {
-            return super.createOutput(name, context);
-        }
-
-        String extension = FileSwitchDirectory.getExtension(name);
-
-        ensureOpen();
-        ensureCanRead(name);
-
-        if (delegeteBufferPool(extension)) {
-            return bufferPoolDirectory.createOutput(name, context);
-        }
+        // All writes go through the NIO path (super = CryptoNIOFSDirectory): it keeps segments_N/.si
+        // plaintext and encrypts everything else with CryptoOutputStreamIndexOutput (streaming, no
+        // pool/cache). On this path BufferPool is a read-only cache. This avoids a second FSDirectory
+        // owning write bookkeeping (pendingDeletes/temp counter/sync) for the same on-disk directory.
+        //
+        // To route BufferPool-extension writes through the write-through cache path
+        // (bufferPoolDirectory -> BufferIOWithCaching, gated at runtime by
+        // node.store.crypto.write_cache_enabled), uncomment the block below:
+        //
+        // // keep segments_N/.si on the plaintext NIOFS path regardless of any temp prefix, so a
+        // // recovery-written segments file (recovery.<id>.segments_N) is not encrypted then read as plaintext.
+        // if (name.contains("segments_") || name.endsWith(".si")) {
+        // return super.createOutput(name, context);
+        // }
+        // String extension = FileSwitchDirectory.getExtension(name);
+        // ensureOpen();
+        // ensureCanRead(name);
+        // if (delegeteBufferPool(extension)) {
+        // return bufferPoolDirectory.createOutput(name, context);
+        // }
 
         return super.createOutput(name, context);
     }
