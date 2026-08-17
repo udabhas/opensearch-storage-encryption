@@ -115,6 +115,63 @@ public class CachedRandomAccessInputTests extends OpenSearchTestCase {
         assertEquals("bulk tail byte", (byte) 0x7F, tail[7]);
     }
 
+    // ---- use-after-free / reachability fence (defect #6) ----
+
+    public void testPinBlockReturnsTheCacheValueSoCallersCanFenceIt() throws Exception {
+        final java.lang.reflect.Method pinBlock = CachedRandomAccessInput.class.getDeclaredMethod("pinBlock", long.class);
+        assertEquals(
+            "pinBlock must return the cache VALUE (wrapper) so read methods have something to reachabilityFence; "
+                + "returning a bare MemorySegment leaves callers nothing to keep alive across the read",
+            BlockCacheValue.class,
+            pinBlock.getReturnType()
+        );
+    }
+
+    /**
+     * Every read method must fence the wrapper it read through. Guards against a new read method being added,
+     * or an existing one refactored, without the fence -- the omission is invisible at runtime (it only bites
+     * when the GC frees the block mid-read). Counts call sites in the source; expects one per scalar read path
+     * (readByte, readShort, readInt, readLong). When the readBytes override lands (defect #5) this becomes 5.
+     */
+    public void testEveryReadMethodFencesTheWrapper() throws Exception {
+        final String rel = "src/main/java/org/opensearch/index/store/niofs/CachedRandomAccessInput.java";
+        java.nio.file.Path found = null;
+        java.nio.file.Path dir = java.nio.file.Paths.get(System.getProperty("user.dir")).toAbsolutePath();
+        for (int i = 0; i < 8 && dir != null; i++, dir = dir.getParent()) {
+            for (java.nio.file.Path c : new java.nio.file.Path[] {
+                dir.resolve(rel),
+                dir.resolve("opensearch-storage-encryption").resolve(rel) }) {
+                if (java.nio.file.Files.exists(c)) {
+                    found = c;
+                    break;
+                }
+            }
+            if (found != null) {
+                break;
+            }
+        }
+        assertNotNull("could not locate CachedRandomAccessInput.java from " + System.getProperty("user.dir"), found);
+        final String body = java.nio.file.Files.readString(found);
+
+        int callSites = 0;
+        for (String line : body.split("\n")) {
+            if (line.trim().equals("Reference.reachabilityFence(value);")) {
+                callSites++;
+            }
+        }
+        assertEquals(
+            "expected exactly one Reference.reachabilityFence(value) call per scalar read path "
+                + "(readByte, readShort, readInt, readLong); found "
+                + callSites,
+            4,
+            callSites
+        );
+        assertFalse(
+            "fencing the segment is a no-op under the global-arena flag -- fence the wrapper instead",
+            body.contains("reachabilityFence(seg)")
+        );
+    }
+
     // ---- scalar reads served from the cached block ----
 
     public void testScalarReadsFromCachedBlock() throws IOException {

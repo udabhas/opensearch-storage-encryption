@@ -8,6 +8,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.ref.Reference;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
 
@@ -72,11 +73,15 @@ final class CachedRandomAccessInput implements RandomAccessInput {
     public byte readByte(long pos) throws IOException {
         ensureInBounds(pos, Byte.BYTES);
         try {
-            MemorySegment seg = pinBlock(pos, Byte.BYTES);
-            if (seg == null)
+            BlockCacheValue<RefCountedByteBuffer> value = pinBlock(pos);
+            if (value == null)
                 return readFallbackByte(pos);
-            long offsetInBlock = (base + pos) & mask;
-            return seg.get(LAYOUT_BYTE, offsetInBlock);
+            try {
+                long offsetInBlock = (base + pos) & mask;
+                return value.value().segment().get(LAYOUT_BYTE, offsetInBlock);
+            } finally {
+                Reference.reachabilityFence(value);
+            }
         } catch (IOException e) {
             return readFallbackByte(pos);
         }
@@ -86,14 +91,18 @@ final class CachedRandomAccessInput implements RandomAccessInput {
     public short readShort(long pos) throws IOException {
         ensureInBounds(pos, Short.BYTES);
         try {
-            MemorySegment seg = pinBlock(pos, Short.BYTES);
-            if (seg == null)
+            BlockCacheValue<RefCountedByteBuffer> value = pinBlock(pos);
+            if (value == null)
                 return readFallbackShort(pos);
-            long offsetInBlock = (base + pos) & mask;
-            if (offsetInBlock + Short.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
-                return readFallbackShort(pos);
+            try {
+                long offsetInBlock = (base + pos) & mask;
+                if (offsetInBlock + Short.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
+                    return readFallbackShort(pos);
+                }
+                return value.value().segment().get(LE_SHORT, offsetInBlock);
+            } finally {
+                Reference.reachabilityFence(value);
             }
-            return seg.get(LE_SHORT, offsetInBlock);
         } catch (IOException e) {
             return readFallbackShort(pos);
         }
@@ -103,14 +112,18 @@ final class CachedRandomAccessInput implements RandomAccessInput {
     public int readInt(long pos) throws IOException {
         ensureInBounds(pos, Integer.BYTES);
         try {
-            MemorySegment seg = pinBlock(pos, Integer.BYTES);
-            if (seg == null)
+            BlockCacheValue<RefCountedByteBuffer> value = pinBlock(pos);
+            if (value == null)
                 return readFallbackInt(pos);
-            long offsetInBlock = (base + pos) & mask;
-            if (offsetInBlock + Integer.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
-                return readFallbackInt(pos);
+            try {
+                long offsetInBlock = (base + pos) & mask;
+                if (offsetInBlock + Integer.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
+                    return readFallbackInt(pos);
+                }
+                return value.value().segment().get(LE_INT, offsetInBlock);
+            } finally {
+                Reference.reachabilityFence(value);
             }
-            return seg.get(LE_INT, offsetInBlock);
         } catch (IOException e) {
             return readFallbackInt(pos);
         }
@@ -120,14 +133,18 @@ final class CachedRandomAccessInput implements RandomAccessInput {
     public long readLong(long pos) throws IOException {
         ensureInBounds(pos, Long.BYTES);
         try {
-            MemorySegment seg = pinBlock(pos, Long.BYTES);
-            if (seg == null)
+            BlockCacheValue<RefCountedByteBuffer> value = pinBlock(pos);
+            if (value == null)
                 return readFallbackLong(pos);
-            long offsetInBlock = (base + pos) & mask;
-            if (offsetInBlock + Long.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
-                return readFallbackLong(pos);
+            try {
+                long offsetInBlock = (base + pos) & mask;
+                if (offsetInBlock + Long.BYTES > StaticConfigs.CACHE_BLOCK_SIZE) {
+                    return readFallbackLong(pos);
+                }
+                return value.value().segment().get(LE_LONG, offsetInBlock);
+            } finally {
+                Reference.reachabilityFence(value);
             }
-            return seg.get(LE_LONG, offsetInBlock);
         } catch (IOException e) {
             return readFallbackLong(pos);
         }
@@ -150,9 +167,13 @@ final class CachedRandomAccessInput implements RandomAccessInput {
 
     /**
      * Resolve the block containing the given position from L1 → L2 cache.
-     * Returns the MemorySegment or null if unavailable.
+     * Returns the {@link BlockCacheValue} wrapper (or null if unavailable) rather than a bare
+     * {@link MemorySegment}: callers must keep the wrapper reachable across the native read via
+     * {@link Reference#reachabilityFence}, otherwise the GC could collect it and its Cleaner free the
+     * block's off-heap memory mid-read (use-after-free → SIGSEGV or recycled bytes). Handing back only the
+     * segment made that impossible, since the segment holds no reference to the wrapper.
      */
-    private MemorySegment pinBlock(long pos, int readSize) throws IOException {
+    private BlockCacheValue<RefCountedByteBuffer> pinBlock(long pos) throws IOException {
         long absPos = base + pos;
         long blockOffset = absPos & ~mask;
         long blockId = blockOffset >>> StaticConfigs.CACHE_BLOCK_SIZE_POWER;
@@ -163,7 +184,7 @@ final class CachedRandomAccessInput implements RandomAccessInput {
             if (entry != null) {
                 if (registry != null)
                     registry.recordHit();
-                return entry.value().segment();
+                return entry;
             }
             if (registry != null)
                 registry.recordMiss();
@@ -177,7 +198,7 @@ final class CachedRandomAccessInput implements RandomAccessInput {
             if (radixTable != null && !v.isTransient()) {
                 radixTable.put(blockId, v);
             }
-            return v.value().segment();
+            return v;
         }
 
         // L2 miss — try to load
@@ -186,7 +207,7 @@ final class CachedRandomAccessInput implements RandomAccessInput {
             if (radixTable != null && !loaded.isTransient()) {
                 radixTable.put(blockId, loaded);
             }
-            return loaded.value().segment();
+            return loaded;
         }
 
         return null; // caller falls back to NIO
