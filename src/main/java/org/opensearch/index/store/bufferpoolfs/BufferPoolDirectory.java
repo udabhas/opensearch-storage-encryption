@@ -39,7 +39,6 @@ import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.index.store.niofs.CryptoBufferedIndexInput;
-import org.opensearch.index.store.niofs.CryptoOutputStreamIndexOutput;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
@@ -228,19 +227,20 @@ public class BufferPoolDirectory extends FSDirectory {
             Path path = directory.resolve(name);
             OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-            // Use the non-caching encrypted output: encrypts data to disk without acquiring pool
-            // segments or putting plaintext blocks into the cache. The read path fills the cache
-            // on demand (first read after write pays a disk read + decrypt).
-            // This eliminates pool exhaustion, cache thrashing, and GC storms during writes.
+            // Write-through encrypted output: encrypts data to disk and, when write-through caching is
+            // enabled, populates the plaintext block cache so a read immediately after a write avoids a
+            // disk read + decrypt. Whether the cache is actually populated is gated inside
+            // BufferIOWithCaching by node.store.crypto.write_cache_enabled (default off), so with caching
+            // disabled this behaves as encrypt-only streaming with no pool/cache interaction.
             try {
-                return new CryptoOutputStreamIndexOutput(
+                return new BufferIOWithCaching(
                     name,
                     path,
                     fos,
-                    this.keyResolver,
+                    this.masterKeyBytes,
+                    this.memorySegmentPool,
+                    this.blockCache,
                     this.provider,
-                    EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM,
-                    path,
                     this.encryptionMetadataCache
                 );
             } catch (Throwable t) {
@@ -267,16 +267,28 @@ public class BufferPoolDirectory extends FSDirectory {
         Path path = directory.resolve(name);
         OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
 
-        return new CryptoOutputStreamIndexOutput(
-            name,
-            path,
-            fos,
-            this.keyResolver,
-            this.provider,
-            EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM,
-            path,
-            this.encryptionMetadataCache
-        );
+        // Same write-through writer as createOutput; cache population is gated inside BufferIOWithCaching
+        // by node.store.crypto.write_cache_enabled (default off).
+        try {
+            return new BufferIOWithCaching(
+                name,
+                path,
+                fos,
+                this.masterKeyBytes,
+                this.memorySegmentPool,
+                this.blockCache,
+                this.provider,
+                this.encryptionMetadataCache
+            );
+        } catch (Throwable t) {
+            // Close the raw stream if the encrypting wrapper fails to construct, so it does not leak.
+            try {
+                fos.close();
+            } catch (IOException ignore) {
+                // best-effort close; propagate the original failure
+            }
+            throw t;
+        }
     }
 
     // only close resources owned by this directory type.
