@@ -136,6 +136,7 @@ public class BufferPoolDirectory extends FSDirectory {
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
         try {
+            LOGGER.info("fdc-debug open thread={} file={} ioContext={}", Thread.currentThread().getName(), name, context);
             ensureOpen();
             ensureCanRead(name);
 

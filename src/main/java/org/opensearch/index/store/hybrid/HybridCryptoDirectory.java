@@ -14,6 +14,8 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
@@ -36,6 +38,7 @@ import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
  * @opensearch.internal
  */
 public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
+    private static final Logger LOGGER = LogManager.getLogger(HybridCryptoDirectory.class);
     private final BufferPoolDirectory bufferPoolDirectory;
     private final Set<String> nioExtensions;
 
@@ -78,6 +81,7 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
+        LOGGER.info("fdc-debug hybrid.openInput(READ) thread={} file={} ioContext={}", Thread.currentThread().getName(), name, context);
         // segments_N and .si are always plaintext; route to NIOFS on the raw NAME before extension-based
         // routing, so a peer-recovery temp name (recovery.<id>.segments_N) — whose getExtension() returns
         // "segments_N" (not in nioExtensions) — cannot mis-route the write to the encrypting buffer pool.
@@ -99,6 +103,7 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
+        LOGGER.info("fdc-debug hybrid.createOutput(WRITE) thread={} file={} ioContext={}", Thread.currentThread().getName(), name, context);
         // All writes go through the NIO path (super = CryptoNIOFSDirectory): it keeps segments_N/.si
         // plaintext and encrypts everything else with CryptoOutputStreamIndexOutput (streaming, no
         // pool/cache). On this path BufferPool is a read-only cache. This avoids a second FSDirectory
@@ -139,6 +144,7 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
      */
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
+        LOGGER.info("fdc-debug hybrid.createTempOutput(WRITE-TMP) thread={} prefix={} suffix={} ioContext={}", Thread.currentThread().getName(), prefix, suffix, context);
         return super.createTempOutput(prefix, suffix, context);
     }
 
