@@ -15,6 +15,8 @@ import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
@@ -48,6 +50,8 @@ import org.opensearch.index.store.read_ahead.ReadaheadManager;
  */
 @SuppressWarnings("preview")
 public class CachedMemorySegmentIndexInput extends IndexInput implements RandomAccessInput {
+
+    private static final Logger LOGGER = LogManager.getLogger(CachedMemorySegmentIndexInput.class);
 
     static final ValueLayout.OfByte LAYOUT_BYTE = ValueLayout.JAVA_BYTE;
     static final ValueLayout.OfShort LAYOUT_LE_SHORT = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -904,6 +908,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
     @Override
     @SuppressWarnings("ConvertToTryWithResources")
     public final void close() throws IOException {
+        LOGGER.debug("fdc-debug : close called for {}", this.path);
         if (!isOpen) {
             return;
         }
