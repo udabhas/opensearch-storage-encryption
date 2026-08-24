@@ -94,7 +94,16 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
 
     @Override
     public RefCountedByteBuffer[] load(Path filePath, long startOffset, long blockCount, long poolTimeoutMs) throws Exception {
-        LOGGER.debug("fdc-debug loader thread={} file={} offset={} blocks={} readBytes={} blockSize={}", Thread.currentThread().getName(), filePath, startOffset, blockCount, (blockCount << CACHE_BLOCK_SIZE_POWER), CACHE_BLOCK_SIZE);
+        LOGGER
+            .debug(
+                "fdc-debug loader thread={} file={} offset={} blocks={} readBytes={} blockSize={}",
+                Thread.currentThread().getName(),
+                filePath,
+                startOffset,
+                blockCount,
+                (blockCount << CACHE_BLOCK_SIZE_POWER),
+                CACHE_BLOCK_SIZE
+            );
         if (!Files.exists(filePath)) {
             throw new NoSuchFileException(filePath.toString());
         }

@@ -908,10 +908,16 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
     @Override
     @SuppressWarnings("ConvertToTryWithResources")
     public final void close() throws IOException {
-        LOGGER.debug("fdc-debug : close called for {}", this.path);
         if (!isOpen) {
             return;
         }
+
+        // fdc-debug (throwaway instrumentation, Track 17): REAL closes only. Deliberately placed
+        // BELOW the isOpen guard so no-op double-closes are not counted - the opens-vs-closes
+        // surplus arithmetic (surplus == handles still held) depends on that. isSlice separates the
+        // master from clones/slices: clone() and slice() both go through buildSlice(.., true), and
+        // only !isSlice does the real teardown (registry release + readaheadManager.close()).
+        LOGGER.debug("fdc-debug close isSlice={} id={} path={}", isSlice, System.identityHashCode(this), path);
 
         // Mark as closed to ensure all future accesses throw AlreadyClosedException
         isOpen = false;

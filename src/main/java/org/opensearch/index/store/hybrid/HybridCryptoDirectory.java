@@ -8,14 +8,15 @@ import java.io.IOException;
 import java.nio.file.NoSuchFileException;
 import java.security.Provider;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.FileSwitchDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
@@ -39,6 +40,37 @@ import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
  */
 public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
     private static final Logger LOGGER = LogManager.getLogger(HybridCryptoDirectory.class);
+
+    // ---- fdc-debug: caller inventory for openInput (throwaway instrumentation, Track 17) ----
+    // Safe to stack-walk here because openInput is a shard-LIFECYCLE event, not a read: measured
+    // 2026-08-24 at ~10.4k opens per recovery and ZERO while idle. (Do NOT do this per-block on
+    // the read path - see journal §23.) The full chain is emitted once per distinct call path;
+    // every other line carries only the hash, so a recovery costs ~10.4k short lines, not 10.4k
+    // stack dumps.
+    private static final int FDC_MAX_FRAMES = 20;
+    private static final Set<Integer> FDC_SEEN_CALLSITES = ConcurrentHashMap.newKeySet();
+
+    /** OpenSearch/Lucene frames only, capped. Lazy: frames past the cap are never materialised. */
+    private static String fdcCallerChain(int maxFrames) {
+        StringBuilder sb = new StringBuilder(256);
+        StackWalker.getInstance().walk(frames -> {
+            frames
+                .filter(f -> f.getClassName().startsWith("org.opensearch") || f.getClassName().startsWith("org.apache.lucene"))
+                .limit(maxFrames)
+                .forEach(
+                    f -> sb
+                        .append(f.getClassName())
+                        .append('.')
+                        .append(f.getMethodName())
+                        .append(':')
+                        .append(f.getLineNumber())
+                        .append(" <- ")
+                );
+            return null;
+        });
+        return sb.toString();
+    }
+
     private final BufferPoolDirectory bufferPoolDirectory;
     private final Set<String> nioExtensions;
 
@@ -81,7 +113,29 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        LOGGER.debug("fdc-debug hybrid.openInput(READ) thread={} file={} ioContext={}", Thread.currentThread().getName(), name, context);
+        if (LOGGER.isDebugEnabled()) {
+            String chain = fdcCallerChain(FDC_MAX_FRAMES);
+            int callsite = chain.hashCode();
+            if (FDC_SEEN_CALLSITES.add(callsite)) {
+                LOGGER
+                    .debug(
+                        "fdc-debug callsite NEW hash={} file={} ioContext={} thread={} chain={}",
+                        callsite,
+                        name,
+                        context,
+                        Thread.currentThread().getName(),
+                        chain
+                    );
+            }
+            LOGGER
+                .debug(
+                    "fdc-debug hybrid.openInput(READ) thread={} file={} ioContext={} callsite={}",
+                    Thread.currentThread().getName(),
+                    name,
+                    context,
+                    callsite
+                );
+        }
         // segments_N and .si are always plaintext; route to NIOFS on the raw NAME before extension-based
         // routing, so a peer-recovery temp name (recovery.<id>.segments_N) — whose getExtension() returns
         // "segments_N" (not in nioExtensions) — cannot mis-route the write to the encrypting buffer pool.
@@ -103,7 +157,8 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
-        LOGGER.debug("fdc-debug hybrid.createOutput(WRITE) thread={} file={} ioContext={}", Thread.currentThread().getName(), name, context);
+        LOGGER
+            .debug("fdc-debug hybrid.createOutput(WRITE) thread={} file={} ioContext={}", Thread.currentThread().getName(), name, context);
         // All writes go through the NIO path (super = CryptoNIOFSDirectory): it keeps segments_N/.si
         // plaintext and encrypts everything else with CryptoOutputStreamIndexOutput (streaming, no
         // pool/cache). On this path BufferPool is a read-only cache. This avoids a second FSDirectory
@@ -144,7 +199,14 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
      */
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
-        LOGGER.debug("fdc-debug hybrid.createTempOutput(WRITE-TMP) thread={} prefix={} suffix={} ioContext={}", Thread.currentThread().getName(), prefix, suffix, context);
+        LOGGER
+            .debug(
+                "fdc-debug hybrid.createTempOutput(WRITE-TMP) thread={} prefix={} suffix={} ioContext={}",
+                Thread.currentThread().getName(),
+                prefix,
+                suffix,
+                context
+            );
         return super.createTempOutput(prefix, suffix, context);
     }
 
