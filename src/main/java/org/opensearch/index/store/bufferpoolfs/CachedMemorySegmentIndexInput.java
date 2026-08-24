@@ -14,6 +14,8 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -52,6 +54,35 @@ import org.opensearch.index.store.read_ahead.ReadaheadManager;
 public class CachedMemorySegmentIndexInput extends IndexInput implements RandomAccessInput {
 
     private static final Logger LOGGER = LogManager.getLogger(CachedMemorySegmentIndexInput.class);
+
+    // ---- fdc-debug: closer inventory for close() (throwaway instrumentation, Track 17) ----
+    // Mirror of HybridCryptoDirectory.fdcCallerChain (deliberately duplicated rather than shared:
+    // this is throwaway debug code and not worth a cross-package utility). Bounded for the same
+    // reason as the open side - close() is a shard-LIFECYCLE / traversal-teardown event, not a
+    // per-block read. Full chain once per distinct closer; every other line carries only the hash.
+    private static final int FDC_MAX_FRAMES = 20;
+    private static final Set<Integer> FDC_SEEN_CLOSESITES = ConcurrentHashMap.newKeySet();
+
+    /** OpenSearch/Lucene frames only, capped. Lazy: frames past the cap are never materialised. */
+    private static String fdcCallerChain(int maxFrames) {
+        StringBuilder sb = new StringBuilder(256);
+        StackWalker.getInstance().walk(frames -> {
+            frames
+                .filter(f -> f.getClassName().startsWith("org.opensearch") || f.getClassName().startsWith("org.apache.lucene"))
+                .limit(maxFrames)
+                .forEach(
+                    f -> sb
+                        .append(f.getClassName())
+                        .append('.')
+                        .append(f.getMethodName())
+                        .append(':')
+                        .append(f.getLineNumber())
+                        .append(" <- ")
+                );
+            return null;
+        });
+        return sb.toString();
+    }
 
     static final ValueLayout.OfByte LAYOUT_BYTE = ValueLayout.JAVA_BYTE;
     static final ValueLayout.OfShort LAYOUT_LE_SHORT = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -917,7 +948,14 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // surplus arithmetic (surplus == handles still held) depends on that. isSlice separates the
         // master from clones/slices: clone() and slice() both go through buildSlice(.., true), and
         // only !isSlice does the real teardown (registry release + readaheadManager.close()).
-        LOGGER.debug("fdc-debug close isSlice={} id={} path={}", isSlice, System.identityHashCode(this), path);
+        if (LOGGER.isDebugEnabled()) {
+            String chain = fdcCallerChain(FDC_MAX_FRAMES);
+            int closesite = chain.hashCode();
+            if (FDC_SEEN_CLOSESITES.add(closesite)) {
+                LOGGER.debug("fdc-debug closesite NEW hash={} isSlice={} path={} chain={}", closesite, isSlice, path, chain);
+            }
+            LOGGER.debug("fdc-debug close isSlice={} id={} path={} closesite={}", isSlice, System.identityHashCode(this), path, closesite);
+        }
 
         // Mark as closed to ensure all future accesses throw AlreadyClosedException
         isOpen = false;
