@@ -24,6 +24,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
+import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
@@ -94,16 +95,24 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
 
     @Override
     public RefCountedByteBuffer[] load(Path filePath, long startOffset, long blockCount, long poolTimeoutMs) throws Exception {
-        LOGGER
-            .debug(
-                "fdc-debug loader thread={} file={} offset={} blocks={} readBytes={} blockSize={}",
-                Thread.currentThread().getName(),
-                filePath,
-                startOffset,
-                blockCount,
-                (blockCount << CACHE_BLOCK_SIZE_POWER),
-                CACHE_BLOCK_SIZE
-            );
+        // fdc-debug: the ONLY line that proves real block IO happened. Emitted per load, so it is the
+        // volume driver of a trace run - on the order of 18k lines per GiB of blocks read. The caller
+        // chain is walked only under -Dopensearch.store.fdcdebug.hotstacks=true.
+        if (FdcDebug.on(LOGGER)) {
+            int callsite = FdcDebug.hotSite(LOGGER, "loader.load", filePath);
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug loader thread={} file={} offset={} blocks={} readBytes={} blockSize={} callsite={}",
+                    FdcDebug.thread(),
+                    filePath,
+                    startOffset,
+                    blockCount,
+                    (blockCount << CACHE_BLOCK_SIZE_POWER),
+                    CACHE_BLOCK_SIZE,
+                    callsite
+                );
+        }
         if (!Files.exists(filePath)) {
             throw new NoSuchFileException(filePath.toString());
         }

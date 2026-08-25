@@ -35,6 +35,104 @@ plugins {
     id 'io.github.reyerizo.gradle.jcstress' version '0.9.0'
 }
 
+// ---- fdc-debug: read-path tracing knobs (throwaway instrumentation) ----
+// Forwarded to BOTH `test` and `internalClusterTest` so a local integ run traces without editing log4j:
+//
+//   ./gradlew internalClusterTest --tests '*SnapshotRestoreIntegTests*' -Dfdc.debug=true
+//   ./gradlew internalClusterTest --tests '*CryptoRecoveryFlowsIntegTests*' -Dfdc.debug=true -Dfdc.hotstacks=true
+//
+// -Dfdc.debug=true      force tracing ON and emit at INFO (no package logger widening needed)
+// -Dfdc.hotstacks=true  ALSO walk stacks at per-block sites. Diagnostic only - never while timing.
+// -Dfdc.stacks=false    log lines with no caller chains at all.
+// -Dfdc.frames=N        cap frames per chain (default 24).
+ext.applyFdcDebugProps = { task ->
+    [debug: 'opensearch.store.fdcdebug',
+     stacks: 'opensearch.store.fdcdebug.stacks',
+     hotstacks: 'opensearch.store.fdcdebug.hotstacks',
+     frames: 'opensearch.store.fdcdebug.frames'].each { shortName, propName ->
+        String v = System.getProperty("fdc.${shortName}")
+        if (v != null) {
+            task.systemProperty propName, v
+        }
+    }
+}
+
+// ---- fdc-debug: per-test log capture ----
+// Every test method gets its OWN log file, because these traces are read exhaustively and a single
+// combined file makes it impossible to tell which flow produced which lines. Files land OUTSIDE the git
+// repo (the parent workspace dir) so multi-GB traces are never committable:
+//
+//   <workspace>/debug-internal-cluster-tests/<runLabel>/<Class>.<method>.log
+//   <workspace>/debug-internal-cluster-tests/<runLabel>/_MANIFEST.txt
+//
+// runLabel is passed in with -Dfdc.run=<name>; without it the label is the task name, so successive runs
+// of the same task overwrite rather than silently accumulating half-comparable traces.
+ext.captureFdcTestLogs = { task, String taskLabel ->
+    String runLabel = System.getProperty('fdc.run') ?: taskLabel
+    File outDir = new File(new File(project.rootDir.parentFile, 'debug-internal-cluster-tests'), runLabel)
+    Map<String, Writer> writers = new java.util.concurrent.ConcurrentHashMap<String, Writer>()
+    Map<String, Integer> lineCounts = new java.util.concurrent.ConcurrentHashMap<String, Integer>()
+
+    task.doFirst {
+        outDir.mkdirs()
+        logger.lifecycle("fdc-debug: per-test logs -> ${outDir.absolutePath}")
+    }
+
+    task.onOutput { descriptor, event ->
+        String cls = (descriptor.className ?: 'unknown').tokenize('.').last()
+        String name = descriptor.name ?: 'unknown'
+        // Class-level descriptors report name == fully-qualified className; collapse those to _CLASS so a
+        // suite-level line does not produce a file named Foo.org.opensearch...Foo.log
+        if (name.contains('.')) {
+            name = '_CLASS'
+        }
+        String key = "${cls}.${name}"
+        Writer w = writers.computeIfAbsent(key) { k ->
+            String safe = k.replaceAll('[^A-Za-z0-9._#\\-]', '_')
+            new File(outDir, "${safe}.log").newWriter('UTF-8', false)
+        }
+        synchronized (w) {
+            w.write(event.message)
+        }
+        lineCounts.merge(key, event.message.count('\n'), { a, b -> a + b })
+    }
+
+    task.afterTest { descriptor, result ->
+        String cls = (descriptor.className ?: 'unknown').tokenize('.').last()
+        String name = descriptor.name ?: 'unknown'
+        if (name.contains('.')) {
+            name = '_CLASS'
+        }
+        String key = "${cls}.${name}"
+        Writer w = writers.remove(key)
+        if (w != null) {
+            w.flush()
+            w.close()
+        }
+    }
+
+    task.doLast {
+        writers.values().each { it.flush(); it.close() }
+        writers.clear()
+        File manifest = new File(outDir, '_MANIFEST.txt')
+        manifest.withWriter('UTF-8') { mw ->
+            mw.writeLine("run=${runLabel} task=${taskLabel}")
+            mw.writeLine("fdc.debug=${System.getProperty('fdc.debug')} fdc.hotstacks=${System.getProperty('fdc.hotstacks')}")
+            mw.writeLine('')
+            outDir.listFiles()
+                ?.findAll { it.name.endsWith('.log') }
+                ?.sort { it.name }
+                ?.each { f ->
+                    long fdc = 0
+                    f.eachLine('UTF-8') { line -> if (line.contains('fdc-debug')) fdc++ }
+                    mw.writeLine(String.format('%-90s %10d bytes %8d fdc-debug lines', f.name, f.length(), fdc))
+                }
+        }
+        logger.lifecycle("fdc-debug: manifest -> ${manifest.absolutePath}")
+    }
+}
+
+
 apply plugin: 'opensearch.opensearchplugin'
 apply plugin: 'opensearch.yaml-rest-test'
 apply plugin: 'opensearch.internal-cluster-test'
@@ -99,12 +197,17 @@ test {
     }
     systemProperty 'tests.security.manager', 'false'
     systemProperty 'tests.jvm.argline', '--enable-native-access=ALL-UNNAMED'
+    applyFdcDebugProps(it)
+    captureFdcTestLogs(it, 'test')
     jvmArgs += [
         '--enable-native-access=ALL-UNNAMED'
     ]
 }
 
+
 tasks.named('internalClusterTest').configure {
+    applyFdcDebugProps(it)
+    captureFdcTestLogs(it, 'internalClusterTest')
     systemProperty 'tests.security.manager', 'false'
     systemProperty 'java.security.policy', 'test.policy'
     testLogging {

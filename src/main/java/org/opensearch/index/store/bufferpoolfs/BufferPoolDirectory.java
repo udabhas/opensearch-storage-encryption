@@ -33,6 +33,7 @@ import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
+import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
@@ -136,7 +137,8 @@ public class BufferPoolDirectory extends FSDirectory {
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
         try {
-            LOGGER.debug("fdc-debug open thread={} file={} ioContext={}", Thread.currentThread().getName(), name, context);
+            final boolean trace = FdcDebug.on(LOGGER);
+            final int callsite = trace ? FdcDebug.site(LOGGER, "pool.openInput", name) : 0;
             ensureOpen();
             ensureCanRead(name);
 
@@ -155,13 +157,16 @@ public class BufferPoolDirectory extends FSDirectory {
             // Use full BufferPool (L1→L2→disk + read-ahead). Recovery source with DEFAULT
             // reads the same files being searched, so caching them is not wasteful.
             if (context.context() == IOContext.Context.MERGE) {
+                traceRoute(trace, "NIO-MERGE(cacheForRAS=on)", name, context, callsite);
                 return openNIOInput(file, context, false);
             }
             if (isReadOnce(context)) {
+                traceRoute(trace, "NIO-READONCE(cacheForRAS=off)", name, context, callsite);
                 return openNIOInput(file, context, true);
             }
 
             // DEFAULT path: full block cache for search reads (and recovery source on started shards)
+            traceRoute(trace, "POOL(L1+L2+readahead) skipCache=" + StaticConfigs.blockCacheBypassEnabled(), name, context, callsite);
             long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
 
             ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker, blockCache);
@@ -191,7 +196,40 @@ public class BufferPoolDirectory extends FSDirectory {
      * Sequential reads bypass the pool entirely. If {@code disableCache} is false,
      * randomAccessSlice() can still use the shared block cache for random reads.
      */
+    /**
+     * Emits the routing OUTCOME for this directory. The entry line alone cannot tell a read-once open
+     * that bypassed the pool from one that did not - both look identical - so attributing pool traffic
+     * from entry lines alone is unsound. {@code refEqReadOnce} in the decoded context shows whether the
+     * reference comparison in {@link #isReadOnce} agrees with the hint-based answer.
+     */
+    private static void traceRoute(boolean trace, String route, String name, IOContext context, int callsite) {
+        if (trace == false) {
+            return;
+        }
+        FdcDebug
+            .log(
+                LOGGER,
+                "fdc-debug pool.openInput ROUTE={} file={} {} thread={} callsite={}",
+                route,
+                name,
+                FdcDebug.describe(context),
+                FdcDebug.thread(),
+                callsite
+            );
+    }
+
     private IndexInput openNIOInput(Path file, IOContext context, boolean disableCache) throws IOException {
+        if (FdcDebug.on(LOGGER)) {
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug pool.openNIOInput file={} disableCacheForRandomAccessSlice={} {} thread={}",
+                    file.getFileName(),
+                    disableCache,
+                    FdcDebug.describe(context),
+                    FdcDebug.thread()
+                );
+        }
         FileChannel fc = FileChannel.open(file, StandardOpenOption.READ);
         boolean success = false;
         try {
@@ -225,6 +263,7 @@ public class BufferPoolDirectory extends FSDirectory {
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
         try {
+            FdcDebug.dirOp(LOGGER, "pool.createOutput", "route=BufferIOWithCaching(write-through gated) file=" + name, context);
             ensureOpen();
             Path path = directory.resolve(name);
             OutputStream fos = Files.newOutputStream(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
@@ -264,6 +303,7 @@ public class BufferPoolDirectory extends FSDirectory {
 
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
+        FdcDebug.dirOp(LOGGER, "pool.createTempOutput", "prefix=" + prefix + " suffix=" + suffix, context);
         ensureOpen();
         String name = getTempFileName(prefix, suffix, nextTempFileCounter.getAndIncrement());
         Path path = directory.resolve(name);
@@ -298,6 +338,7 @@ public class BufferPoolDirectory extends FSDirectory {
     @Override
     @SuppressWarnings("ConvertToTryWithResources")
     public synchronized void close() throws IOException {
+        FdcDebug.dirOp(LOGGER, "pool.close", "dir=" + dirPath + " (invalidates all caches for this dir)");
         readAheadworker.close();
         encryptionMetadataCache.invalidateDirectory();
 
@@ -323,6 +364,7 @@ public class BufferPoolDirectory extends FSDirectory {
 
     @Override
     public void deleteFile(String name) throws IOException {
+        FdcDebug.dirOp(LOGGER, "pool.deleteFile", "file=" + name + " (invalidates blockCache+FD+metaCache)");
         Path file = dirPath.resolve(name);
 
         // Cancel any pending async read-ahead operations for this file FIRST
@@ -397,6 +439,7 @@ public class BufferPoolDirectory extends FSDirectory {
      */
     @Override
     public void rename(String source, String dest) throws IOException {
+        FdcDebug.dirOp(LOGGER, "pool.rename", "src=" + source + " dest=" + dest + " (invalidates both paths)");
         Path sourceFile = dirPath.resolve(source);
         Path destFile = dirPath.resolve(dest);
 
@@ -503,5 +546,49 @@ public class BufferPoolDirectory extends FSDirectory {
         loggerThread.setDaemon(true);
         loggerThread.setName("DirectIOBufferPoolStatsLogger");
         loggerThread.start();
+    }
+
+    // ---- fdc-debug: trace-only overrides (no behaviour change; each logs and delegates) ----
+    // Present so "who calls whom on this Directory" is answerable from the log alone. openChecksumInput
+    // and obtainLock are final in Lucene 10.5 and cannot appear here; openChecksumInput is still visible
+    // as a frame in the openInput caller chain, which is where READONCE originates.
+
+    @Override
+    public String[] listAll() throws IOException {
+        String[] all = super.listAll();
+        FdcDebug.dirResult(LOGGER, "pool.listAll", "dir=" + dirPath, all.length + " files");
+        return all;
+    }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        long len = super.fileLength(name);
+        FdcDebug.dirResult(LOGGER, "pool.fileLength", "file=" + name, len);
+        return len;
+    }
+
+    @Override
+    public void sync(java.util.Collection<String> names) throws IOException {
+        FdcDebug.dirOp(LOGGER, "pool.sync", "files=" + names.size() + " " + names);
+        super.sync(names);
+    }
+
+    @Override
+    public void syncMetaData() throws IOException {
+        FdcDebug.dirOp(LOGGER, "pool.syncMetaData", "dir=" + dirPath);
+        super.syncMetaData();
+    }
+
+    @Override
+    public void copyFrom(org.apache.lucene.store.Directory from, String src, String dest, IOContext context) throws IOException {
+        FdcDebug.dirOp(LOGGER, "pool.copyFrom", "from=" + from.getClass().getSimpleName() + " src=" + src + " dest=" + dest, context);
+        super.copyFrom(from, src, dest, context);
+    }
+
+    @Override
+    public java.util.Set<String> getPendingDeletions() throws IOException {
+        java.util.Set<String> pending = super.getPendingDeletions();
+        FdcDebug.dirResult(LOGGER, "pool.getPendingDeletions", "dir=" + dirPath, pending);
+        return pending;
     }
 }

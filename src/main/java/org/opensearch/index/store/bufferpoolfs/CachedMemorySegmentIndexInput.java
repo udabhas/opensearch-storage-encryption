@@ -26,6 +26,7 @@ import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheValue;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
+import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.index.store.read_ahead.ReadaheadContext;
 import org.opensearch.index.store.read_ahead.ReadaheadManager;
 
@@ -217,6 +218,22 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         this.radixBlockTable = radixBlockTable;
         this.radixBlockTableRegistry = radixBlockTableRegistry;
         this.skipCache = skipCache;
+        // fdc-debug: the skipCache decision itself, at the moment it is fixed for this instance.
+        // isSlice distinguishes the master input (openInput) from every clone()/slice() derived from it.
+        if (FdcDebug.on(LOGGER)) {
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug input.create isSlice={} skipCache={} id={} path={} base={} len={} thread={}",
+                    isSlice,
+                    skipCache,
+                    System.identityHashCode(this),
+                    path,
+                    absoluteBaseOffset,
+                    length,
+                    FdcDebug.thread()
+                );
+        }
     }
 
     void ensureOpen() {
@@ -337,6 +354,19 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // evict anything search has cached. The value is reclaimed by GC once the reader drops it
         // (see BlockCache#loadUncached).
         if (skipCache) {
+            if (FdcDebug.on(LOGGER)) {
+                int callsite = FdcDebug.hotSite(LOGGER, "input.acquireBlock.BYPASS", path);
+                FdcDebug
+                    .log(
+                        LOGGER,
+                        "fdc-debug block.acquire route=BYPASS-directio blockOffset={} id={} path={} thread={} callsite={}",
+                        blockOffset,
+                        System.identityHashCode(this),
+                        path,
+                        FdcDebug.thread(),
+                        callsite
+                    );
+            }
             final BlockCacheValue<RefCountedByteBuffer> uncached = blockCache.loadUncached(new FileBlockCacheKey(path, blockOffset));
             if (uncached == null) {
                 throw new IOException("Unable to acquire uncached block for offset " + blockOffset);
@@ -863,6 +893,24 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
 
     @Override
     public final CachedMemorySegmentIndexInput clone() {
+        // fdc-debug: clone() is THE candidate seam for a per-consumer skip decision. It is
+        // also the query hot path (a clone per TermsEnum, a clone per DocsEnum), so the caller chain is
+        // walked only under -Dopensearch.store.fdcdebug.hotstacks=true and then only once per distinct
+        // call path. Never enable hot stacks while timing anything.
+        if (FdcDebug.on(LOGGER)) {
+            int callsite = FdcDebug.hotSite(LOGGER, "input.clone", path);
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug input.clone from={} fromIsSlice={} skipCache={} path={} thread={} callsite={}",
+                    System.identityHashCode(this),
+                    isSlice,
+                    skipCache,
+                    path,
+                    FdcDebug.thread(),
+                    callsite
+                );
+        }
         final CachedMemorySegmentIndexInput clone = buildSlice((String) null, 0L, this.length);
         try {
             clone.seek(getFilePointer());
@@ -894,6 +942,23 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             );
         }
 
+        if (FdcDebug.on(LOGGER)) {
+            int callsite = FdcDebug.hotSite(LOGGER, "input.slice", path);
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug input.slice from={} fromIsSlice={} skipCache={} off={} len={} desc={} path={} thread={} callsite={}",
+                    System.identityHashCode(this),
+                    isSlice,
+                    skipCache,
+                    offset,
+                    length,
+                    sliceDescription,
+                    path,
+                    FdcDebug.thread(),
+                    callsite
+                );
+        }
         var slice = buildSlice(sliceDescription, offset, length);
 
         slice.seek(0L);
@@ -990,9 +1055,17 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             String chain = fdcCallerChain(FDC_MAX_FRAMES);
             int closesite = chain.hashCode();
             if (FDC_SEEN_CLOSESITES.add(closesite)) {
-                LOGGER.debug("fdc-debug closesite NEW hash={} isSlice={} path={} chain={}", closesite, isSlice, path, chain);
+                FdcDebug.log(LOGGER, "fdc-debug closesite NEW hash={} isSlice={} path={} chain={}", closesite, isSlice, path, chain);
             }
-            LOGGER.debug("fdc-debug close isSlice={} id={} path={} closesite={}", isSlice, System.identityHashCode(this), path, closesite);
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug close isSlice={} id={} path={} closesite={}",
+                    isSlice,
+                    System.identityHashCode(this),
+                    path,
+                    closesite
+                );
         }
 
         // Mark as closed to ensure all future accesses throw AlreadyClosedException

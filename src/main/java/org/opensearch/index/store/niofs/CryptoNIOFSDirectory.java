@@ -13,6 +13,8 @@ import java.nio.file.StandardOpenOption;
 import java.security.Provider;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
@@ -20,6 +22,7 @@ import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
+import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
@@ -40,6 +43,7 @@ import org.opensearch.index.store.metrics.ErrorType;
  * @opensearch.internal
  */
 public class CryptoNIOFSDirectory extends NIOFSDirectory {
+    private static final Logger LOGGER = LogManager.getLogger(CryptoNIOFSDirectory.class);
     private final Provider provider;
 
     /** The resolver for encryption keys and initialization vectors. */
@@ -78,9 +82,12 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
         try {
+            final boolean trace = FdcDebug.on(LOGGER);
+            final int callsite = trace ? FdcDebug.site(LOGGER, "niofs.openInput", name) : 0;
             // segments_N and .si files are intentionally NOT encrypted for now; delegate to the
             // plaintext NIOFS impl. Encryption for these will be added back later (requires core changes).
             if (name.contains("segments_") || name.endsWith(".si")) {
+                traceNio(trace, "openInput", "PLAINTEXT-NIOFS-meta", name, context, callsite);
                 return super.openInput(name, context);
             }
 
@@ -100,11 +107,13 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
                     this.encryptionMetadataCache
                 );
                 success = true;
+                traceNio(trace, "openInput", "CRYPTO-BUFFERED", name, context, callsite);
                 return indexInput;
             } catch (EncryptionFooter.NotOSEFFileException e) {
                 // Plaintext file (no OSEF footer) — fall back to unencrypted read.
                 IOUtils.closeWhileHandlingException(fc);
                 success = true;
+                traceNio(trace, "openInput", "PLAINTEXT-NIOFS-noFooter", name, context, callsite);
                 return super.openInput(name, context);
             } finally {
                 if (!success) {
@@ -120,11 +129,15 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
         try {
+            final boolean trace = FdcDebug.on(LOGGER);
+            final int callsite = trace ? FdcDebug.site(LOGGER, "niofs.createOutput", name) : 0;
             // segments_N and .si files are intentionally NOT encrypted for now; delegate to the
             // plaintext NIOFS impl. Encryption for these will be added back later (requires core changes).
             if (name.contains("segments_") || name.endsWith(".si")) {
+                traceNio(trace, "createOutput", "PLAINTEXT-NIOFS-meta", name, context, callsite);
                 return super.createOutput(name, context);
             }
+            traceNio(trace, "createOutput", "CRYPTO-STREAM", name, context, callsite);
 
             ensureOpen();
             Path path = directory.resolve(name);
@@ -157,6 +170,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
+        FdcDebug.dirOp(LOGGER, "niofs.createTempOutput", "prefix=" + prefix + " suffix=" + suffix, context);
         // segments_N and .si files are intentionally NOT encrypted for now; delegate to the
         // plaintext NIOFS impl. Encryption for these will be added back later (requires core changes).
         if (prefix.contains("segments_") || prefix.endsWith(".si")) {
@@ -189,6 +203,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public long fileLength(String name) throws IOException {
+        FdcDebug.dirOp(LOGGER, "niofs.fileLength", "file=" + name);
         // segments_N and .si files are intentionally NOT encrypted for now; their on-disk length is
         // the true content length (no OSEF footer). Encryption for these will be added back later.
         if (name.contains("segments_") || name.endsWith(".si")) {
@@ -224,6 +239,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public synchronized void close() throws IOException {
+        FdcDebug.dirOp(LOGGER, "niofs.close", "dir=" + getDirectory());
         isOpen = false;
         deletePendingFiles();
         encryptionMetadataCache.invalidateDirectory();
@@ -231,6 +247,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public void rename(String source, String dest) throws IOException {
+        FdcDebug.dirOp(LOGGER, "niofs.rename", "src=" + source + " dest=" + dest);
         super.rename(source, dest);
         // Invalidate BOTH source and destination paths in the encryption cache.
         // Source (pending_segments_N): clears stale frameIV cached during the write —
@@ -246,7 +263,64 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
 
     @Override
     public void deleteFile(String name) throws IOException {
+        FdcDebug.dirOp(LOGGER, "niofs.deleteFile", "file=" + name);
         super.deleteFile(name);
         encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(name)));
+    }
+
+    /**
+     * fdc-debug (throwaway instrumentation). Records the OUTCOME of NIO-path routing, so a
+     * plaintext fallback (no OSEF footer) is distinguishable from an encrypted read in the same log.
+     */
+    private static void traceNio(boolean trace, String op, String route, String name, IOContext context, int callsite) {
+        if (trace == false) {
+            return;
+        }
+        FdcDebug
+            .log(
+                LOGGER,
+                "fdc-debug niofs.{} route={} file={} {} thread={} callsite={}",
+                op,
+                route,
+                name,
+                FdcDebug.describe(context),
+                FdcDebug.thread(),
+                callsite
+            );
+    }
+
+    // ---- fdc-debug: trace-only overrides (no behaviour change; each logs and delegates) ----
+    // openChecksumInput / obtainLock are final in Lucene 10.5 and cannot be traced here.
+
+    @Override
+    public String[] listAll() throws IOException {
+        String[] all = super.listAll();
+        FdcDebug.dirResult(LOGGER, "niofs.listAll", "dir=" + getDirectory(), all.length + " files");
+        return all;
+    }
+
+    @Override
+    public void sync(java.util.Collection<String> names) throws IOException {
+        FdcDebug.dirOp(LOGGER, "niofs.sync", "files=" + names.size() + " " + names);
+        super.sync(names);
+    }
+
+    @Override
+    public void syncMetaData() throws IOException {
+        FdcDebug.dirOp(LOGGER, "niofs.syncMetaData", "dir=" + getDirectory());
+        super.syncMetaData();
+    }
+
+    @Override
+    public void copyFrom(org.apache.lucene.store.Directory from, String src, String dest, IOContext context) throws IOException {
+        FdcDebug.dirOp(LOGGER, "niofs.copyFrom", "from=" + from.getClass().getSimpleName() + " src=" + src + " dest=" + dest, context);
+        super.copyFrom(from, src, dest, context);
+    }
+
+    @Override
+    public java.util.Set<String> getPendingDeletions() throws IOException {
+        java.util.Set<String> pending = super.getPendingDeletions();
+        FdcDebug.dirResult(LOGGER, "niofs.getPendingDeletions", "dir=" + getDirectory(), pending);
+        return pending;
     }
 }

@@ -8,7 +8,6 @@ import java.io.IOException;
 import java.nio.file.NoSuchFileException;
 import java.security.Provider;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -19,6 +18,7 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
+import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 
@@ -41,35 +41,11 @@ import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
     private static final Logger LOGGER = LogManager.getLogger(HybridCryptoDirectory.class);
 
-    // ---- fdc-debug: caller inventory for openInput (throwaway instrumentation, Track 17) ----
-    // Safe to stack-walk here because openInput is a shard-LIFECYCLE event, not a read: measured
-    // 2026-08-24 at ~10.4k opens per recovery and ZERO while idle. (Do NOT do this per-block on
-    // the read path - see journal §23.) The full chain is emitted once per distinct call path;
-    // every other line carries only the hash, so a recovery costs ~10.4k short lines, not 10.4k
-    // stack dumps.
-    private static final int FDC_MAX_FRAMES = 20;
-    private static final Set<Integer> FDC_SEEN_CALLSITES = ConcurrentHashMap.newKeySet();
-
-    /** OpenSearch/Lucene frames only, capped. Lazy: frames past the cap are never materialised. */
-    private static String fdcCallerChain(int maxFrames) {
-        StringBuilder sb = new StringBuilder(256);
-        StackWalker.getInstance().walk(frames -> {
-            frames
-                .filter(f -> f.getClassName().startsWith("org.opensearch") || f.getClassName().startsWith("org.apache.lucene"))
-                .limit(maxFrames)
-                .forEach(
-                    f -> sb
-                        .append(f.getClassName())
-                        .append('.')
-                        .append(f.getMethodName())
-                        .append(':')
-                        .append(f.getLineNumber())
-                        .append(" <- ")
-                );
-            return null;
-        });
-        return sb.toString();
-    }
+    // ---- fdc-debug (throwaway instrumentation) ----
+    // Caller inventory + route outcome. Safe to stack-walk here because openInput/createOutput are
+    // shard-LIFECYCLE events, not reads: on the order of 10k opens per recovery and zero while idle.
+    // Do NOT stack-walk per-block on the read path. Chain emission and hashing live in FdcDebug so
+    // every traced seam shares one format and one dedup set.
 
     private final BufferPoolDirectory bufferPoolDirectory;
     private final Set<String> nioExtensions;
@@ -113,33 +89,14 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        if (LOGGER.isDebugEnabled()) {
-            String chain = fdcCallerChain(FDC_MAX_FRAMES);
-            int callsite = chain.hashCode();
-            if (FDC_SEEN_CALLSITES.add(callsite)) {
-                LOGGER
-                    .debug(
-                        "fdc-debug callsite NEW hash={} file={} ioContext={} thread={} chain={}",
-                        callsite,
-                        name,
-                        context,
-                        Thread.currentThread().getName(),
-                        chain
-                    );
-            }
-            LOGGER
-                .debug(
-                    "fdc-debug hybrid.openInput(READ) thread={} file={} ioContext={} callsite={}",
-                    Thread.currentThread().getName(),
-                    name,
-                    context,
-                    callsite
-                );
-        }
+        final boolean trace = FdcDebug.on(LOGGER);
+        final int callsite = trace ? FdcDebug.site(LOGGER, "hybrid.openInput", name) : 0;
+
         // segments_N and .si are always plaintext; route to NIOFS on the raw NAME before extension-based
         // routing, so a peer-recovery temp name (recovery.<id>.segments_N) — whose getExtension() returns
         // "segments_N" (not in nioExtensions) — cannot mis-route the write to the encrypting buffer pool.
         if (name.contains("segments_") || name.endsWith(".si")) {
+            traceOpen(trace, "NIO-plaintext-meta", name, context, callsite);
             return super.openInput(name, context);
         }
 
@@ -149,16 +106,50 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
         ensureCanRead(name);
 
         if (delegeteBufferPool(extension)) {
+            // The pool directory re-decides POOL vs NIO by IOContext; it logs its own outcome.
+            traceOpen(trace, "DELEGATE-bufferpool", name, context, callsite);
             return bufferPoolDirectory.openInput(name, context);
         }
 
+        traceOpen(trace, "NIO-ext", name, context, callsite);
         return super.openInput(name, context);
+    }
+
+    /**
+     * Emits the routing OUTCOME, not just the request. Logging only the entry cannot distinguish a
+     * read-once open that bypassed the pool from one that did not - the entry line is identical either
+     * way - so pool traffic cannot be attributed from entry lines alone.
+     */
+    private static void traceOpen(boolean trace, String route, String name, IOContext context, int callsite) {
+        if (trace == false) {
+            return;
+        }
+        FdcDebug
+            .log(
+                LOGGER,
+                "fdc-debug hybrid.openInput(READ) route={} file={} {} thread={} callsite={}",
+                route,
+                name,
+                FdcDebug.describe(context),
+                FdcDebug.thread(),
+                callsite
+            );
     }
 
     @Override
     public IndexOutput createOutput(String name, IOContext context) throws IOException {
-        LOGGER
-            .debug("fdc-debug hybrid.createOutput(WRITE) thread={} file={} ioContext={}", Thread.currentThread().getName(), name, context);
+        if (FdcDebug.on(LOGGER)) {
+            int callsite = FdcDebug.site(LOGGER, "hybrid.createOutput", name);
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug hybrid.createOutput(WRITE) route=NIO-all file={} {} thread={} callsite={}",
+                    name,
+                    FdcDebug.describe(context),
+                    FdcDebug.thread(),
+                    callsite
+                );
+        }
         // All writes go through the NIO path (super = CryptoNIOFSDirectory): it keeps segments_N/.si
         // plaintext and encrypts everything else with CryptoOutputStreamIndexOutput (streaming, no
         // pool/cache). On this path BufferPool is a read-only cache. This avoids a second FSDirectory
@@ -199,19 +190,25 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
      */
     @Override
     public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
-        LOGGER
-            .debug(
-                "fdc-debug hybrid.createTempOutput(WRITE-TMP) thread={} prefix={} suffix={} ioContext={}",
-                Thread.currentThread().getName(),
-                prefix,
-                suffix,
-                context
-            );
+        if (FdcDebug.on(LOGGER)) {
+            int callsite = FdcDebug.site(LOGGER, "hybrid.createTempOutput", prefix + "*" + suffix);
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug hybrid.createTempOutput(WRITE-TMP) route=NIO-tmp prefix={} suffix={} {} thread={} callsite={}",
+                    prefix,
+                    suffix,
+                    FdcDebug.describe(context),
+                    FdcDebug.thread(),
+                    callsite
+                );
+        }
         return super.createTempOutput(prefix, suffix, context);
     }
 
     @Override
     public void deleteFile(String name) throws IOException {
+        FdcDebug.dirOp(LOGGER, "hybrid.deleteFile", "route=NIO-all file=" + name);
         // Route all deletes through NIOFS (super); do not delegate to the buffer-pool directory.
         super.deleteFile(name);
     }
@@ -245,15 +242,67 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
             if (getPendingDeletions().contains(source)) {
                 throw new NoSuchFileException("file \"" + source + "\" is pending delete and cannot be moved");
             }
+            FdcDebug.dirOp(LOGGER, "hybrid.rename", "route=DELEGATE-bufferpool src=" + source + " dest=" + dest);
             bufferPoolDirectory.rename(source, dest);
         } else {
+            FdcDebug.dirOp(LOGGER, "hybrid.rename", "route=NIO src=" + source + " dest=" + dest);
             super.rename(source, dest);
         }
     }
 
     @Override
     public void close() throws IOException {
+        FdcDebug.dirOp(LOGGER, "hybrid.close", "dir=" + getDirectory());
         bufferPoolDirectory.close(); // only closes its resources.
         super.close(); // actually closes pending files.
+    }
+
+    // ---- fdc-debug: trace-only overrides ----
+    // These add NO behaviour: each logs and delegates. They exist because the question being answered is
+    // "who calls whom on this Directory", and a method the plugin does not override is invisible in the
+    // trace even though it is the one doing the work. openChecksumInput matters most: it is the sole
+    // NOT overridable in Lucene 10.5 (both are final), so they are absent by necessity, not oversight:
+    // Directory.openChecksumInput(String) -> final; delegates to openInput(name, IOContext.READONCE)
+    // BaseDirectory.obtainLock(String) -> final
+    // openChecksumInput is nonetheless visible in the trace: it is the sole minter of READONCE and shows
+    // up as a frame in the openInput caller chain, which is where a read-once decision originates.
+
+    @Override
+    public String[] listAll() throws IOException {
+        String[] all = super.listAll();
+        FdcDebug.dirResult(LOGGER, "hybrid.listAll", "dir=" + getDirectory(), all.length + " files");
+        return all;
+    }
+
+    @Override
+    public long fileLength(String name) throws IOException {
+        long len = super.fileLength(name);
+        FdcDebug.dirResult(LOGGER, "hybrid.fileLength", "file=" + name, len);
+        return len;
+    }
+
+    @Override
+    public void sync(java.util.Collection<String> names) throws IOException {
+        FdcDebug.dirOp(LOGGER, "hybrid.sync", "files=" + names.size() + " " + names);
+        super.sync(names);
+    }
+
+    @Override
+    public void syncMetaData() throws IOException {
+        FdcDebug.dirOp(LOGGER, "hybrid.syncMetaData", "dir=" + getDirectory());
+        super.syncMetaData();
+    }
+
+    @Override
+    public void copyFrom(org.apache.lucene.store.Directory from, String src, String dest, IOContext context) throws IOException {
+        FdcDebug.dirOp(LOGGER, "hybrid.copyFrom", "from=" + from.getClass().getSimpleName() + " src=" + src + " dest=" + dest, context);
+        super.copyFrom(from, src, dest, context);
+    }
+
+    @Override
+    public Set<String> getPendingDeletions() throws IOException {
+        Set<String> pending = super.getPendingDeletions();
+        FdcDebug.dirResult(LOGGER, "hybrid.getPendingDeletions", "dir=" + getDirectory(), pending);
+        return pending;
     }
 }

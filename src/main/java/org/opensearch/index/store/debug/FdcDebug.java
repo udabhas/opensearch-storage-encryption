@@ -1,0 +1,264 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+package org.opensearch.index.store.debug;
+
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.apache.logging.log4j.Logger;
+import org.apache.lucene.store.IOContext;
+
+/**
+ * Throwaway read-path tracing helper (Track 17). Not a production facility.
+ *
+ * <p>Answers one question: <em>who reads what, through which route, and does the block cache get
+ * populated as a side effect?</em> Every line is tagged {@code fdc-debug} so a whole run can be
+ * extracted with a single grep.
+ *
+ * <h2>Why call-site identity and not a stack dump per event</h2>
+ * A stack walk costs microseconds; a block load costs ~1&nbsp;ms but happens millions of times per
+ * benchmark. So the chain is walked, hashed, and emitted <strong>once per distinct call path</strong>;
+ * every subsequent event on that path carries only the hash. A recovery that opens ~10k files
+ * produces ~10k short lines and a handful of chains, not 10k stack dumps.
+ *
+ * <h2>Two tiers, deliberately different</h2>
+ * <ul>
+ * <li>{@link #site} — <strong>lifecycle</strong> sites: {@code openInput}, {@code createOutput},
+ *     {@code clone}, {@code slice}, {@code close}. Measured at ~10.4k opens per recovery and zero
+ *     while idle, so walking here is affordable.</li>
+ * <li>{@link #hotSite} — <strong>per-block</strong> sites: block acquire and the block loader. These
+ *     run on the query hot path (a clone per TermsEnum, a clone per DocsEnum), so the walk is
+ *     <em>off</em> by default and the log line is emitted only once per distinct call path. Turn the
+ *     walk on with {@code -Dopensearch.store.fdcdebug.hotstacks=true} for a short diagnostic run
+ *     only — never while timing anything.</li>
+ * </ul>
+ *
+ * <h2>IOContext decoding</h2>
+ * {@link #describe(IOContext)} prints the hint set <em>and</em> resolves read-once by hint type
+ * rather than by the {@code INSTANCE} constant, because {@code ReadOnceHint.INSTANCE} and
+ * {@code PreloadHint.INSTANCE} render identically in a hint set, which makes them easy to
+ * misread as each other. It also prints whether reference equality against {@code IOContext.READONCE} agrees with
+ * the hint-based answer, which is exactly the discrepancy that routing bugs hide behind.
+ *
+ * @opensearch.internal
+ */
+public final class FdcDebug {
+
+    private FdcDebug() {}
+
+    /** Force tracing on even when the logger is not at DEBUG. */
+    private static final String PROP_FORCE = "opensearch.store.fdcdebug";
+    /** Walk stacks at lifecycle sites. Default true; set false for log lines with no chains. */
+    private static final String PROP_STACKS = "opensearch.store.fdcdebug.stacks";
+    /** Walk stacks at per-block hot sites. Default FALSE. See class docs before enabling. */
+    private static final String PROP_HOT_STACKS = "opensearch.store.fdcdebug.hotstacks";
+    /** Max OpenSearch/Lucene frames retained per chain. */
+    private static final String PROP_FRAMES = "opensearch.store.fdcdebug.frames";
+
+    private static final boolean FORCE = Boolean.parseBoolean(System.getProperty(PROP_FORCE, "false"));
+    private static final boolean STACKS = Boolean.parseBoolean(System.getProperty(PROP_STACKS, "true"));
+    private static final boolean HOT_STACKS = Boolean.parseBoolean(System.getProperty(PROP_HOT_STACKS, "false"));
+    private static final int MAX_FRAMES = Integer.parseInt(System.getProperty(PROP_FRAMES, "24"));
+
+    /** Call-site hashes already emitted with a full chain. Bounded by the number of distinct paths. */
+    private static final Set<Integer> SEEN = ConcurrentHashMap.newKeySet();
+
+    /** Frames from this helper are not caller information. */
+    private static final String SELF_PACKAGE = "org.opensearch.index.store.debug";
+
+    /** Cheap gate. Callers must wrap every trace call in this. */
+    public static boolean on(Logger log) {
+        return FORCE || log.isDebugEnabled();
+    }
+
+    /**
+     * Emits one trace line. At INFO when tracing was explicitly forced via
+     * {@code -Dopensearch.store.fdcdebug=true}, otherwise at DEBUG.
+     *
+     * <p>The level switch is the point. Gating on {@link #on} alone is not enough: a forced flag makes
+     * the gate true while {@code logger.debug(..)} still drops the line unless the package logger has
+     * also been widened to DEBUG — which drags in every other DEBUG statement in the store packages.
+     * Forcing means "I asked for exactly this", so it emits at INFO and stays targeted. Unconditional
+     * INFO tracing floods a busy node, which is why this is opt-in only.
+     */
+    public static void log(Logger log, String format, Object... args) {
+        if (FORCE) {
+            log.info(format, args);
+        } else {
+            log.debug(format, args);
+        }
+    }
+
+    /** Current thread name, for flow attribution (merge / snapshot / generic / warmer / search). */
+    public static String thread() {
+        return Thread.currentThread().getName();
+    }
+
+    /**
+     * Lifecycle call site. Walks and hashes the caller chain, emitting the full chain the first time
+     * that path is seen. Returns the hash to correlate later lines on the same path.
+     *
+     * @param log   logger of the calling class
+     * @param tag   short site name, e.g. {@code "hybrid.openInput"}
+     * @param what  the subject (file name, path)
+     * @return the call-site hash, or 0 when stack walking is disabled
+     */
+    public static int site(Logger log, String tag, Object what) {
+        return record(log, tag, what, STACKS);
+    }
+
+    /**
+     * Per-block hot call site. Emits at most one line per distinct call path and does not walk the
+     * stack unless {@code -Dopensearch.store.fdcdebug.hotstacks=true}.
+     *
+     * @return the call-site hash, or 0 when hot-path stack walking is disabled
+     */
+    public static int hotSite(Logger log, String tag, Object what) {
+        if (HOT_STACKS == false) {
+            return 0;
+        }
+        return record(log, tag, what, true);
+    }
+
+    private static int record(Logger log, String tag, Object what, boolean walk) {
+        if (walk == false) {
+            return 0;
+        }
+        String chain = chain(MAX_FRAMES);
+        int hash = chain.hashCode();
+        if (SEEN.add(hash)) {
+            log(log, "fdc-debug callsite NEW tag={} hash={} what={} thread={} chain={}", tag, hash, what, thread(), chain);
+        }
+        return hash;
+    }
+
+    /**
+     * One-line trace for a Directory operation that carries no {@link IOContext}
+     * ({@code listAll}, {@code sync}, {@code rename}, {@code deleteFile}, {@code fileLength}, ...).
+     *
+     * <p>Gate-checks internally so call sites stay a single statement. The gate is a flag read plus a
+     * logger level check, which is affordable on lifecycle paths but NOT on per-block paths.
+     */
+    public static void dirOp(Logger log, String site, String detail) {
+        if (on(log) == false) {
+            return;
+        }
+        int callsite = site(log, site, detail);
+        log(log, "fdc-debug {} {} thread={} callsite={}", site, detail, thread(), callsite);
+    }
+
+    /** One-line trace for a Directory operation that carries an {@link IOContext}. */
+    public static void dirOp(Logger log, String site, String detail, IOContext context) {
+        if (on(log) == false) {
+            return;
+        }
+        int callsite = site(log, site, detail);
+        log(log, "fdc-debug {} {} {} thread={} callsite={}", site, detail, describe(context), thread(), callsite);
+    }
+
+    /** One-line trace recording the RESULT of an operation, e.g. a computed length or a route taken. */
+    public static void dirResult(Logger log, String site, String detail, Object result) {
+        if (on(log) == false) {
+            return;
+        }
+        int callsite = site(log, site, detail);
+        log(log, "fdc-debug {} {} result={} thread={} callsite={}", site, detail, result, thread(), callsite);
+    }
+
+    /**
+     * OpenSearch/Lucene frames only, capped, with two cleanups that matter for call-site identity:
+     *
+     * <ul>
+     * <li><b>Self-frames dropped.</b> The three {@code FdcDebug} frames are not caller information.</li>
+     * <li><b>Consecutive duplicates collapsed.</b> {@code FilterDirectory.openInput} appears five times
+     *     in a row on a wrapped store; left in, those five plus the self-frames consume 8 of 24 frames
+     *     and push the actual caller ({@code FieldsIndexWriter.finish}) to the edge of the cap.
+     *     Truncating the distinguishing frames is how two different callers end up sharing one
+     *     call-site hash — which would silently merge two flows in the inventory.</li>
+     * </ul>
+     *
+     * Frames past the cap are never materialised.
+     */
+    public static String chain(int maxFrames) {
+        StringBuilder sb = new StringBuilder(256);
+        StackWalker.getInstance().walk(frames -> {
+            final String[] previous = new String[1];
+            final int[] repeats = new int[1];
+            frames
+                .filter(f -> f.getClassName().startsWith("org.opensearch") || f.getClassName().startsWith("org.apache.lucene"))
+                .filter(f -> f.getClassName().startsWith(SELF_PACKAGE) == false)
+                .map(f -> f.getClassName() + '.' + f.getMethodName() + ':' + f.getLineNumber())
+                .filter(frame -> {
+                    if (frame.equals(previous[0])) {
+                        repeats[0]++;
+                        return false;
+                    }
+                    if (repeats[0] > 0) {
+                        sb.append('x').append(repeats[0] + 1).append(' ');
+                        repeats[0] = 0;
+                    }
+                    previous[0] = frame;
+                    return true;
+                })
+                .limit(maxFrames)
+                .forEach(frame -> sb.append(frame).append(" <- "));
+            if (repeats[0] > 0) {
+                sb.append('x').append(repeats[0] + 1).append(' ');
+            }
+            return null;
+        });
+        return sb.toString();
+    }
+
+    /**
+     * Compact, unambiguous rendering of an {@link IOContext}.
+     *
+     * <p>Format: {@code ctx=DEFAULT hints=[SEQUENTIAL,INSTANCE] readOnce=true refEqReadOnce=true merge=false flush=false}
+     *
+     * <p>{@code readOnce} is resolved by hint <em>type</em>; {@code refEqReadOnce} is the reference
+     * comparison that routing code has historically used. When these two disagree, routing that keys
+     * on reference equality is silently missing a read-once open.
+     */
+    public static String describe(IOContext context) {
+        if (context == null) {
+            return "ctx=null";
+        }
+        boolean readOnce = false;
+        StringBuilder hints = new StringBuilder(48);
+        try {
+            for (Object h : context.hints()) {
+                if (hints.length() > 0) {
+                    hints.append(',');
+                }
+                String simple = h.getClass().getSimpleName();
+                // Enum constants render as INSTANCE/SEQUENTIAL/RANDOM; prefix with the hint type so
+                // ReadOnceHint.INSTANCE and PreloadHint.INSTANCE are never confused for each other.
+                hints.append(simple).append('.').append(h);
+                if ("ReadOnceHint".equals(simple)) {
+                    readOnce = true;
+                }
+            }
+        } catch (Exception e) {
+            hints.append("<unavailable:").append(e.getClass().getSimpleName()).append('>');
+        }
+        return "ctx="
+            + context.context()
+            + " hints=["
+            + hints
+            + "] readOnce="
+            + readOnce
+            + " refEqReadOnce="
+            + (context == IOContext.READONCE)
+            + " merge="
+            + (context.mergeInfo() != null)
+            + " flush="
+            + (context.flushInfo() != null);
+    }
+
+    /** Clears the emitted-call-site set so a fresh run re-emits every chain. Test/diagnostic use. */
+    public static void resetCallsites() {
+        SEEN.clear();
+    }
+}
