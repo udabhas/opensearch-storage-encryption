@@ -221,6 +221,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // fdc-debug: the skipCache decision itself, at the moment it is fixed for this instance.
         // isSlice distinguishes the master input (openInput) from every clone()/slice() derived from it.
         if (FdcDebug.on(LOGGER)) {
+            FdcDebug.count(isSlice ? "input.create.slice" : "input.create.master");
             FdcDebug
                 .log(
                     LOGGER,
@@ -355,6 +356,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // (see BlockCache#loadUncached).
         if (skipCache) {
             if (FdcDebug.on(LOGGER)) {
+                FdcDebug.count("input.acquireBlock.BYPASS");
                 int callsite = FdcDebug.hotSite(LOGGER, "input.acquireBlock.BYPASS", path);
                 FdcDebug
                     .log(
@@ -898,6 +900,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // walked only under -Dopensearch.store.fdcdebug.hotstacks=true and then only once per distinct
         // call path. Never enable hot stacks while timing anything.
         if (FdcDebug.on(LOGGER)) {
+            FdcDebug.count("input.clone");
             int callsite = FdcDebug.hotSite(LOGGER, "input.clone", path);
             FdcDebug
                 .log(
@@ -943,6 +946,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         }
 
         if (FdcDebug.on(LOGGER)) {
+            FdcDebug.count("input.slice");
             int callsite = FdcDebug.hotSite(LOGGER, "input.slice", path);
             FdcDebug
                 .log(

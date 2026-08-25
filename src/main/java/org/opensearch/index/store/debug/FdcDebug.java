@@ -4,8 +4,11 @@
  */
 package org.opensearch.index.store.debug;
 
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.IOContext;
@@ -67,6 +70,42 @@ public final class FdcDebug {
 
     /** Frames from this helper are not caller information. */
     private static final String SELF_PACKAGE = "org.opensearch.index.store.debug";
+
+    /**
+     * Per-site event counts, so a flow claim can be ASSERTED instead of eyeballed in a log.
+     *
+     * <p>This exists because the interesting facts about the read path are negative ones - "the
+     * fielddata build performs zero {@code openInput} calls and reaches the disk only through clones of
+     * inputs opened earlier" - and a negative is exactly what grepping a log establishes least reliably.
+     * A missing line is indistinguishable from a logger that was never enabled. A counter delta of zero,
+     * taken across an operation whose other counters moved, is real evidence.
+     *
+     * <p>Only maintained while tracing is on, so there is no cost on a production read path.
+     */
+    private static final ConcurrentHashMap<String, LongAdder> COUNTERS = new ConcurrentHashMap<>();
+
+    /** Increments the event count for a site. Callers gate on {@link #on}. */
+    public static void count(String site) {
+        COUNTERS.computeIfAbsent(site, k -> new LongAdder()).increment();
+    }
+
+    /** Immutable ordered snapshot of all site counts. */
+    public static Map<String, Long> counters() {
+        Map<String, Long> out = new TreeMap<>();
+        COUNTERS.forEach((k, v) -> out.put(k, v.sum()));
+        return out;
+    }
+
+    /** Count for one site, 0 if never seen. */
+    public static long counterOf(String site) {
+        LongAdder a = COUNTERS.get(site);
+        return a == null ? 0L : a.sum();
+    }
+
+    /** Clears all counts. Call immediately before the operation under measurement. */
+    public static void resetCounters() {
+        COUNTERS.clear();
+    }
 
     /** Cheap gate. Callers must wrap every trace call in this. */
     public static boolean on(Logger log) {
@@ -145,6 +184,7 @@ public final class FdcDebug {
         if (on(log) == false) {
             return;
         }
+        count(site);
         int callsite = site(log, site, detail);
         log(log, "fdc-debug {} {} thread={} callsite={}", site, detail, thread(), callsite);
     }
@@ -154,6 +194,7 @@ public final class FdcDebug {
         if (on(log) == false) {
             return;
         }
+        count(site);
         int callsite = site(log, site, detail);
         log(log, "fdc-debug {} {} {} thread={} callsite={}", site, detail, describe(context), thread(), callsite);
     }
@@ -163,6 +204,7 @@ public final class FdcDebug {
         if (on(log) == false) {
             return;
         }
+        count(site);
         int callsite = site(log, site, detail);
         log(log, "fdc-debug {} {} result={} thread={} callsite={}", site, detail, result, thread(), callsite);
     }

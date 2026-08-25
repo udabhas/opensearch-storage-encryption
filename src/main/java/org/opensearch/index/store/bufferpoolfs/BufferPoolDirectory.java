@@ -206,6 +206,8 @@ public class BufferPoolDirectory extends FSDirectory {
         if (trace == false) {
             return;
         }
+        FdcDebug.count("pool.openInput");
+        FdcDebug.count("pool.openInput.ROUTE=" + route);
         FdcDebug
             .log(
                 LOGGER,

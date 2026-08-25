@@ -124,6 +124,8 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
         if (trace == false) {
             return;
         }
+        FdcDebug.count("hybrid.openInput");
+        FdcDebug.count("hybrid.openInput.route=" + route);
         FdcDebug
             .log(
                 LOGGER,

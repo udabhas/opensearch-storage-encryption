@@ -99,6 +99,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
         // volume driver of a trace run - on the order of 18k lines per GiB of blocks read. The caller
         // chain is walked only under -Dopensearch.store.fdcdebug.hotstacks=true.
         if (FdcDebug.on(LOGGER)) {
+            FdcDebug.count("loader.load");
             int callsite = FdcDebug.hotSite(LOGGER, "loader.load", filePath);
             FdcDebug
                 .log(
