@@ -16,12 +16,15 @@ import java.util.Collection;
 import org.opensearch.action.admin.cluster.snapshots.create.CreateSnapshotResponse;
 import org.opensearch.action.admin.cluster.snapshots.restore.RestoreSnapshotResponse;
 import org.opensearch.action.search.SearchResponse;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.index.query.QueryBuilders;
+import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.search.SearchHit;
 import org.opensearch.snapshots.SnapshotState;
+import org.opensearch.test.InternalTestCluster;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
 import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
@@ -36,9 +39,11 @@ import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
  * and asserts byte-level content per document — not just doc count, which a stale-cache read would still
  * satisfy.
  *
- * <p>Covered flows: replica peer recovery, primary relocation, and snapshot restore. Node-restart recovery
- * is intentionally NOT covered here: it is blocked by a separate statics-lifecycle issue (plugin JVM-static
- * singletons survive Node.close() and collide across in-process test nodes), tracked separately.
+ * <p>Covered flows: replica peer recovery, primary relocation, snapshot restore, and segment-replication
+ * replica promotion (a data node is stopped so its warm replica is promoted IN PLACE — the one recovery
+ * transition with no {@code close()} backstop). The statics-lifecycle issue that previously blocked node-stop
+ * flows (plugin JVM-static key caches colliding across in-process test nodes) is resolved by node-scoping
+ * those caches, so promotion is exercised here.
  */
 @ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
@@ -123,14 +128,22 @@ public class CryptoRecoveryFlowsIntegTests extends OpenSearchIntegTestCase {
     }
 
     // Read every doc from the replica copy so the REPLICA node's caches are warm before the primary churns.
-    private void warmReplicaReadAll(String index) {
-        SearchResponse response = client()
-            .prepareSearch(index)
-            .setPreference("_replica")
-            .setQuery(QueryBuilders.matchAllQuery())
-            .setSize(NUM_DOCS)
-            .get();
-        assertThat("warm replica read", response.getHits().getTotalHits().value(), equalTo((long) NUM_DOCS));
+    private void warmReplicaReadAll(String index) throws Exception {
+        // Under SEGMENT replication the replica receives segments asynchronously, so a "_replica" read
+        // issued straight after indexing legitimately returns 0 hits - the replica simply has not been
+        // sent the generation yet. waitForReplication() is precise for segrep indices and a no-op for
+        // document-replication ones, and the assertBusy covers the remaining window between a shard being
+        // reported caught up and its searcher exposing the docs.
+        waitForReplication(index);
+        assertBusy(() -> {
+            SearchResponse warmed = client()
+                .prepareSearch(index)
+                .setPreference("_replica")
+                .setQuery(QueryBuilders.matchAllQuery())
+                .setSize(NUM_DOCS)
+                .get();
+            assertThat("warm replica read", warmed.getHits().getTotalHits().value(), equalTo((long) NUM_DOCS));
+        });
     }
 
     // Content assertion against a specific copy, using an explicit per-doc expected-value prefix.
@@ -153,10 +166,16 @@ public class CryptoRecoveryFlowsIntegTests extends OpenSearchIntegTestCase {
         }
     }
 
+    // Guard against a false green: the primary must actually be on the expected (warmed) node.
+    // primaryNodeName(String) is inherited from OpenSearchIntegTestCase.
+    private void assertPrimaryOnNode(String index, String expectedNode) {
+        assertThat("primary should have been promoted onto the warmed node", primaryNodeName(index), equalTo(expectedNode));
+    }
+
     /**
      * Replica under sustained primary churn: a warm, LIVE (never-closed) replica directory processes many
      * delete-and-recreate cycles (its own merges of the replicated ops) while its block/FD caches hold the
-     * original generation. This is the §34 "strong vehicle" for the deleteFile->NIOFS stale-cache hazard —
+     * original generation. This is the strongest available vehicle for the deleteFile->NIOFS stale-cache hazard —
      * unlike relocate-back/restore, no {@code close()} runs between warm and reuse, so coherence here rests on
      * Lucene's monotonic file naming rather than on close() invalidation. Coverage + gross-regression guard:
      * a stale-cache read (or an encrypt/decrypt regression like the segments-on-recovery bug) surfaces as a
@@ -383,5 +402,91 @@ public class CryptoRecoveryFlowsIntegTests extends OpenSearchIntegTestCase {
         for (int i = 0; i < NUM_DOCS; i++) {
             assertThat("restored doc " + i + " missing", seen[i], is(true));
         }
+    }
+
+    /**
+     * Segment-replication replica PROMOTION on a warm, never-closed directory — the "replica -> primary
+     * in-place promotion" transition, the one recovery path with NO {@code close()} backstop. Coherence here
+     * rests entirely on Lucene's monotonic naming: the promoted primary continues the segment counter via
+     * {@code IndexWriter} APPEND-on-latest and never re-emits an existing segment name with different bytes.
+     *
+     * <p>We warm the replica under SEGMENT replication (so its LIVE directory delete+recreates the primary's
+     * segment files at the SAME paths as it catches up — {@code AbstractSegmentReplicationTarget} /
+     * {@code Store.renameTempFilesSafe}), stop the primary's node so the warm replica is promoted IN PLACE,
+     * write a fresh generation, then assert exact per-doc content on the promoted primary. A stale block from
+     * a pre-promotion generation would surface as a value mismatch here; a count-only check would not.
+     */
+    public void testSegRepReplicaPromotionReadsCorrectContent() throws Exception {
+        // Dedicated cluster-manager so stopping the primary's DATA node cannot disturb cluster-manager quorum;
+        // 3 data nodes so a fresh replica can rebuild on the free node after promotion (index returns to green).
+        internalCluster().startClusterManagerOnlyNode();
+        internalCluster().startDataOnlyNodes(3);
+
+        String index = "test-segrep-promotion-content";
+        createIndex(
+            index,
+            Settings
+                .builder()
+                .put(cryptoIndexSettings(1, 1)) // 1 primary + 1 replica
+                .put(IndexMetadata.SETTING_REPLICATION_TYPE, ReplicationType.SEGMENT) // node-to-node segment replication
+                .put("index.unassigned.node_left.delayed_timeout", "0") // reallocate immediately on node loss
+                .build()
+        );
+        ensureGreen(index);
+
+        indexDocsAndConsolidate(index); // gen-1 content
+        warmReplicaReadAll(index); // warm the replica's caches for the gen-1 segment paths
+
+        // Churn the primary: under SEGMENT replication the replica downloads each new generation into its LIVE
+        // (never-closed) directory and deletes+recreates the previous generation's files at the SAME paths
+        // while its block/FD caches still hold the earlier generation.
+        final int rounds = 3;
+        for (int r = 1; r <= rounds; r++) {
+            for (int i = 0; i < NUM_DOCS; i++) {
+                index(index, "_doc", String.valueOf(i), "field", "r" + r + "-" + i, "number", i);
+            }
+            client().admin().indices().prepareRefresh(index).get();
+            if (r % 2 == 0) {
+                client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+            }
+        }
+
+        // Deterministic pre-promotion content; ensure the replica has caught up and is warm on it.
+        for (int i = 0; i < NUM_DOCS; i++) {
+            index(index, "_doc", String.valueOf(i), "field", "final-" + i, "number", i);
+        }
+        client().admin().indices().prepareRefresh(index).get();
+        client().admin().indices().prepareFlush(index).get();
+        client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+        ensureGreen(TimeValue.timeValueSeconds(60), index);
+        waitForReplication(index); // ensure the replica has segment-replicated the final generation
+        warmReplicaReadAll(index);
+
+        // Identify primary + replica nodes BEFORE the stop.
+        String primaryNode = primaryNodeName(index);
+        String replicaNode = replicaNodeName(index);
+
+        // Stop the primary's node -> the WARM replica is promoted IN PLACE. No directory close() runs on it.
+        internalCluster().stopRandomNode(InternalTestCluster.nameFilter(primaryNode));
+
+        // A fresh replica rebuilds on the free data node -> back to green.
+        ensureGreen(TimeValue.timeValueSeconds(60), index);
+
+        // Guard against a false green: the primary must now be the previously-warmed replica node.
+        assertPrimaryOnNode(index, replicaNode);
+
+        // Post-promotion write of a NEW generation: exercises SegmentInfos.counter continuation
+        // (IndexWriter OpenMode.APPEND on the latest commit) — the mechanism that keeps the promoted primary
+        // from re-emitting an existing segment name with different bytes.
+        for (int i = 0; i < NUM_DOCS; i++) {
+            index(index, "_doc", String.valueOf(i), "field", "post-" + i, "number", i);
+        }
+        client().admin().indices().prepareRefresh(index).get();
+        client().admin().indices().prepareFlush(index).get();
+        client().admin().indices().prepareForceMerge(index).setMaxNumSegments(1).get();
+        ensureGreen(TimeValue.timeValueSeconds(60), index);
+
+        // Byte-level content on the promoted primary (the warmed node): every doc decrypts to its exact value.
+        assertAllDocsExpected(index, "_primary", "post-");
     }
 }
