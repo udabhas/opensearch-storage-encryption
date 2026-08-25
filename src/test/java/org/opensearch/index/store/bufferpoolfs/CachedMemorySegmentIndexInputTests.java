@@ -1651,7 +1651,17 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
     public void testPrefetchWithNullReadaheadContext() throws IOException {
         long fileLength = BLOCK_SIZE * 2;
         CachedMemorySegmentIndexInput input = CachedMemorySegmentIndexInput
-            .newInstance("test", testPath, fileLength, mockCache, mockReadaheadManager, null, radixBlockTable, radixBlockTableRegistry);
+            .newInstance(
+                "test",
+                testPath,
+                fileLength,
+                mockCache,
+                mockReadaheadManager,
+                null,
+                radixBlockTable,
+                radixBlockTableRegistry,
+                false
+            );
 
         input.prefetch(0, BLOCK_SIZE);
 
@@ -1733,7 +1743,8 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
                 mockReadaheadManager,
                 mockReadaheadContext,
                 radixBlockTable,
-                radixBlockTableRegistry
+                radixBlockTableRegistry,
+                false
             );
     }
 

@@ -100,6 +100,21 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
     final long absoluteBaseOffset; // absolute position in original file where this input starts
     final boolean isSlice; // true for slices, false for main instances
 
+    /**
+     * When true, this input never consults or populates L1 (RadixBlockTable) or L2 (Caffeine): every
+     * block is read from disk via DirectIO, decrypted, and handed straight back to the reader.
+     *
+     * <p>For one-shot bulk readers whose blocks are never re-read, caching is pure loss — it evicts
+     * blocks that search still needs in order to store blocks nobody will ask for again.
+     *
+     * <p>Inherited by every {@code clone()} and {@code slice()} via {@link #buildSlice}, so the
+     * decision is made once per opened input and follows all derived inputs. This is deliberately a
+     * per-instance field rather than a thread-local: each derived input owns its own retained block
+     * ({@code currentBlock}/{@code currentSegment}), so a per-instance decision cannot let one input's
+     * buffer be recycled underneath another input reading on the same thread.
+     */
+    private final boolean skipCache;
+
     long curPosition = 0L; // absolute position within this input (0-based)
     volatile boolean isOpen = true;
 
@@ -137,6 +152,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @param readaheadContext context for read-ahead policy decisions
      * @param radixBlockTable L1 cache for recently accessed blocks
      * @param radixBlockTableRegistry registry for lifecycle management (release on close)
+     * @param skipCache when true, bypass L1/L2 entirely and read+decrypt every block from disk
      * @return a new CachedMemorySegmentIndexInput instance
      */
     public static CachedMemorySegmentIndexInput newInstance(
@@ -147,7 +163,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         ReadaheadManager readaheadManager,
         ReadaheadContext readaheadContext,
         RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>> radixBlockTable,
-        RadixBlockTableRegistry radixBlockTableRegistry
+        RadixBlockTableRegistry radixBlockTableRegistry,
+        boolean skipCache
     ) {
         CachedMemorySegmentIndexInput input = new CachedMemorySegmentIndexInput(
             resourceDescription,
@@ -159,7 +176,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             readaheadContext,
             false,
             radixBlockTable,
-            radixBlockTableRegistry
+            radixBlockTableRegistry,
+            skipCache
         );
         try {
             input.seek(0L);
@@ -179,7 +197,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         ReadaheadContext readaheadContext,
         boolean isSlice,
         RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>> radixBlockTable,
-        RadixBlockTableRegistry radixBlockTableRegistry
+        RadixBlockTableRegistry radixBlockTableRegistry,
+        boolean skipCache
     ) {
         super(resourceDescription);
         // Slices inherit their parent's already-normalized path. Non-slice (master)
@@ -197,6 +216,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         this.isSlice = isSlice;
         this.radixBlockTable = radixBlockTable;
         this.radixBlockTableRegistry = radixBlockTableRegistry;
+        this.skipCache = skipCache;
     }
 
     void ensureOpen() {
@@ -288,8 +308,12 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // surface only later as a Lucene CRC / CorruptIndexException).
         currentBlockEnd = Math.min(currentBlockStartRelative + seg.byteSize(), length);
 
-        // Notify readahead manager of access pattern
-        if (readaheadContext != null) {
+        // Notify readahead manager of access pattern.
+        // Skipped for cache-bypass readers: readaheadContext is SHARED by reference with every clone
+        // and slice of this file (see buildSlice), so feeding it bypass accesses would both prefetch
+        // blocks into a cache this reader never consults and skew the sequential-access signal that
+        // drives prefetch for the search readers on the same file.
+        if (readaheadContext != null && !skipCache) {
             readaheadContext.onAccess(blockOffset, lastAccessWasCacheHit);
         }
 
@@ -308,6 +332,19 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @throws IOException if the block cannot be acquired after max attempts
      */
     private BlockCacheValue<RefCountedByteBuffer> acquireBlock(long blockOffset) throws IOException {
+        // Cache-bypass reader: read+decrypt this block from disk and hand it straight back. No L1
+        // lookup, no L2 lookup, no publish to either — so this read can neither be served by nor
+        // evict anything search has cached. The value is reclaimed by GC once the reader drops it
+        // (see BlockCache#loadUncached).
+        if (skipCache) {
+            final BlockCacheValue<RefCountedByteBuffer> uncached = blockCache.loadUncached(new FileBlockCacheKey(path, blockOffset));
+            if (uncached == null) {
+                throw new IOException("Unable to acquire uncached block for offset " + blockOffset);
+            }
+            lastAccessWasCacheHit = false;
+            return uncached;
+        }
+
         final long blockId = blockOffset >>> CACHE_BLOCK_SIZE_POWER;
         // Query-profiler handle (null unless a ?profile=true query is scoring on this thread).
         final org.opensearch.index.store.profile.CryptoQueryProfile prof = org.opensearch.index.store.profile.CryptoQueryProfile.current();
@@ -881,7 +918,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             readaheadContext,
             true,
             radixBlockTable,
-            radixBlockTableRegistry // slices share the table and registry for metrics, but don't call release()
+            radixBlockTableRegistry, // slices share the table and registry for metrics, but don't call release()
+            skipCache // clones/slices inherit the bypass decision from the input they derive from
         );
 
         try {

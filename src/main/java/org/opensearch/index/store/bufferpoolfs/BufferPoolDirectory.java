@@ -177,7 +177,8 @@ public class BufferPoolDirectory extends FSDirectory {
                     readAheadManager,
                     readAheadContext,
                     radixBlockTable,
-                    radixBlockTableRegistry
+                    radixBlockTableRegistry,
+                    StaticConfigs.blockCacheBypassEnabled()
                 );
         } catch (Exception e) {
             CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_INPUT_ERROR);

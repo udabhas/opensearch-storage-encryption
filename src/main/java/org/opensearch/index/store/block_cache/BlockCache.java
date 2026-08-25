@@ -64,6 +64,25 @@ public interface BlockCache<T> {
     BlockCacheValue<T> getOrLoad(BlockCacheKey key) throws IOException;
 
     /**
+     * Loads the block via {@code BlockLoader} WITHOUT consulting or populating the cache.
+     *
+     * <p>Used by readers opened with cache-bypass (see {@code CachedMemorySegmentIndexInput}'s
+     * {@code skipCache}): one-shot bulk readers whose blocks are never re-read, so caching them
+     * would only evict blocks that search still needs.
+     *
+     * <p>The returned value is never inserted into L1 or L2, so nothing will ever evict it and
+     * no removal listener will fire for it. Reclamation is by GC: {@code RefCountedByteBuffer} is
+     * a GC-managed wrapper whose lifecycle methods are no-ops, and the pool's Cleaner returns the
+     * backing buffer once the caller drops its reference. Callers must therefore hold at most a
+     * bounded number of these values live at once (the read path holds exactly one block).
+     *
+     * @param key the cache key identifying the block to load
+     * @return a freshly loaded block value, not present in any cache
+     * @throws IOException if the block cannot be loaded
+     */
+    BlockCacheValue<T> loadUncached(BlockCacheKey key) throws IOException;
+
+    /**
      * Asynchronously load the block into the cache if not present.
      *
      * @param key the cache key identifying the block to prefetch

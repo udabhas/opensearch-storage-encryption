@@ -158,6 +158,33 @@ public class StaticConfigs {
         memorySegmentGlobalArenaAndNormalizePathOptimEnabled = value;
     }
 
+    /**
+     * Feature flag for the block-cache bypass path on {@code CachedMemorySegmentIndexInput}: when
+     * enabled, inputs are opened with {@code skipCache}, so every block is read from disk via
+     * DirectIO and decrypted without consulting or populating L1/L2.
+     *
+     * <p>Defaults to {@code false} — the cached path is the safe default and matches prior behavior.
+     * This flag currently applies to ALL inputs opened through the DEFAULT (block-cache) route, so it
+     * is an experiment/measurement switch, not a production setting: the intended production trigger
+     * is a per-input decision made where the input is created or cloned, not a global toggle.
+     */
+    private static volatile boolean blockCacheBypassEnabled = false;
+
+    /**
+     * Returns whether inputs should be opened with the block-cache bypass.
+     * See {@link #blockCacheBypassEnabled} field docs.
+     */
+    public static boolean blockCacheBypassEnabled() {
+        return blockCacheBypassEnabled;
+    }
+
+    /**
+     * Sets the block-cache bypass feature flag. Intended to be called once at plugin startup.
+     */
+    public static void setBlockCacheBypassEnabled(boolean value) {
+        blockCacheBypassEnabled = value;
+    }
+
     private static int getPageSizeSafe() {
         try {
             return PanamaNativeAccess.getPageSize();

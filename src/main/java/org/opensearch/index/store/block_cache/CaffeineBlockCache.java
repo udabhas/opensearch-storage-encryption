@@ -257,6 +257,27 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     }
 
     @Override
+    public BlockCacheValue<T> loadUncached(BlockCacheKey key) throws IOException {
+        try {
+            V segment = blockLoader.load(key);
+            // Direct cast - BlockLoader contract guarantees V is BlockCacheValue<T>
+            @SuppressWarnings("unchecked")
+            BlockCacheValue<T> result = (BlockCacheValue<T>) segment;
+            if (result == null) {
+                throw new IOException("Failed to load block for key: " + key);
+            }
+            // Deliberately no cache.get/put and no trackInsertion: this value is invisible to L1, L2
+            // and the secondary index, so no eviction or removal listener will ever run for it. It is
+            // reclaimed by GC once the caller drops it.
+            return result;
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Failed to load block for key: " + key, e);
+        }
+    }
+
+    @Override
     public void prefetch(BlockCacheKey key) {
         try {
             AtomicBoolean inserted = new AtomicBoolean(false);

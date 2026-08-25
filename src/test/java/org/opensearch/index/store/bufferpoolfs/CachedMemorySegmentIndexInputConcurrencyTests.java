@@ -476,7 +476,8 @@ public class CachedMemorySegmentIndexInputConcurrencyTests extends OpenSearchTes
                 mockReadaheadManager,
                 mockReadaheadContext,
                 radixBlockTable,
-                radixBlockTableRegistry
+                radixBlockTableRegistry,
+                false
             );
     }
 }
