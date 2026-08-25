@@ -115,6 +115,13 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * buffer be recycled underneath another input reading on the same thread.
      */
     private final boolean skipCache;
+    /**
+     * fdc-debug: file extension, computed once per input so the per-block tier counters can be broken
+     * down by file type without doing string work on the hot path. Answers "which Lucene structures does
+     * this flow actually read" - e.g. whether a field data build reads postings (.doc/.tim) or doc values
+     * (.dvd/.dvm), which are different mechanisms with different fixes.
+     */
+    private final String fdcExt;
 
     long curPosition = 0L; // absolute position within this input (0-based)
     volatile boolean isOpen = true;
@@ -218,6 +225,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         this.radixBlockTable = radixBlockTable;
         this.radixBlockTableRegistry = radixBlockTableRegistry;
         this.skipCache = skipCache;
+        this.fdcExt = fdcExtensionOf(path);
         // fdc-debug: the skipCache decision itself, at the moment it is fixed for this instance.
         // isSlice distinguishes the master input (openInput) from every clone()/slice() derived from it.
         if (FdcDebug.on(LOGGER)) {
@@ -349,6 +357,13 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @return a BlockCacheValue for the block
      * @throws IOException if the block cannot be acquired after max attempts
      */
+    /** Extension of a path, or "none". Called once per input, never per block. */
+    private static String fdcExtensionOf(java.nio.file.Path p) {
+        String name = p.getFileName() == null ? "" : p.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        return dot < 0 || dot == name.length() - 1 ? "none" : name.substring(dot + 1);
+    }
+
     private BlockCacheValue<RefCountedByteBuffer> acquireBlock(long blockOffset) throws IOException {
         // Cache-bypass reader: read+decrypt this block from disk and hand it straight back. No L1
         // lookup, no L2 lookup, no publish to either — so this read can neither be served by nor
@@ -388,6 +403,11 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         if (l1Timer != null)
             l1Timer.stop(l1StartNs);
         if (entry != null) {
+            // fdc-debug: an L1 hit never reaches CaffeineBlockCache at all, so the cache-layer populate
+            // counters cannot see it. Counting the tier here is what makes "was this read served BY the
+            // pool or did it populate the pool" separable - two different claims with two different costs.
+            FdcDebug.count("block.acquire.L1_HIT");
+            FdcDebug.count("block.acquire.L1_HIT." + fdcExt);
             lastAccessWasCacheHit = true;
             if (prof != null)
                 prof.incL1Hits();
@@ -420,6 +440,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         if (l2Timer != null)
             l2Timer.stop(l2StartNs);
         if (v != null) {
+            FdcDebug.count("block.acquire.L2_HIT");
+            FdcDebug.count("block.acquire.L2_HIT." + fdcExt);
             if (prof != null)
                 prof.incL2Hits();
             // Never insert a transient (degraded-mode, non-pooled, non-cacheable) buffer into the L1
@@ -433,6 +455,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             return v;
         }
         // L2 miss — load from disk (deduped by Caffeine)
+        FdcDebug.count("block.acquire.MISS_LOADS_AND_POPULATES");
+        FdcDebug.count("block.acquire.MISS_LOADS_AND_POPULATES." + fdcExt);
         if (prof != null)
             prof.incL2Misses();
         BlockCacheValue<RefCountedByteBuffer> loaded = blockCache.getOrLoad(key);

@@ -98,6 +98,12 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
         // fdc-debug: the ONLY line that proves real block IO happened. Emitted per load, so it is the
         // volume driver of a trace run - on the order of 18k lines per GiB of blocks read. The caller
         // chain is walked only under -Dopensearch.store.fdcdebug.hotstacks=true.
+        //
+        // This line CANNOT tell you whether the block was published to the cache. The loader is invoked
+        // from five distinct call sites in CaffeineBlockCache - getOrLoad, prefetch, loadForPrefetch and
+        // the prefetch batch all publish; loadUncached deliberately does not - and the loader has no
+        // parameter carrying which one called it. The populate decision belongs to the caller, so it is
+        // counted at the caller: see the cache.*.POPULATES / cache.loadUncached.NO_POPULATE counters.
         if (FdcDebug.on(LOGGER)) {
             FdcDebug.count("loader.load");
             int callsite = FdcDebug.hotSite(LOGGER, "loader.load", filePath);

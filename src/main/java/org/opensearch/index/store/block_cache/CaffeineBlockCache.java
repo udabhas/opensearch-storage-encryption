@@ -20,6 +20,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.block_loader.BlockLoader;
+import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 
 import com.github.benmanes.caffeine.cache.Cache;
@@ -221,6 +222,7 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     @Override
     public BlockCacheValue<T> getOrLoad(BlockCacheKey key) throws IOException {
         try {
+            FdcDebug.count("cache.getOrLoad.POPULATES");
             AtomicBoolean inserted = new AtomicBoolean(false);
             BlockCacheValue<T> value = cache.get(key, k -> {
                 try {
@@ -259,6 +261,7 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     @Override
     public BlockCacheValue<T> loadUncached(BlockCacheKey key) throws IOException {
         try {
+            FdcDebug.count("cache.loadUncached.NO_POPULATE");
             V segment = blockLoader.load(key);
             // Direct cast - BlockLoader contract guarantees V is BlockCacheValue<T>
             @SuppressWarnings("unchecked")
@@ -280,6 +283,7 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     @Override
     public void prefetch(BlockCacheKey key) {
         try {
+            FdcDebug.count("cache.prefetch.POPULATES");
             AtomicBoolean inserted = new AtomicBoolean(false);
             BlockCacheValue<T> value = cache.get(key, k -> {
                 try {
@@ -308,6 +312,7 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
 
     @Override
     public void put(BlockCacheKey key, BlockCacheValue<T> value) {
+        FdcDebug.count("cache.put.PUBLISHED");
         cache.put(key, value);
         trackInsertion(key);
     }
@@ -373,6 +378,7 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
         V[] loadedBlocks;
 
         try {
+            FdcDebug.count("cache.loadForPrefetch.POPULATES");
             // Use 50ms timeout for prefetch - fail fast when pool is under pressure
             loadedBlocks = blockLoader.load(filePath, startOffset, blockCount, 50);
 
@@ -484,6 +490,7 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
             try {
                 BlockCacheValue<T> value = cache.get(key, k -> {
                     try {
+                        FdcDebug.count("cache.prefetchBatch.POPULATES");
                         V[] result = blockLoader.load(k.filePath(), k.offset(), 1, PREFETCH_POOL_TIMEOUT_MS);
                         @SuppressWarnings("unchecked")
                         BlockCacheValue<T> v = (BlockCacheValue<T>) result[0];

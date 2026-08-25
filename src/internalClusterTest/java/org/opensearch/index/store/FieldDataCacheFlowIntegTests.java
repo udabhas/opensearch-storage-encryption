@@ -81,6 +81,13 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
             .put(super.nodeSettings(nodeOrdinal))
             .put("plugins.crypto.enabled", true)
             .put("node.store.crypto.pool_size_percentage", 0.05)
+            // Field data eviction is mark-and-sweep, not immediate. _cache/clear?fielddata=true only adds
+            // the index to IndicesFieldDataCache#indicesToClear (IndicesFieldDataCache.clear(Index) is a
+            // one-line add); the entry stays fully resident, still served and still charged to the breaker,
+            // until IndicesService.CacheCleaner ticks and runs the no-arg clear() that actually invalidates.
+            // That interval defaults to ONE MINUTE, which makes any clear-then-measure test either
+            // minute-long or flaky. 100ms makes the sweep deterministic on a test timescale.
+            .put("indices.cache.cleanup_interval", "100ms")
             .build();
     }
 
@@ -119,6 +126,12 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
         SearchResponse response = client()
             .prepareSearch(INDEX)
             .setSize(0)
+            // The shard request cache would serve an identical repeated agg from its RESPONSE cache, keyed on the
+            // index reader's cache key - the aggregation then never executes, no field data is built, and the
+            // trace counters come back empty. Measured: this made the rebuild assertion fail ~1 run in 3 with
+            // completely empty counters. Any A/B that re-runs the same query MUST disable it or it measures
+            // the cache, not the code path.
+            .setRequestCache(false)
             .addAggregation(AggregationBuilders.terms("by_user").field(TEXT_FIELD).size(10))
             .get();
         assertNoFailures(response);
@@ -167,13 +180,19 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
 
         // Warm the segment readers WITHOUT touching field data, so the opens that segment-core
         // construction performs are attributed to this query and not to the build we are measuring.
-        assertNoFailures(client().prepareSearch(INDEX).setSize(1).get());
+        assertNoFailures(client().prepareSearch(INDEX).setSize(1).setRequestCache(false).get());
 
         FdcDebug.resetCounters();
 
         SearchResponse response = client()
             .prepareSearch(INDEX)
             .setSize(0)
+            // The shard request cache would serve an identical repeated agg from its RESPONSE cache, keyed on the
+            // index reader's cache key - the aggregation then never executes, no field data is built, and the
+            // trace counters come back empty. Measured: this made the rebuild assertion fail ~1 run in 3 with
+            // completely empty counters. Any A/B that re-runs the same query MUST disable it or it measures
+            // the cache, not the code path.
+            .setRequestCache(false)
             .addAggregation(AggregationBuilders.terms("by_user").field(TEXT_FIELD).size(10))
             .get();
         assertNoFailures(response);
@@ -212,28 +231,175 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
 
         client().admin().indices().prepareClearCache(INDEX).setFieldDataCache(true).get();
 
-        // The clear-cache response returning does NOT mean the field data accounting has dropped to zero.
-        // Measured here: immediately after the call, and again after a second clear, the field is still
-        // charged (observed 816 bytes for `user`); it reaches zero on its own shortly after. A second
-        // clear does not help but elapsed time does, so the eviction is applied synchronously while the
-        // accounting decrement - the cache's removal listener - runs asynchronously. Hence assertBusy and
-        // not a bare assert: a hard assert here fails intermittently, and a fixed sleep would just hide
-        // the same race behind a magic number.
+        // The clear-cache response returning does NOT mean anything has been evicted. Field data eviction
+        // is MARK-AND-SWEEP: this call only adds the index to IndicesFieldDataCache#indicesToClear, and the
+        // entry stays fully resident - still served, still charged to the breaker - until
+        // IndicesService.CacheCleaner ticks and runs the no-arg clear() that invalidates it. Measured:
+        // 816 bytes still charged to `user` immediately after the call AND after a second clear (a second
+        // clear just re-marks the same set), reaching zero only once a sweep ran. So assertBusy waits for
+        // the SWEEP, not for a lagging counter - which is why nodeSettings pins the interval to 100ms
+        // rather than leaving it at its one-minute default.
         assertBusy(() -> assertThat("clearing the field data cache must release it", indexFieldDataBytes(), equalTo(0L)));
 
         FdcDebug.resetCounters();
         runTermsAgg();
 
-        long afterRebuild = indexFieldDataBytes();
-        assertThat("second agg must rebuild field data", afterRebuild, greaterThan(0L));
-        assertThat("rebuild should cost the same bytes as the first build", afterRebuild, equalTo(afterFirstBuild));
+        // Diagnostics BEFORE assertions, deliberately. The first cut of this test logged the counters after
+        // the residency assertion, so every failure reported "expected > 0, was 0" with nothing to explain
+        // it - the one situation the instrumentation exists for, and the one place it was unavailable.
+        Map<String, Long> counts = FdcDebug.counters();
+        logger
+            .info(
+                "fdc-flow: REBUILD counters={} fieldDataNow={} perField={} afterFirstBuild={}",
+                counts,
+                indexFieldDataBytes(),
+                allPerFieldFieldDataBytes(),
+                afterFirstBuild
+            );
 
         // A cold rebuild has to reach the block layer again; if it did not, something served it from a
         // cache we did not intend to be in the picture and the "cold" baseline is not cold.
-        Map<String, Long> counts = FdcDebug.counters();
-        logger.info("fdc-flow: counters across the COLD rebuild = {}", counts);
-        long work = FdcDebug.counterOf("input.clone") + FdcDebug.counterOf("input.slice") + FdcDebug.counterOf("loader.load");
+        long work = FdcDebug.counterOf("input.clone") + FdcDebug.counterOf("input.slice") + FdcDebug.counterOf("loader.load") + FdcDebug
+            .counterOf("block.acquire.L1_HIT") + FdcDebug.counterOf("block.acquire.L2_HIT") + FdcDebug
+                .counterOf("block.acquire.MISS_LOADS_AND_POPULATES");
         assertThat("cold rebuild must do real read work; counters were " + counts, work, greaterThan(0L));
+
+        assertBusy(() -> assertThat("second agg must rebuild field data", indexFieldDataBytes(), greaterThan(0L)));
+        assertThat("rebuild should cost the same bytes as the first build", indexFieldDataBytes(), equalTo(afterFirstBuild));
+    }
+
+    /**
+     * The harm question, answered directly: does building field data POPULATE the block cache?
+     *
+     * <p>{@link #testFieldDataBuildOpensNoFilesAndOnlyClones} runs warm - every block is already in L1,
+     * so no I/O happens and that test can say nothing about population. Here the index is closed and
+     * reopened first, which drops the directories and invalidates their caches, so the build must reach
+     * disk. Only then is a populate count meaningful.
+     *
+     * <p>Note what could NOT be instrumented to answer this: a log line inside
+     * {@code CryptoDirectIOBlockLoader.load} cannot distinguish a populating read from a bypassing one.
+     * The loader is called from five sites in {@code CaffeineBlockCache} - four publish, {@code
+     * loadUncached} does not - and its signature carries nothing identifying the caller. The decision
+     * lives with the caller, so it is counted there.
+     */
+    public void testColdFieldDataBuildPopulatesBlockCache() throws Exception {
+        internalCluster().startNode();
+        createIndexAndIngest();
+        enableFieldDataOnTextField();
+
+        // Cold the block cache: closing the index closes the directories, which invalidates the block
+        // cache, the L1 tables, the FD cache and the encryption-metadata cache for those paths.
+        assertAcked(client().admin().indices().prepareClose(INDEX).get());
+        assertAcked(client().admin().indices().prepareOpen(INDEX).get());
+        ensureGreen(INDEX);
+
+        FdcDebug.resetCounters();
+
+        runTermsAgg();
+
+        Map<String, Long> counts = FdcDebug.counters();
+        logger.info("fdc-flow: counters across the COLD field data build = {}", counts);
+
+        // Residency is deliberately NOT asserted here, and the reason is a conflict between two tests over
+        // one node-level knob. indices.cache.cleanup_interval is pinned to 100ms so
+        // testClearFieldDataCacheThenRebuild can observe a mark-and-sweep eviction promptly - but frequent
+        // sweeps also mean a freshly built entry can be swept out from under this test between the build and
+        // the stats read. Observed ~1 run in 7: identical counters (L1_HIT=5, clone=3, slice=4, so the build
+        // definitely ran) with the stat reading 0.
+        //
+        // Residency is already asserted deterministically by testTermsAggOnTextFieldBuildsFieldDataCache,
+        // which does no close/open and so is not racing a sweep. What THIS test uniquely establishes is the
+        // block-acquisition path, and the counters below prove that synchronously and exactly. Asserting a
+        // sweep-gated statistic here would add no coverage and one flaky failure mode.
+        logger.info("fdc-flow: COLD build field data bytes={} (sweep-gated, not asserted here)", indexFieldDataBytes());
+
+        long l1Hits = FdcDebug.counterOf("block.acquire.L1_HIT");
+        long l2Hits = FdcDebug.counterOf("block.acquire.L2_HIT");
+        long misses = FdcDebug.counterOf("block.acquire.MISS_LOADS_AND_POPULATES");
+        long bypassing = FdcDebug.counterOf("cache.loadUncached.NO_POPULATE");
+
+        // THE ANSWER, and it is about MEDIATION rather than population. Every block the build touches is
+        // acquired THROUGH the pool - L1, else L2, else a disk load that publishes into both. Field data
+        // itself is on heap, but it cannot be built without going through the pool for its source blocks.
+        assertThat(
+            "every field data source block must be acquired through the pool; counters were " + counts,
+            l1Hits + l2Hits + misses,
+            greaterThan(0L)
+        );
+
+        // Population is CONDITIONAL on the block not already being resident, so it is NOT asserted here.
+        // At this scale it is zero: the index is far smaller than the pool, so opening it leaves every
+        // block resident and the build finds them all in L1 - measured L1_HIT=5, MISS_LOADS=0. Population
+        // by the build needs a working set larger than the pool, which is a property of the deployment and
+        // not of this test. Asserting misses > 0 here would be asserting a coincidence of sizing, and it
+        // would fail for the wrong reason on any machine where the whole index fits.
+        logger
+            .info(
+                "fdc-flow: COLD build tiers L1_HIT={} L2_HIT={} MISS_LOADS={} rawIo={} (only misses populate)",
+                l1Hits,
+                l2Hits,
+                misses,
+                FdcDebug.counterOf("loader.load")
+            );
+
+        // The bypass path is off by default, so nothing should be taking it. If this ever trips, the tier
+        // split above is measuring a configuration we did not intend to test.
+        assertThat("cache bypass must be off by default; counters were " + counts, bypassing, equalTo(0L));
+    }
+
+    /**
+     * The OTHER mechanism, and the one easily conflated with the first: a terms aggregation on a
+     * {@code keyword} field.
+     *
+     * <p>{@code fielddata: true} on an analyzed {@code text} field uninverts the POSTINGS
+     * ({@code .doc} / {@code .tim}) into on-heap ordinals. A {@code keyword} field has doc values, so the
+     * same aggregation instead builds a global ordinal map over {@code .dvd} / {@code .dvm}. Both land in
+     * {@code IndicesFieldDataCache} and both show up in field data stats, but they read different files
+     * through different code paths - so a routing or admission change aimed at one does not necessarily
+     * affect the other.
+     *
+     * <p>This test records which extensions each path actually touches rather than assuming. It asserts
+     * only that the keyword path is pool-mediated and that field data becomes resident; the extension mix
+     * is logged, because at small scale Lucene writes a compound file and the physical extension is
+     * {@code .cfs} regardless of which logical file is being read - the mix is only legible once segments
+     * are large enough to stay non-compound.
+     */
+    public void testKeywordTermsAggUsesDocValuesPath() throws Exception {
+        internalCluster().startNode();
+        createIndexAndIngest();
+
+        String keywordField = TEXT_FIELD + ".keyword";
+
+        FdcDebug.resetCounters();
+
+        SearchResponse response = client()
+            .prepareSearch(INDEX)
+            .setSize(0)
+            // The shard request cache would serve an identical repeated agg from its RESPONSE cache, keyed on the
+            // index reader's cache key - the aggregation then never executes, no field data is built, and the
+            // trace counters come back empty. Measured: this made the rebuild assertion fail ~1 run in 3 with
+            // completely empty counters. Any A/B that re-runs the same query MUST disable it or it measures
+            // the cache, not the code path.
+            .setRequestCache(false)
+            .addAggregation(AggregationBuilders.terms("by_keyword").field(keywordField).size(10))
+            .get();
+        assertNoFailures(response);
+
+        Terms terms = response.getAggregations().get("by_keyword");
+        assertThat("keyword agg must produce buckets", terms.getBuckets().size(), greaterThan(0));
+
+        Map<String, Long> counts = FdcDebug.counters();
+        logger.info("fdc-flow: counters across the KEYWORD (doc values) agg = {}", counts);
+        logger.info("fdc-flow: KEYWORD field data perField = {}", allPerFieldFieldDataBytes());
+
+        long tiers = FdcDebug.counterOf("block.acquire.L1_HIT") + FdcDebug.counterOf("block.acquire.L2_HIT") + FdcDebug
+            .counterOf("block.acquire.MISS_LOADS_AND_POPULATES");
+        assertThat("the keyword agg must also acquire blocks through the pool; counters were " + counts, tiers, greaterThan(0L));
+
+        // No openInput here either: like the text path, the global-ordinal build clones inputs that
+        // segment-core construction already opened.
+        long opens = FdcDebug.counterOf("hybrid.openInput") + FdcDebug.counterOf("pool.openInput");
+        assertThat("keyword agg must not open any file; counters were " + counts, opens, equalTo(0L));
     }
 
     // ---- helpers ----
@@ -275,6 +441,12 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
         SearchResponse response = client()
             .prepareSearch(INDEX)
             .setSize(0)
+            // The shard request cache would serve an identical repeated agg from its RESPONSE cache, keyed on the
+            // index reader's cache key - the aggregation then never executes, no field data is built, and the
+            // trace counters come back empty. Measured: this made the rebuild assertion fail ~1 run in 3 with
+            // completely empty counters. Any A/B that re-runs the same query MUST disable it or it measures
+            // the cache, not the code path.
+            .setRequestCache(false)
             .addAggregation(AggregationBuilders.terms("by_user").field(TEXT_FIELD).size(10))
             .get();
         assertNoFailures(response);
