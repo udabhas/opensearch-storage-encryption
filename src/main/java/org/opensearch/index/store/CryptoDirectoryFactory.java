@@ -663,6 +663,40 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     }
 
     /**
+     * One-line snapshot of node-global buffer-pool state: L2 cache, segment pool, and L1 radix tables.
+     *
+     * <p>Intended to be sampled at PHASE BOUNDARIES so a phase's effect on the pool can be attributed to
+     * it. The background telemetry thread emits the same three records on a 10s cadence, which is useless
+     * for attributing anything that takes milliseconds - a field data build and the query phase that follows
+     * it land inside a single tick, so the tick cannot separate them.
+     *
+     * <p>Returns a marker string rather than throwing when the pool is not initialised, so a caller can
+     * sample unconditionally without guarding.
+     *
+     * @return concatenated {@code Cache[..] Pool[..] L1[..]} state, never null
+     */
+    public static String poolStateSnapshot() {
+        PoolBuilder.PoolResources resources = poolResources;
+        if (resources == null) {
+            return "Cache[uninitialised] Pool[uninitialised] L1[uninitialised]";
+        }
+        StringBuilder sb = new StringBuilder(256);
+        BlockCache<RefCountedByteBuffer> cache = resources.getBlockCache();
+        if (cache instanceof CaffeineBlockCache) {
+            sb.append(((CaffeineBlockCache<?, ?>) cache).cacheStats());
+        }
+        org.opensearch.index.store.pool.Pool<RefCountedByteBuffer> pool = resources.getSegmentPool();
+        if (pool instanceof org.opensearch.index.store.pool.MemorySegmentPool msp) {
+            sb.append(" Pool[").append(msp.poolStats()).append(']');
+        }
+        org.opensearch.index.store.bufferpoolfs.RadixBlockTableRegistry registry = resources.getRadixBlockTableRegistry();
+        if (registry != null) {
+            sb.append(' ').append(registry.l1Stats());
+        }
+        return sb.toString();
+    }
+
+    /**
      * Flush ALL node-level plugin caches so the next read is served from disk + decrypted afresh.
      * This is the "flush API" — used to force a genuinely COLD cryptofs cache for benchmarking
      * (e.g. cold-vs-cold search comparisons). It clears, in coherence order:

@@ -59,11 +59,17 @@ public final class FdcDebug {
     private static final String PROP_HOT_STACKS = "opensearch.store.fdcdebug.hotstacks";
     /** Max OpenSearch/Lucene frames retained per chain. */
     private static final String PROP_FRAMES = "opensearch.store.fdcdebug.frames";
+    /**
+     * Emit node-global buffer-pool state inline at every derivation ({@code clone} / {@code slice}).
+     * Default FALSE - it builds three stats strings per call, so it is for small confirmatory runs only.
+     */
+    private static final String PROP_POOL_STATE = "opensearch.store.fdcdebug.poolstate";
 
     private static final boolean FORCE = Boolean.parseBoolean(System.getProperty(PROP_FORCE, "false"));
     private static final boolean STACKS = Boolean.parseBoolean(System.getProperty(PROP_STACKS, "true"));
     private static final boolean HOT_STACKS = Boolean.parseBoolean(System.getProperty(PROP_HOT_STACKS, "false"));
     private static final int MAX_FRAMES = Integer.parseInt(System.getProperty(PROP_FRAMES, "24"));
+    private static final boolean POOL_STATE = Boolean.parseBoolean(System.getProperty(PROP_POOL_STATE, "false"));
 
     /** Call-site hashes already emitted with a full chain. Bounded by the number of distinct paths. */
     private static final Set<Integer> SEEN = ConcurrentHashMap.newKeySet();
@@ -84,8 +90,27 @@ public final class FdcDebug {
      */
     private static final ConcurrentHashMap<String, LongAdder> COUNTERS = new ConcurrentHashMap<>();
 
-    /** Increments the event count for a site. Callers gate on {@link #on}. */
+    /**
+     * True once any traced code path has been observed, so {@link #count} can no-op cheaply when tracing is
+     * off. Latched rather than re-derived because {@code count} has no {@link Logger} to consult, and adding
+     * one to every call site would push the check to places (the block cache) that have no business knowing
+     * about tracing.
+     */
+    private static volatile boolean counting = FORCE;
+
+    /**
+     * Increments the event count for a site.
+     *
+     * <p>Early-returns when nothing has enabled tracing, because several call sites are on the per-block
+     * read path where an unconditional map lookup plus {@link LongAdder} increment would be real production
+     * cost for a value nobody reads. Call sites that BUILD their key by concatenation must still gate on
+     * {@link #on} themselves - the string is allocated before this method is entered, so an early return
+     * here cannot save it.
+     */
     public static void count(String site) {
+        if (counting == false) {
+            return;
+        }
         COUNTERS.computeIfAbsent(site, k -> new LongAdder()).increment();
     }
 
@@ -109,7 +134,14 @@ public final class FdcDebug {
 
     /** Cheap gate. Callers must wrap every trace call in this. */
     public static boolean on(Logger log) {
-        return FORCE || log.isDebugEnabled();
+        if (FORCE) {
+            return true;
+        }
+        if (log.isDebugEnabled()) {
+            counting = true;
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -127,6 +159,32 @@ public final class FdcDebug {
             log.info(format, args);
         } else {
             log.debug(format, args);
+        }
+    }
+
+    /**
+     * Buffer-pool state for inline emission at a derivation, or {@code ""} when disabled.
+     *
+     * <p>Answers "did the pool move across THIS clone?" rather than "what did the pool look like at some
+     * point in the last ten seconds", which is all the background telemetry thread can say - it sleeps 10s
+     * between records and a whole field data build plus the query phase that follows it fit inside 122ms,
+     * so a tick cannot attribute anything at this granularity.
+     *
+     * <p>Reflectively decoupled from {@code CryptoDirectoryFactory} on purpose: this helper lives in the
+     * debug package and must not create a compile-time dependency from the tracing layer onto the factory
+     * that owns the pool. Reflection cost is irrelevant because the whole thing is off by default and only
+     * used in small confirmatory runs.
+     */
+    public static String poolState() {
+        if (POOL_STATE == false) {
+            return "";
+        }
+        try {
+            Class<?> factory = Class.forName("org.opensearch.index.store.CryptoDirectoryFactory");
+            Object snapshot = factory.getMethod("poolStateSnapshot").invoke(null);
+            return " pool={" + snapshot + "}";
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return " pool={unavailable:" + e.getClass().getSimpleName() + "}";
         }
     }
 

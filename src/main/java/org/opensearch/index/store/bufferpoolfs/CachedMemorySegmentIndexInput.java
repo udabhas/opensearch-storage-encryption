@@ -357,6 +357,38 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @return a BlockCacheValue for the block
      * @throws IOException if the block cannot be acquired after max attempts
      */
+    /**
+     * Attributes a block acquisition to its caller and tier.
+     *
+     * <p>Without this the tier counters answer "how many" but not "who", so an L1 hit could not be traced
+     * back to the consumer that caused it - the gap that made it impossible to say which of a field data
+     * build and a query-phase precompute produced a given hit, even though both were known to be running.
+     *
+     * <p>This is the hottest site in the plugin - once per block per read - so the caller chain is walked
+     * only under {@code -Dopensearch.store.fdcdebug.hotstacks=true}, and then once per distinct call path.
+     * The identity hash ties the line back to the {@code input.create} / {@code input.clone} /
+     * {@code input.slice} line that produced this input.
+     */
+    private void traceTier(String tier, long blockOffset) {
+        if (FdcDebug.on(LOGGER) == false) {
+            return;
+        }
+        int callsite = FdcDebug.hotSite(LOGGER, "block.acquire." + tier, path);
+        FdcDebug
+            .log(
+                LOGGER,
+                "fdc-debug block.acquire tier={} blockOffset={} id={} ext={} skipCache={} path={} thread={} callsite={}",
+                tier,
+                blockOffset,
+                System.identityHashCode(this),
+                fdcExt,
+                skipCache,
+                path,
+                FdcDebug.thread(),
+                callsite
+            );
+    }
+
     /** Extension of a path, or "none". Called once per input, never per block. */
     private static String fdcExtensionOf(java.nio.file.Path p) {
         String name = p.getFileName() == null ? "" : p.getFileName().toString();
@@ -395,6 +427,12 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         final long blockId = blockOffset >>> CACHE_BLOCK_SIZE_POWER;
         // Query-profiler handle (null unless a ?profile=true query is scoring on this thread).
         final org.opensearch.index.store.profile.CryptoQueryProfile prof = org.opensearch.index.store.profile.CryptoQueryProfile.current();
+        // Is a profile breakdown actually exposed on this thread at read time? Distinguishes "the profiler
+        // recorded nothing because nothing happened" from "nothing was recorded because there was no handle
+        // to record into" - two states that look identical in a profile response full of zeros.
+        if (FdcDebug.on(LOGGER)) {
+            FdcDebug.count(prof == null ? "prof.handle.NULL" : "prof.handle.present");
+        }
 
         // ---- L1 lookup: two plain array reads, no fences, no CAS ----
         final org.opensearch.index.store.profile.CryptoNanosMetric l1Timer = (prof != null) ? prof.l1LookupTimer() : null;
@@ -406,8 +444,14 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             // fdc-debug: an L1 hit never reaches CaffeineBlockCache at all, so the cache-layer populate
             // counters cannot see it. Counting the tier here is what makes "was this read served BY the
             // pool or did it populate the pool" separable - two different claims with two different costs.
-            FdcDebug.count("block.acquire.L1_HIT");
-            FdcDebug.count("block.acquire.L1_HIT." + fdcExt);
+            if (FdcDebug.on(LOGGER)) {
+                // Gated AND the per-extension key built inside the gate: this is once per block per read,
+                // so an ungated string concatenation here would allocate on the query hot path in
+                // production, where tracing is off and the result is discarded.
+                FdcDebug.count("block.acquire.L1_HIT");
+                FdcDebug.count("block.acquire.L1_HIT." + fdcExt);
+                traceTier("L1_HIT", blockOffset);
+            }
             lastAccessWasCacheHit = true;
             if (prof != null)
                 prof.incL1Hits();
@@ -440,7 +484,11 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         if (l2Timer != null)
             l2Timer.stop(l2StartNs);
         if (v != null) {
-            FdcDebug.count("block.acquire.L2_HIT");
+            if (FdcDebug.on(LOGGER)) {
+                FdcDebug.count("block.acquire.L2_HIT");
+                FdcDebug.count("block.acquire.L2_HIT." + fdcExt);
+                traceTier("L2_HIT", blockOffset);
+            }
             FdcDebug.count("block.acquire.L2_HIT." + fdcExt);
             if (prof != null)
                 prof.incL2Hits();
@@ -455,7 +503,11 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             return v;
         }
         // L2 miss — load from disk (deduped by Caffeine)
-        FdcDebug.count("block.acquire.MISS_LOADS_AND_POPULATES");
+        if (FdcDebug.on(LOGGER)) {
+            FdcDebug.count("block.acquire.MISS_LOADS_AND_POPULATES");
+            FdcDebug.count("block.acquire.MISS_LOADS_AND_POPULATES." + fdcExt);
+            traceTier("MISS_LOADS_AND_POPULATES", blockOffset);
+        }
         FdcDebug.count("block.acquire.MISS_LOADS_AND_POPULATES." + fdcExt);
         if (prof != null)
             prof.incL2Misses();
@@ -929,13 +981,14 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             FdcDebug
                 .log(
                     LOGGER,
-                    "fdc-debug input.clone from={} fromIsSlice={} skipCache={} path={} thread={} callsite={}",
+                    "fdc-debug input.clone from={} fromIsSlice={} skipCache={} path={} thread={} callsite={}{}",
                     System.identityHashCode(this),
                     isSlice,
                     skipCache,
                     path,
                     FdcDebug.thread(),
-                    callsite
+                    callsite,
+                    FdcDebug.poolState()
                 );
         }
         final CachedMemorySegmentIndexInput clone = buildSlice((String) null, 0L, this.length);
@@ -975,7 +1028,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             FdcDebug
                 .log(
                     LOGGER,
-                    "fdc-debug input.slice from={} fromIsSlice={} skipCache={} off={} len={} desc={} path={} thread={} callsite={}",
+                    "fdc-debug input.slice from={} fromIsSlice={} skipCache={} off={} len={} desc={} path={} thread={} callsite={}{}",
                     System.identityHashCode(this),
                     isSlice,
                     skipCache,
@@ -984,7 +1037,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
                     sliceDescription,
                     path,
                     FdcDebug.thread(),
-                    callsite
+                    callsite,
+                    FdcDebug.poolState()
                 );
         }
         var slice = buildSlice(sliceDescription, offset, length);
@@ -994,12 +1048,118 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         return slice;
     }
 
+    /** Whether this input bypasses L1/L2. Visible for testing the inheritance contract in {@link #buildSlice}. */
+    boolean isSkipCache() {
+        return skipCache;
+    }
+
+    /**
+     * Policy hook: should this DERIVED input bypass the block cache even though its parent does not?
+     *
+     * <p>Returning {@code false} means "inherit whatever the parent decided", which is the current
+     * behaviour and the safe default. Returning {@code true} widens the bypass to this input and, because
+     * the decision is inherited, to everything derived from it.
+     *
+     * <p><b>What is knowable here, and what is not.</b> This is the single funnel for every derived input -
+     * {@code clone()} and both {@code slice()} overloads all route through {@link #buildSlice}, and for the
+     * flows that matter (field data builds, merge reads) it is the ONLY seam they cross, because those
+     * consumers never call {@code openInput} at all. So it is the right place for a decision. But the
+     * caller's identity has already been lost by the time control arrives here: available are the parent's
+     * path and extension, the region being derived, and the slice description. NOT available is who asked.
+     *
+     * <p>That matters because the same region of the same parent is derived by different consumers with
+     * opposite requirements - measured: a field data build and a query-phase precompute both slice the
+     * identical terms-index region from the same parent instance. A rule based only on the arguments below
+     * therefore cannot separate "bulk one-shot reader" from "latency-sensitive search". Making this hook a
+     * real policy needs intent supplied from above (a scoped marker set by the known bulk callers, or a
+     * context-carrying slice overload), not a cleverer predicate here.
+     *
+     * @param sliceDescription the caller's slice label; {@code null} for {@code clone()}
+     * @param absoluteOffset   absolute start offset of the derived region within the file
+     * @param length           length of the derived region
+     * @return {@code true} to bypass L1/L2 for this input; {@code false} to inherit the parent's decision
+     */
+    boolean enableSkipCache(String sliceDescription, long absoluteOffset, long length) {
+        if (StaticConfigs.fieldDataStackDetectEnabled() == false) {
+            return false;
+        }
+        return isFieldDataBuildOnStack();
+    }
+
+    /**
+     * True when this derivation is happening inside a field data build.
+     *
+     * <p>Marker frame is {@code loadDirect} on a class under {@code org.opensearch.index.fielddata} -
+     * {@code PagedBytesIndexFieldData.loadDirect} for text fields, its siblings for other field types.
+     * That method IS the uninversion: its three statements produce every derived input a build makes
+     * (estimator slice of the terms index, term-dictionary clone, postings clone). Matching on it therefore
+     * catches the whole build and nothing else.
+     *
+     * <p>Deliberately NOT matching {@code IndicesFieldDataCache} alone. That class also appears on the stack
+     * of a cache HIT, which performs no reads, and on the global-ordinals path, which builds an
+     * {@code OrdinalMap} from already-cached leaves and likewise reads nothing. Keying on {@code loadDirect}
+     * targets the reads specifically.
+     *
+     * <p>Verified against the traced chains: the field data build reaches this method with {@code loadDirect}
+     * 6-8 filtered frames up, while the query-phase precompute path
+     * ({@code GlobalOrdinalsStringTermsAggregator.tryCollectFromTermFrequencies}) derives the SAME region of
+     * the SAME parent with no fielddata frame at all. So this predicate separates two consumers that no
+     * argument-based rule could.
+     *
+     * <p>Short-circuits on the first match and stops after {@link #FIELD_DATA_STACK_MAX_FRAMES} frames, so
+     * the common case (ordinary search, no match) walks a bounded prefix rather than the whole stack.
+     */
+    private static boolean isFieldDataBuildOnStack() {
+        return StackWalker.getInstance().walk(frames -> frames.limit(FIELD_DATA_STACK_MAX_FRAMES).anyMatch(f -> {
+            if ("loadDirect".equals(f.getMethodName()) == false) {
+                return false;
+            }
+            String cls = f.getClassName();
+            return cls.startsWith("org.opensearch.index.fielddata") || cls.startsWith("org.opensearch.indices.fielddata");
+        }));
+    }
+
+    /**
+     * Frame budget for {@link #isFieldDataBuildOnStack()}. The marker sits 6-8 filtered frames above the
+     * derivation in the measured chains; unfiltered adds lambda and wrapper frames, so this is set well
+     * clear of that. Too low silently produces false negatives (build not detected, no bypass); too high
+     * only costs walk time on the miss path.
+     */
+    private static final int FIELD_DATA_STACK_MAX_FRAMES = 24;
+
     /** Builds the actual sliced IndexInput. * */
     CachedMemorySegmentIndexInput buildSlice(String sliceDescription, long sliceOffset, long length) {
         ensureOpen();
         // Calculate absolute base offset for the slice
         final long sliceAbsoluteBaseOffset = this.absoluteBaseOffset + sliceOffset;
         final String newResourceDescription = getFullSliceDescription(sliceDescription);
+
+        // Bypass decision for the derived input: INHERIT the parent's, and let the hook ADD one.
+        //
+        // The OR is deliberate and one-way. Once an input is bypassing, none of its clones or slices has
+        // any business re-entering the cache - the parent already declared these bytes not worth caching,
+        // and a child that re-cached them would reintroduce exactly the eviction pressure the bypass exists
+        // to remove. Equally important, replacing (rather than OR-ing) the inherited value silently
+        // disables the bypass for every derived input: measured 44 masters against 21,648 derived inputs in
+        // one merge test, so a non-inheriting version would apply the bypass to 0.2% of reads while
+        // appearing to be enabled.
+        final boolean hookWidened = skipCache == false && enableSkipCache(sliceDescription, sliceAbsoluteBaseOffset, length);
+        final boolean shouldSkipCache = skipCache || hookWidened;
+        if (hookWidened) {
+            // Counted so an experiment can show WHICH derivations the hook caught, not just that it was on.
+            FdcDebug.count("input.skipCache.hookWidened");
+            FdcDebug.count("input.skipCache.hookWidened." + fdcExt);
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug skipCache.hookWidened desc={} off={} len={} path={} thread={}",
+                    sliceDescription,
+                    sliceAbsoluteBaseOffset,
+                    length,
+                    path,
+                    FdcDebug.thread()
+                );
+        }
 
         CachedMemorySegmentIndexInput slice = new CachedMemorySegmentIndexInput(
             newResourceDescription,
@@ -1012,7 +1172,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             true,
             radixBlockTable,
             radixBlockTableRegistry, // slices share the table and registry for metrics, but don't call release()
-            skipCache // clones/slices inherit the bypass decision from the input they derive from
+            shouldSkipCache // inherited from the parent, possibly widened by enableSkipCache()
         );
 
         try {

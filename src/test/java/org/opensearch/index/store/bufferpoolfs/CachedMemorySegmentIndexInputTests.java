@@ -1646,6 +1646,53 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
     }
 
     /**
+     * A bypassing input must pass the bypass on to every clone and slice, and to their descendants.
+     *
+     * <p>Guards a specific regression: replacing the inherited value in {@code buildSlice} instead of OR-ing
+     * with it compiles, passes every other test, and is invisible while the global bypass flag is off - but
+     * it silently limits the bypass to master inputs only. In one traced merge test there were 44 masters
+     * against 21,648 derived inputs, so that mistake would apply the bypass to 0.2% of reads while appearing
+     * enabled, and would read as "the bypass does not help" in an A/B.
+     */
+    public void testSkipCacheIsInheritedByClonesAndSlices() throws IOException {
+        long fileLength = BLOCK_SIZE * 4;
+        CachedMemorySegmentIndexInput bypassing = CachedMemorySegmentIndexInput
+            .newInstance(
+                "bypassing",
+                testPath,
+                fileLength,
+                mockCache,
+                mockReadaheadManager,
+                null,
+                radixBlockTable,
+                radixBlockTableRegistry,
+                true
+            );
+
+        assertTrue("clone must inherit the bypass", bypassing.clone().isSkipCache());
+        assertTrue("slice must inherit the bypass", bypassing.slice("s", 0, BLOCK_SIZE).isSkipCache());
+        // Second generation: a slice of a clone must still bypass.
+        assertTrue("descendants must inherit the bypass", bypassing.clone().slice("s2", 0, BLOCK_SIZE).clone().isSkipCache());
+
+        bypassing.close();
+    }
+
+    /**
+     * The default hook must not turn the bypass ON for a non-bypassing input - i.e. the hook widens, never
+     * invents. Keeps the shipped default behaviourally identical to no hook at all.
+     */
+    public void testNonBypassingInputStaysNonBypassingByDefault() throws IOException {
+        long fileLength = BLOCK_SIZE * 4;
+        CachedMemorySegmentIndexInput cached = createInput(fileLength);
+
+        assertFalse("clone of a cached input must stay cached", cached.clone().isSkipCache());
+        assertFalse("slice of a cached input must stay cached", cached.slice("s", 0, BLOCK_SIZE).isSkipCache());
+        assertFalse("the default hook must not enable the bypass", cached.enableSkipCache("s", 0L, BLOCK_SIZE));
+
+        cached.close();
+    }
+
+    /**
      * prefetch() works (and still delegates) when the input was created with a null readahead context.
      */
     public void testPrefetchWithNullReadaheadContext() throws IOException {

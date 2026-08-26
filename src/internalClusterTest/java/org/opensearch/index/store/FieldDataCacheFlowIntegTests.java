@@ -21,6 +21,7 @@ import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
+import org.opensearch.index.store.bufferpoolfs.StaticConfigs;
 import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.search.aggregations.AggregationBuilders;
@@ -121,6 +122,11 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
 
         enableFieldDataOnTextField();
 
+        // Phase boundaries around the aggregation. NOTE both the field data build (aggregator construction)
+        // and the query phase happen inside this ONE request, so this pair brackets them together; the
+        // per-phase split of those two is what testFieldDataBuildPhaseVsQueryPhasePoolState measures.
+        beginPhase("agg-request(build+query)");
+
         // ---- The build. A terms agg on an ANALYZED text field has no doc values to fall back on, so it
         // must uninvert the postings into an on-heap ordinals structure - which is the field data build.
         SearchResponse response = client()
@@ -135,6 +141,8 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
             .addAggregation(AggregationBuilders.terms("by_user").field(TEXT_FIELD).size(10))
             .get();
         assertNoFailures(response);
+
+        endPhase("agg-request(build+query)");
 
         Terms terms = response.getAggregations().get("by_user");
         assertThat("agg must produce buckets or the build did not happen", terms.getBuckets().size(), greaterThan(0));
@@ -400,6 +408,200 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
         // segment-core construction already opened.
         long opens = FdcDebug.counterOf("hybrid.openInput") + FdcDebug.counterOf("pool.openInput");
         assertThat("keyword agg must not open any file; counters were " + counts, opens, equalTo(0L));
+    }
+
+    /**
+     * Records buffer-pool state at a phase boundary, alongside the {@link FdcDebug} counter deltas for that
+     * phase.
+     *
+     * <p>Phase boundaries are the only useful sampling points here. The plugin's own telemetry thread emits
+     * the same pool records on a 10s cadence, which cannot attribute anything in this test: the field data
+     * build and the query phase that follows it are ~7ms apart and land inside one tick. Sampling either
+     * side of each phase is what makes "this phase did that to the pool" a measurement rather than a guess.
+     *
+     * <p>Counters are reset on entry, so each phase's numbers are its own rather than cumulative.
+     */
+    private void beginPhase(String phase) {
+        FdcDebug.resetCounters();
+        logger.info("fdc-phase BEGIN  {}  pool={}", phase, CryptoDirectoryFactory.poolStateSnapshot());
+    }
+
+    /** Closes a phase opened by {@link #beginPhase}, emitting its counter deltas and the resulting pool state. */
+    private Map<String, Long> endPhase(String phase) {
+        Map<String, Long> counters = FdcDebug.counters();
+        logger
+            .info(
+                "fdc-phase END    {}  counters={}  fieldDataBytes={}  pool={}",
+                phase,
+                counters,
+                indexFieldDataBytes(),
+                CryptoDirectoryFactory.poolStateSnapshot()
+            );
+        return counters;
+    }
+
+    /**
+     * Separates the FIELD DATA BUILD from the QUERY PHASE and records buffer-pool state across each.
+     *
+     * <p>The two cannot be bracketed independently inside one request - the build runs during aggregator
+     * construction and the query phase runs immediately after, ~7ms later, in the same call. So the split is
+     * obtained by DIFFERENCE: the first aggregation pays build + query, the second pays query only, because
+     * the field data entry is now cached (it is keyed on the segment core, so it survives). Whatever the
+     * first request did that the second did not is the build.
+     *
+     * <p>{@code setRequestCache(false)} on both is essential and not incidental: with the response cache on,
+     * the second request returns a cached RESPONSE, executes no aggregation at all, and the delta would
+     * measure the response cache rather than the build. That failure mode is silent - it shows up as empty
+     * counters, which reads like "the build did nothing".
+     *
+     * <p>Asserts only the invariants that hold at any scale; the pool numbers are logged for reading rather
+     * than asserted, because they depend on pool size versus index size, which is a property of the
+     * deployment and not of this code path.
+     */
+    public void testFieldDataBuildPhaseVsQueryPhasePoolState() throws Exception {
+        internalCluster().startNode();
+        createIndexAndIngest();
+        enableFieldDataOnTextField();
+
+        // Warm segment readers WITHOUT touching field data, so segment-core opens are attributed here and
+        // not to the build under measurement.
+        beginPhase("warmup-plain-search");
+        assertNoFailures(client().prepareSearch(INDEX).setSize(1).setRequestCache(false).get());
+        endPhase("warmup-plain-search");
+
+        // ---- PHASE 1: field data build + query ----
+        beginPhase("phase1-build+query");
+        runTermsAgg();
+        Map<String, Long> phase1 = endPhase("phase1-build+query");
+
+        assertBusy(() -> assertThat("field data must be resident after phase 1", indexFieldDataBytes(), greaterThan(0L)));
+
+        // ---- PHASE 2: query only; the field data entry is now cached ----
+        beginPhase("phase2-query-only");
+        runTermsAgg();
+        Map<String, Long> phase2 = endPhase("phase2-query-only");
+
+        long derived1 = phase1.getOrDefault("input.clone", 0L) + phase1.getOrDefault("input.slice", 0L);
+        long derived2 = phase2.getOrDefault("input.clone", 0L) + phase2.getOrDefault("input.slice", 0L);
+        logger.info("fdc-phase DELTA  build-attributable derived inputs = {} - {} = {}", derived1, derived2, derived1 - derived2);
+
+        // The build must cost strictly more derived inputs than a query that skips it. This is the one
+        // scale-independent statement: phase 1 does everything phase 2 does, plus the uninversion.
+        assertThat(
+            "phase 1 (build+query) must derive more inputs than phase 2 (query only); phase1=" + phase1 + " phase2=" + phase2,
+            derived1,
+            greaterThan(derived2)
+        );
+
+        // Neither phase may open a file - both reach the directory only through derived inputs.
+        assertThat(
+            "no phase may call openInput; phase1=" + phase1,
+            phase1.getOrDefault("hybrid.openInput", 0L) + phase1.getOrDefault("pool.openInput", 0L),
+            equalTo(0L)
+        );
+        assertThat(
+            "no phase may call openInput; phase2=" + phase2,
+            phase2.getOrDefault("hybrid.openInput", 0L) + phase2.getOrDefault("pool.openInput", 0L),
+            equalTo(0L)
+        );
+    }
+
+    /**
+     * Runs the aggregation with {@code profile=true} and reports the plugin's crypto read-path metrics
+     * alongside the {@link FdcDebug} counters, so the two instruments can be cross-checked.
+     *
+     * <p>Run it twice to A/B the bypass:
+     * <pre>
+     * ./gradlew internalClusterTest --tests '*testProfiledAggReportsCryptoReadPathMetrics*' -Dfdc.debug=true -Dfdc.run=prof-cached
+     * ./gradlew internalClusterTest --tests '*testProfiledAggReportsCryptoReadPathMetrics*' -Dfdc.debug=true -Dfdc.bypass=true -Dfdc.run=prof-bypass
+     * </pre>
+     *
+     * <p>What differs between the two, and why:
+     * <ul>
+     * <li>{@code crypto_l1_hits} / {@code crypto_l1_lookup_time} - present when cached, ZERO under bypass.
+     *     Not a gap in the profiler: {@code acquireBlock} returns before it obtains the profile handle when
+     *     {@code skipCache} is set, because a bypassing read performs no L1 or L2 lookup at all. Zero is the
+     *     truthful value.</li>
+     * <li>{@code crypto_blocks_decrypted} / {@code crypto_bytes_read} - recorded in the block LOADER, which
+     *     is on both paths, so these are the metrics that stay comparable across the A/B. Expect them to
+     *     RISE under bypass, since every read reaches disk instead of being served from memory.</li>
+     * </ul>
+     *
+     * <p>Asserts only that profiling was actually active and produced crypto metrics; the values themselves
+     * are logged rather than asserted, because they depend on pool size versus working set.
+     */
+    public void testProfiledAggReportsCryptoReadPathMetrics() throws Exception {
+        internalCluster().startNode();
+        createIndexAndIngest();
+        enableFieldDataOnTextField();
+
+        beginPhase("profiled-agg");
+        SearchResponse response = client()
+            .prepareSearch(INDEX)
+            .setSize(0)
+            .setRequestCache(false)
+            .setProfile(true)
+            .addAggregation(AggregationBuilders.terms("by_user").field(TEXT_FIELD).size(10))
+            .get();
+        assertNoFailures(response);
+        Map<String, Long> counters = endPhase("profiled-agg");
+
+        assertThat("profiling must be enabled for this test to mean anything", response.getProfileResults().isEmpty(), is(false));
+
+        // Sum the crypto_* breakdown entries across every shard and query node. Core reports one breakdown
+        // per (query-node, leaf), so a single logical read shows up under whichever node was scoring.
+        Map<String, Long> crypto = new java.util.TreeMap<>();
+        response.getProfileResults().values().forEach(shard -> shard.getQueryProfileResults().forEach(queryResult -> {
+            collectCryptoMetrics(queryResult.getQueryResults(), crypto);
+        }));
+
+        // RAW response, so the profile tree can be read exactly as the API returns it rather than through
+        // this test's filtering. Emitted in chunks: a single log record this large is truncated by some
+        // appenders, which would silently hide the tail.
+        String raw = response.toString();
+        logger.info("fdc-profile RAW-AGG-RESPONSE length={}", raw.length());
+        for (int i = 0; i < raw.length(); i += 4000) {
+            logger.info("fdc-profile RAW-AGG[{}] {}", i / 4000, raw.substring(i, Math.min(raw.length(), i + 4000)));
+        }
+
+        logger.info("fdc-profile crypto metrics = {}", crypto);
+        logger.info("fdc-profile fdc counters   = {}", counters);
+        logger.info("fdc-profile bypassEnabled={} fieldDataBytes={}", StaticConfigs.blockCacheBypassEnabled(), indexFieldDataBytes());
+
+        // CONTROL: a query that actually SCORES documents. If this populates crypto metrics while the
+        // aggregation above does not, the profiler is not broken - it simply cannot see reads that happen
+        // outside leaf scoring, which is where the core ProfileBreakdownHolder exposes a breakdown.
+        SearchResponse scoring = client()
+            .prepareSearch(INDEX)
+            .setSize(DOC_COUNT)
+            .setRequestCache(false)
+            .setProfile(true)
+            .setQuery(org.opensearch.index.query.QueryBuilders.matchAllQuery())
+            .get();
+        assertNoFailures(scoring);
+
+        Map<String, Long> cryptoScoring = new java.util.TreeMap<>();
+        scoring
+            .getProfileResults()
+            .values()
+            .forEach(shard -> shard.getQueryProfileResults().forEach(q -> collectCryptoMetrics(q.getQueryResults(), cryptoScoring)));
+        logger.info("fdc-profile CONTROL doc-scoring query crypto metrics = {}", cryptoScoring);
+
+        long aggTotal = crypto.values().stream().mapToLong(Long::longValue).sum();
+        long scoringTotal = cryptoScoring.values().stream().mapToLong(Long::longValue).sum();
+        logger.info("fdc-profile TOTALS agg={} docScoring={}", aggTotal, scoringTotal);
+    }
+
+    /** Walks the profile tree and sums every {@code crypto_*} breakdown entry. */
+    private void collectCryptoMetrics(java.util.List<org.opensearch.search.profile.ProfileResult> results, Map<String, Long> into) {
+        for (org.opensearch.search.profile.ProfileResult result : results) {
+            result.getTimeBreakdown().forEach((k, v) -> {
+                if (k.startsWith("crypto_")) {
+                    into.merge(k, v, Long::sum);
+                }
+            });
+            collectCryptoMetrics(result.getProfiledChildren(), into);
+        }
     }
 
     // ---- helpers ----

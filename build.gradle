@@ -49,6 +49,9 @@ ext.applyFdcDebugProps = { task ->
     [debug: 'opensearch.store.fdcdebug',
      stacks: 'opensearch.store.fdcdebug.stacks',
      hotstacks: 'opensearch.store.fdcdebug.hotstacks',
+     fdstack: 'opensearch.store.fielddata_stack_detect',
+     bypass: 'opensearch.store.block_cache_bypass',
+     poolstate: 'opensearch.store.fdcdebug.poolstate',
      frames: 'opensearch.store.fdcdebug.frames'].each { shortName, propName ->
         String v = System.getProperty("fdc.${shortName}")
         if (v != null) {
@@ -117,7 +120,8 @@ ext.captureFdcTestLogs = { task, String taskLabel ->
         File manifest = new File(outDir, '_MANIFEST.txt')
         manifest.withWriter('UTF-8') { mw ->
             mw.writeLine("run=${runLabel} task=${taskLabel}")
-            mw.writeLine("fdc.debug=${System.getProperty('fdc.debug')} fdc.hotstacks=${System.getProperty('fdc.hotstacks')}")
+            mw.writeLine("fdc.debug=${System.getProperty('fdc.debug')} fdc.hotstacks=${System.getProperty('fdc.hotstacks')}" +
+                " fdc.stacks=${System.getProperty('fdc.stacks')} fdc.fdstack=${System.getProperty('fdc.fdstack')}")
             mw.writeLine('')
             outDir.listFiles()
                 ?.findAll { it.name.endsWith('.log') }
