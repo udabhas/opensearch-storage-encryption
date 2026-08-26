@@ -1083,7 +1083,34 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         if (StaticConfigs.fieldDataStackDetectEnabled() == false) {
             return false;
         }
-        return isFieldDataBuildOnStack();
+        String marker = fieldDataBuildFrameOnStack();
+        if (marker == null) {
+            return false;
+        }
+        // Make the totals available on a node that enabled only this experiment, without switching on the
+        // whole fdc-debug stream. Idempotent.
+        FdcDebug.enableCounting();
+        // Logged at INFO and gated ONLY on the experiment flag, deliberately: on a node this is the whole
+        // point of enabling the experiment, and requiring package-level DEBUG as well would drag in every
+        // other trace statement in these packages. Volume is bounded by the number of field data build
+        // derivations - single digits per (field, segment) - not by read volume, because a derived input
+        // inherits the decision and never re-evaluates the hook.
+        //
+        // The matched frame is included as EVIDENCE. Without it the line asserts "this was a field data
+        // build" and offers no way to check the claim; with it, a wrong match is visible in the log rather
+        // than having to be reproduced under a debugger.
+        LOGGER
+            .info(
+                "fdc-skipcache ENABLED reason=FIELD_DATA_STACK marker={} desc={} off={} len={} ext={} file={} thread={}",
+                marker,
+                sliceDescription,
+                absoluteOffset,
+                length,
+                fdcExt,
+                path.getFileName(),
+                Thread.currentThread().getName()
+            );
+        return true;
     }
 
     /**
@@ -1109,14 +1136,14 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * <p>Short-circuits on the first match and stops after {@link #FIELD_DATA_STACK_MAX_FRAMES} frames, so
      * the common case (ordinary search, no match) walks a bounded prefix rather than the whole stack.
      */
-    private static boolean isFieldDataBuildOnStack() {
-        return StackWalker.getInstance().walk(frames -> frames.limit(FIELD_DATA_STACK_MAX_FRAMES).anyMatch(f -> {
+    private static String fieldDataBuildFrameOnStack() {
+        return StackWalker.getInstance().walk(frames -> frames.limit(FIELD_DATA_STACK_MAX_FRAMES).filter(f -> {
             if ("loadDirect".equals(f.getMethodName()) == false) {
                 return false;
             }
             String cls = f.getClassName();
             return cls.startsWith("org.opensearch.index.fielddata") || cls.startsWith("org.opensearch.indices.fielddata");
-        }));
+        }).findFirst().map(f -> f.getClassName() + '.' + f.getMethodName() + ':' + f.getLineNumber()).orElse(null));
     }
 
     /**
@@ -1149,16 +1176,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             // Counted so an experiment can show WHICH derivations the hook caught, not just that it was on.
             FdcDebug.count("input.skipCache.hookWidened");
             FdcDebug.count("input.skipCache.hookWidened." + fdcExt);
-            FdcDebug
-                .log(
-                    LOGGER,
-                    "fdc-debug skipCache.hookWidened desc={} off={} len={} path={} thread={}",
-                    sliceDescription,
-                    sliceAbsoluteBaseOffset,
-                    length,
-                    path,
-                    FdcDebug.thread()
-                );
+            // No log line here: enableSkipCache() already emitted "fdc-skipcache ENABLED" with the matched
+            // frame for this same event, and two records per decision only doubles the noise.
         }
 
         CachedMemorySegmentIndexInput slice = new CachedMemorySegmentIndexInput(

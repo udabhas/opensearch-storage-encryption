@@ -107,6 +107,14 @@ public final class FdcDebug {
      * {@link #on} themselves - the string is allocated before this method is entered, so an early return
      * here cannot save it.
      */
+    /**
+     * Turns counting on without turning tracing on. For an experiment that emits its own log lines and
+     * wants the totals too, but does not want the whole {@code fdc-debug} stream.
+     */
+    public static void enableCounting() {
+        counting = true;
+    }
+
     public static void count(String site) {
         if (counting == false) {
             return;
