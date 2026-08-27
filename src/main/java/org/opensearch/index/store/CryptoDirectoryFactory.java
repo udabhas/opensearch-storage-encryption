@@ -663,6 +663,19 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
     }
 
     /**
+     * Get the shared segment pool instance.
+     *
+     * <p>Companion to {@link #poolStateSnapshot()}, which renders the same state as a string. A string is
+     * fine for a log line but useless for a delta, so anything that needs to subtract two samples
+     * ({@code buffersInUse}, {@code allocatedBytes}, {@code stallCount}) has to reach the pool itself.
+     *
+     * @return the shared segment pool, or null if not initialized
+     */
+    public static org.opensearch.index.store.pool.Pool<RefCountedByteBuffer> getSharedSegmentPool() {
+        return poolResources != null ? poolResources.getSegmentPool() : null;
+    }
+
+    /**
      * One-line snapshot of node-global buffer-pool state: L2 cache, segment pool, and L1 radix tables.
      *
      * <p>Intended to be sampled at PHASE BOUNDARIES so a phase's effect on the pool can be attributed to

@@ -58,6 +58,14 @@ ext.applyFdcDebugProps = { task ->
             task.systemProperty propName, v
         }
     }
+    // Snapshot-probe knobs (SnapshotBufferpoolFlowIntegTests). Same name on both sides, so they are
+    // forwarded verbatim rather than mapped: -Dsnap.docs=200000 -Dsnap.pollMs=10 -Dsnap.timeoutMs=900000
+    ['snap.docs', 'snap.pollMs', 'snap.timeoutMs'].each { propName ->
+        String v = System.getProperty(propName)
+        if (v != null) {
+            task.systemProperty propName, v
+        }
+    }
 }
 
 // ---- fdc-debug: per-test log capture ----
