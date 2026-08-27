@@ -120,6 +120,26 @@ public interface BlockLoader<T> {
     }
 
     /**
+     * Load blocks, optionally backing each with a NON-POOLED buffer ({@code heapOnly}): no pool
+     * acquire, so no buffersInUse accounting, no allocation limit, no throttle, no stall loop. For
+     * readers that read a block once and discard it. This is an intentional bypass, NOT the degraded
+     * read that uses the same buffer shape when the pool is exhausted — keep the two counted apart.
+     *
+     * <p>Default ignores {@code heapOnly}, so implementations without a non-pooled mode are unchanged.
+     *
+     * @param filePath file to read from
+     * @param startOffset starting file offset (should be block-aligned)
+     * @param blockCount number of blocks to read
+     * @param poolTimeoutMs pool acquire timeout (unused when {@code heapOnly} is honoured)
+     * @param heapOnly when true, back every block with a non-pooled buffer
+     * @return array of loaded blocks (length equals blockCount)
+     * @throws Exception if loading fails
+     */
+    default T[] load(Path filePath, long startOffset, long blockCount, long poolTimeoutMs, boolean heapOnly) throws Exception {
+        return load(filePath, startOffset, blockCount, poolTimeoutMs);
+    }
+
+    /**
      * Loads a single block using the provided cache key.
      *
      * @param key the cache key identifying the block to load
@@ -128,6 +148,24 @@ public interface BlockLoader<T> {
      */
     default T load(BlockCacheKey key) throws Exception {
         T[] result = load(key.filePath(), key.offset(), 1);  // Load 1 block
+        if (result.length == 0 || result[0] == null) {
+            throw new IOException("Failed to load block for key: " + key);
+        }
+        return result[0];
+    }
+
+    /**
+     * Loads a single block into a NON-POOLED buffer. See {@link #load(Path, long, long, long, boolean)}.
+     *
+     * <p>Keeps {@link #load(BlockCacheKey)}'s 5s timeout so an implementation that ignores
+     * {@code heapOnly} behaves exactly as today rather than failing fast.
+     *
+     * @param key the cache key identifying the block to load
+     * @return the loaded block, backed by a non-pooled buffer
+     * @throws Exception if loading fails
+     */
+    default T loadTransient(BlockCacheKey key) throws Exception {
+        T[] result = load(key.filePath(), key.offset(), 1, 5000, true);
         if (result.length == 0 || result[0] == null) {
             throw new IOException("Failed to load block for key: " + key);
         }

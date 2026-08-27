@@ -287,7 +287,7 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
      * <p>Note what could NOT be instrumented to answer this: a log line inside
      * {@code CryptoDirectIOBlockLoader.load} cannot distinguish a populating read from a bypassing one.
      * The loader is called from five sites in {@code CaffeineBlockCache} - four publish, {@code
-     * loadUncached} does not - and its signature carries nothing identifying the caller. The decision
+     * loadTransient} does not - and its signature carries nothing identifying the caller. The decision
      * lives with the caller, so it is counted there.
      */
     public void testColdFieldDataBuildPopulatesBlockCache() throws Exception {
@@ -324,7 +324,7 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
         long l1Hits = FdcDebug.counterOf("block.acquire.L1_HIT");
         long l2Hits = FdcDebug.counterOf("block.acquire.L2_HIT");
         long misses = FdcDebug.counterOf("block.acquire.MISS_LOADS_AND_POPULATES");
-        long bypassing = FdcDebug.counterOf("cache.loadUncached.NO_POPULATE");
+        long bypassing = FdcDebug.counterOf("cache.loadTransient.NO_POPULATE");
 
         // THE ANSWER, and it is about MEDIATION rather than population. Every block the build touches is
         // acquired THROUGH the pool - L1, else L2, else a disk load that publishes into both. Field data

@@ -399,8 +399,10 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
     private BlockCacheValue<RefCountedByteBuffer> acquireBlock(long blockOffset) throws IOException {
         // Cache-bypass reader: read+decrypt this block from disk and hand it straight back. No L1
         // lookup, no L2 lookup, no publish to either — so this read can neither be served by nor
-        // evict anything search has cached. The value is reclaimed by GC once the reader drops it
-        // (see BlockCache#loadUncached).
+        // evict anything search has cached. The block is also NOT pooled, so it costs the segment pool
+        // nothing and cannot stall this thread on the pool's throttle/allocation limit — which matters
+        // because the bulk readers this serves (e.g. field data builds) run on the search thread.
+        // Reclaimed by GC once the reader drops it (see BlockCache#loadTransient).
         if (skipCache) {
             if (FdcDebug.on(LOGGER)) {
                 FdcDebug.count("input.acquireBlock.BYPASS");
@@ -416,7 +418,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
                         callsite
                     );
             }
-            final BlockCacheValue<RefCountedByteBuffer> uncached = blockCache.loadUncached(new FileBlockCacheKey(path, blockOffset));
+            final BlockCacheValue<RefCountedByteBuffer> uncached = blockCache.loadTransient(new FileBlockCacheKey(path, blockOffset));
             if (uncached == null) {
                 throw new IOException("Unable to acquire uncached block for offset " + blockOffset);
             }

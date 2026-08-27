@@ -95,15 +95,30 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
 
     @Override
     public RefCountedByteBuffer[] load(Path filePath, long startOffset, long blockCount, long poolTimeoutMs) throws Exception {
+        return load(filePath, startOffset, blockCount, poolTimeoutMs, false);
+    }
+
+    /**
+     * Non-pooled block buffer: heap, not pool-accounted, never cacheable. Used both by the degraded
+     * read (pool exhausted) and by the intentional {@code heapOnly} bypass.
+     */
+    private static RefCountedByteBuffer newTransientHeapBlock() {
+        return RefCountedByteBuffer
+            .transientFallback(ByteBuffer.allocate(CACHE_BLOCK_SIZE).order(java.nio.ByteOrder.LITTLE_ENDIAN), CACHE_BLOCK_SIZE);
+    }
+
+    @Override
+    public RefCountedByteBuffer[] load(Path filePath, long startOffset, long blockCount, long poolTimeoutMs, boolean heapOnly)
+        throws Exception {
         // fdc-debug: the ONLY line that proves real block IO happened. Emitted per load, so it is the
         // volume driver of a trace run - on the order of 18k lines per GiB of blocks read. The caller
         // chain is walked only under -Dopensearch.store.fdcdebug.hotstacks=true.
         //
         // This line CANNOT tell you whether the block was published to the cache. The loader is invoked
         // from five distinct call sites in CaffeineBlockCache - getOrLoad, prefetch, loadForPrefetch and
-        // the prefetch batch all publish; loadUncached deliberately does not - and the loader has no
+        // the prefetch batch all publish; loadTransient deliberately does not - and the loader has no
         // parameter carrying which one called it. The populate decision belongs to the caller, so it is
-        // counted at the caller: see the cache.*.POPULATES / cache.loadUncached.NO_POPULATE counters.
+        // counted at the caller: see the cache.*.POPULATES / cache.loadTransient.NO_POPULATE counters.
         if (FdcDebug.on(LOGGER)) {
             FdcDebug.count("loader.load");
             int callsite = FdcDebug.hotSite(LOGGER, "loader.load", filePath);
@@ -235,6 +250,22 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                         // the GC heap and cannot raise the direct-memory OOM. (This differs from the write path,
                         // which on pool-acquire failure allocates nothing and simply skips the cache-warm.)
                         RefCountedByteBuffer handle;
+                        if (heapOnly) {
+                            // Intentional bypass: never touch the pool. Counted under its OWN key and with no
+                            // degraded-read metric or WARN — routing this through the degraded path below would
+                            // make every healthy bulk read look like a node shedding cache under memory pressure
+                            // and destroy that incident signal.
+                            FdcDebug.count("loader.loadTransient.HEAP_BLOCK");
+                            handle = newTransientHeapBlock();
+                            if (toCopy > 0) {
+                                MemorySegment.copy(readBytes, bytesCopied, handle.segment(), 0, toCopy);
+                            }
+                            result[blockIndex++] = handle;
+                            if (prof != null)
+                                prof.incBlocksDecrypted();
+                            bytesCopied += toCopy;
+                            continue;
+                        }
                         final org.opensearch.index.store.profile.CryptoNanosMetric poolWaitTimer = (prof != null)
                             ? prof.poolWaitTimer()
                             : null;
@@ -288,11 +319,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedByteBuff
                                         e.toString()
                                     );
                             }
-                            handle = RefCountedByteBuffer
-                                .transientFallback(
-                                    java.nio.ByteBuffer.allocate(CACHE_BLOCK_SIZE).order(java.nio.ByteOrder.LITTLE_ENDIAN),
-                                    CACHE_BLOCK_SIZE
-                                );
+                            handle = newTransientHeapBlock();
                         }
 
                         if (toCopy > 0) {

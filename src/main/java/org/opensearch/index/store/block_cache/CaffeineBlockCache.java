@@ -259,10 +259,10 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     }
 
     @Override
-    public BlockCacheValue<T> loadUncached(BlockCacheKey key) throws IOException {
+    public BlockCacheValue<T> loadTransient(BlockCacheKey key) throws IOException {
         try {
-            FdcDebug.count("cache.loadUncached.NO_POPULATE");
-            V segment = blockLoader.load(key);
+            FdcDebug.count("cache.loadTransient.NO_POPULATE");
+            V segment = blockLoader.loadTransient(key);
             // Direct cast - BlockLoader contract guarantees V is BlockCacheValue<T>
             @SuppressWarnings("unchecked")
             BlockCacheValue<T> result = (BlockCacheValue<T>) segment;

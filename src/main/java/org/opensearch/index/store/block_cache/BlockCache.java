@@ -70,17 +70,21 @@ public interface BlockCache<T> {
      * {@code skipCache}): one-shot bulk readers whose blocks are never re-read, so caching them
      * would only evict blocks that search still needs.
      *
-     * <p>The returned value is never inserted into L1 or L2, so nothing will ever evict it and
-     * no removal listener will fire for it. Reclamation is by GC: {@code RefCountedByteBuffer} is
-     * a GC-managed wrapper whose lifecycle methods are no-ops, and the pool's Cleaner returns the
-     * backing buffer once the caller drops its reference. Callers must therefore hold at most a
-     * bounded number of these values live at once (the read path holds exactly one block).
+     * <p>The block is backed by a NON-POOLED buffer, so this read costs the segment pool nothing: no
+     * buffersInUse accounting, no allocation limit, no throttle, no stall loop. That matters because a
+     * pooled buffer here could not be freed by cache eviction either — the pool has no freelist and
+     * reclaims via {@code Cleaner} — so it would consume budget search's cached blocks need while being
+     * invisible to the eviction that relieves pressure.
+     *
+     * <p>The returned value is never inserted into L1 or L2, so nothing will ever evict it and no
+     * removal listener will fire for it. It is reclaimed by GC once the caller drops it. Callers must
+     * therefore hold at most a bounded number live at once (the read path holds exactly one block).
      *
      * @param key the cache key identifying the block to load
      * @return a freshly loaded block value, not present in any cache
      * @throws IOException if the block cannot be loaded
      */
-    BlockCacheValue<T> loadUncached(BlockCacheKey key) throws IOException;
+    BlockCacheValue<T> loadTransient(BlockCacheKey key) throws IOException;
 
     /**
      * Asynchronously load the block into the cache if not present.
