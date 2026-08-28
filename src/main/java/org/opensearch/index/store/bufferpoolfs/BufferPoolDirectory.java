@@ -168,7 +168,7 @@ public class BufferPoolDirectory extends FSDirectory {
             // DEFAULT path: full block cache for search reads (and recovery source on started shards),
             // EXCEPT the one-shot bulk readers identified by enableSkipBufferpool().
             final boolean skipBufferpool = enableSkipBufferpool(name, context);
-            traceRoute(trace, "POOL(L1+L2+readahead) skipCache=" + skipBufferpool, name, context, callsite);
+            traceRoute(trace, "POOL(L1+L2+readahead) skipBufferpool=" + skipBufferpool, name, context, callsite);
             long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
 
             ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker, blockCache);
@@ -270,10 +270,15 @@ public class BufferPoolDirectory extends FSDirectory {
     /**
      * Decides whether a NEWLY OPENED input should bypass the bufferpool and the block cache.
      *
-     * <p>Companion to {@code CachedMemorySegmentIndexInput.enableSkipBufferpool(boolean)}, which answers a
-     * different question: that one decides whether a <em>derived</em> input (clone/slice) inherits its
-     * parent's decision. This one makes the <em>initial</em> decision, where there is no parent and the only
-     * evidence is who is opening the file and why.
+     * <p>Named for the question it answers: should a NEWLY OPENED input skip the bufferpool? Its counterpart
+     * on the derive side is {@link CachedMemorySegmentIndexInput#enableSkipBufferpool(String, long, long)}, which
+     * answers a different question - whether a <em>derived</em> input (clone/slice) should skip - and which
+     * inherits the parent's decision by default. Keeping the two names distinct matters: they take different
+     * inputs and are wrong in different ways, so a reader must never have to check the receiver type to know
+     * which decision they are looking at.
+     *
+     * <p>This one makes the <em>initial</em> decision, where there is no parent and the only evidence is who
+     * is opening the file and why.
      *
      * <p>Single seam for every one-shot bulk read flow: readers that stream data once and never re-read it,
      * so pooling their blocks costs pool capacity and evicts blocks search still needs for zero hit-rate

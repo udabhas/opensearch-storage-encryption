@@ -520,7 +520,7 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
      * <ul>
      * <li>{@code crypto_l1_hits} / {@code crypto_l1_lookup_time} - present when cached, ZERO under bypass.
      *     Not a gap in the profiler: {@code acquireBlock} returns before it obtains the profile handle when
-     *     {@code skipCache} is set, because a bypassing read performs no L1 or L2 lookup at all. Zero is the
+     *     {@code skipBufferpool} is set, because a bypassing read performs no L1 or L2 lookup at all. Zero is the
      *     truthful value.</li>
      * <li>{@code crypto_blocks_decrypted} / {@code crypto_bytes_read} - recorded in the block LOADER, which
      *     is on both paths, so these are the metrics that stay comparable across the A/B. Expect them to

@@ -114,7 +114,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * ({@code currentBlock}/{@code currentSegment}), so a per-instance decision cannot let one input's
      * buffer be recycled underneath another input reading on the same thread.
      */
-    private final boolean skipCache;
+    private final boolean skipBufferpool;
     /**
      * fdc-debug: file extension, computed once per input so the per-block tier counters can be broken
      * down by file type without doing string work on the hot path. Answers "which Lucene structures does
@@ -160,7 +160,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @param readaheadContext context for read-ahead policy decisions
      * @param radixBlockTable L1 cache for recently accessed blocks
      * @param radixBlockTableRegistry registry for lifecycle management (release on close)
-     * @param skipCache when true, bypass L1/L2 entirely and read+decrypt every block from disk
+     * @param skipBufferpool when true, bypass L1/L2 entirely and read+decrypt every block from disk
      * @return a new CachedMemorySegmentIndexInput instance
      */
     public static CachedMemorySegmentIndexInput newInstance(
@@ -172,7 +172,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         ReadaheadContext readaheadContext,
         RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>> radixBlockTable,
         RadixBlockTableRegistry radixBlockTableRegistry,
-        boolean skipCache
+        boolean skipBufferpool
     ) {
         CachedMemorySegmentIndexInput input = new CachedMemorySegmentIndexInput(
             resourceDescription,
@@ -185,7 +185,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             false,
             radixBlockTable,
             radixBlockTableRegistry,
-            skipCache
+            skipBufferpool
         );
         try {
             input.seek(0L);
@@ -206,7 +206,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         boolean isSlice,
         RadixBlockTable<BlockCacheValue<RefCountedByteBuffer>> radixBlockTable,
         RadixBlockTableRegistry radixBlockTableRegistry,
-        boolean skipCache
+        boolean skipBufferpool
     ) {
         super(resourceDescription);
         // Slices inherit their parent's already-normalized path. Non-slice (master)
@@ -224,18 +224,18 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         this.isSlice = isSlice;
         this.radixBlockTable = radixBlockTable;
         this.radixBlockTableRegistry = radixBlockTableRegistry;
-        this.skipCache = skipCache;
+        this.skipBufferpool = skipBufferpool;
         this.fdcExt = fdcExtensionOf(path);
-        // fdc-debug: the skipCache decision itself, at the moment it is fixed for this instance.
+        // fdc-debug: the skipBufferpool decision itself, at the moment it is fixed for this instance.
         // isSlice distinguishes the master input (openInput) from every clone()/slice() derived from it.
         if (FdcDebug.on(LOGGER)) {
             FdcDebug.count(isSlice ? "input.create.slice" : "input.create.master");
             FdcDebug
                 .log(
                     LOGGER,
-                    "fdc-debug input.create isSlice={} skipCache={} id={} path={} base={} len={} thread={}",
+                    "fdc-debug input.create isSlice={} skipBufferpool={} id={} path={} base={} len={} thread={}",
                     isSlice,
-                    skipCache,
+                    skipBufferpool,
                     System.identityHashCode(this),
                     path,
                     absoluteBaseOffset,
@@ -339,7 +339,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // and slice of this file (see buildSlice), so feeding it bypass accesses would both prefetch
         // blocks into a cache this reader never consults and skew the sequential-access signal that
         // drives prefetch for the search readers on the same file.
-        if (readaheadContext != null && !skipCache) {
+        if (readaheadContext != null && !skipBufferpool) {
             readaheadContext.onAccess(blockOffset, lastAccessWasCacheHit);
         }
 
@@ -377,12 +377,12 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         FdcDebug
             .log(
                 LOGGER,
-                "fdc-debug block.acquire tier={} blockOffset={} id={} ext={} skipCache={} path={} thread={} callsite={}",
+                "fdc-debug block.acquire tier={} blockOffset={} id={} ext={} skipBufferpool={} path={} thread={} callsite={}",
                 tier,
                 blockOffset,
                 System.identityHashCode(this),
                 fdcExt,
-                skipCache,
+                skipBufferpool,
                 path,
                 FdcDebug.thread(),
                 callsite
@@ -403,7 +403,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // nothing and cannot stall this thread on the pool's throttle/allocation limit — which matters
         // because the bulk readers this serves (e.g. field data builds) run on the search thread.
         // Reclaimed by GC once the reader drops it (see BlockCache#loadTransient).
-        if (skipCache) {
+        if (skipBufferpool) {
             if (FdcDebug.on(LOGGER)) {
                 FdcDebug.count("input.acquireBlock.BYPASS");
                 int callsite = FdcDebug.hotSite(LOGGER, "input.acquireBlock.BYPASS", path);
@@ -983,10 +983,10 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             FdcDebug
                 .log(
                     LOGGER,
-                    "fdc-debug input.clone from={} fromIsSlice={} skipCache={} path={} thread={} callsite={}{}",
+                    "fdc-debug input.clone from={} fromIsSlice={} skipBufferpool={} path={} thread={} callsite={}{}",
                     System.identityHashCode(this),
                     isSlice,
-                    skipCache,
+                    skipBufferpool,
                     path,
                     FdcDebug.thread(),
                     callsite,
@@ -1030,10 +1030,10 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             FdcDebug
                 .log(
                     LOGGER,
-                    "fdc-debug input.slice from={} fromIsSlice={} skipCache={} off={} len={} desc={} path={} thread={} callsite={}{}",
+                    "fdc-debug input.slice from={} fromIsSlice={} skipBufferpool={} off={} len={} desc={} path={} thread={} callsite={}{}",
                     System.identityHashCode(this),
                     isSlice,
-                    skipCache,
+                    skipBufferpool,
                     offset,
                     length,
                     sliceDescription,
@@ -1051,8 +1051,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
     }
 
     /** Whether this input bypasses L1/L2. Visible for testing the inheritance contract in {@link #buildSlice}. */
-    boolean isSkipCache() {
-        return skipCache;
+    boolean isSkipBufferpool() {
+        return skipBufferpool;
     }
 
     /**
@@ -1081,7 +1081,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @param length           length of the derived region
      * @return {@code true} to bypass L1/L2 for this input; {@code false} to inherit the parent's decision
      */
-    boolean enableSkipCache(String sliceDescription, long absoluteOffset, long length) {
+    boolean enableSkipBufferpool(String sliceDescription, long absoluteOffset, long length) {
         if (StaticConfigs.fieldDataStackDetectEnabled() == false) {
             return false;
         }
@@ -1103,7 +1103,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // than having to be reproduced under a debugger.
         LOGGER
             .info(
-                "fdc-skipcache ENABLED reason=FIELD_DATA_STACK marker={} desc={} off={} len={} ext={} file={} thread={}",
+                "fdc-skipbufferpool ENABLED reason=FIELD_DATA_STACK marker={} desc={} off={} len={} ext={} file={} thread={}",
                 marker,
                 sliceDescription,
                 absoluteOffset,
@@ -1172,13 +1172,13 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // disables the bypass for every derived input: measured 44 masters against 21,648 derived inputs in
         // one merge test, so a non-inheriting version would apply the bypass to 0.2% of reads while
         // appearing to be enabled.
-        final boolean hookWidened = skipCache == false && enableSkipCache(sliceDescription, sliceAbsoluteBaseOffset, length);
-        final boolean shouldSkipCache = skipCache || hookWidened;
+        final boolean hookWidened = skipBufferpool == false && enableSkipBufferpool(sliceDescription, sliceAbsoluteBaseOffset, length);
+        final boolean shouldSkipBufferpool = skipBufferpool || hookWidened;
         if (hookWidened) {
             // Counted so an experiment can show WHICH derivations the hook caught, not just that it was on.
-            FdcDebug.count("input.skipCache.hookWidened");
-            FdcDebug.count("input.skipCache.hookWidened." + fdcExt);
-            // No log line here: enableSkipCache() already emitted "fdc-skipcache ENABLED" with the matched
+            FdcDebug.count("input.skipBufferpool.hookWidened");
+            FdcDebug.count("input.skipBufferpool.hookWidened." + fdcExt);
+            // No log line here: enableSkipBufferpool() already emitted "fdc-skipbufferpool ENABLED" with the matched
             // frame for this same event, and two records per decision only doubles the noise.
         }
 
@@ -1193,7 +1193,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             true,
             radixBlockTable,
             radixBlockTableRegistry, // slices share the table and registry for metrics, but don't call release()
-            shouldSkipCache // inherited from the parent, possibly widened by enableSkipCache()
+            shouldSkipBufferpool // inherited from the parent, possibly widened by enableSkipBufferpool()
         );
 
         try {

@@ -1654,7 +1654,7 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
      * against 21,648 derived inputs, so that mistake would apply the bypass to 0.2% of reads while appearing
      * enabled, and would read as "the bypass does not help" in an A/B.
      */
-    public void testSkipCacheIsInheritedByClonesAndSlices() throws IOException {
+    public void testSkipBufferpoolIsInheritedByClonesAndSlices() throws IOException {
         long fileLength = BLOCK_SIZE * 4;
         CachedMemorySegmentIndexInput bypassing = CachedMemorySegmentIndexInput
             .newInstance(
@@ -1669,10 +1669,10 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
                 true
             );
 
-        assertTrue("clone must inherit the bypass", bypassing.clone().isSkipCache());
-        assertTrue("slice must inherit the bypass", bypassing.slice("s", 0, BLOCK_SIZE).isSkipCache());
+        assertTrue("clone must inherit the bypass", bypassing.clone().isSkipBufferpool());
+        assertTrue("slice must inherit the bypass", bypassing.slice("s", 0, BLOCK_SIZE).isSkipBufferpool());
         // Second generation: a slice of a clone must still bypass.
-        assertTrue("descendants must inherit the bypass", bypassing.clone().slice("s2", 0, BLOCK_SIZE).clone().isSkipCache());
+        assertTrue("descendants must inherit the bypass", bypassing.clone().slice("s2", 0, BLOCK_SIZE).clone().isSkipBufferpool());
 
         bypassing.close();
     }
@@ -1685,9 +1685,9 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
         long fileLength = BLOCK_SIZE * 4;
         CachedMemorySegmentIndexInput cached = createInput(fileLength);
 
-        assertFalse("clone of a cached input must stay cached", cached.clone().isSkipCache());
-        assertFalse("slice of a cached input must stay cached", cached.slice("s", 0, BLOCK_SIZE).isSkipCache());
-        assertFalse("the default hook must not enable the bypass", cached.enableSkipCache("s", 0L, BLOCK_SIZE));
+        assertFalse("clone of a cached input must stay cached", cached.clone().isSkipBufferpool());
+        assertFalse("slice of a cached input must stay cached", cached.slice("s", 0, BLOCK_SIZE).isSkipBufferpool());
+        assertFalse("the default hook must not enable the bypass", cached.enableSkipBufferpool("s", 0L, BLOCK_SIZE));
 
         cached.close();
     }

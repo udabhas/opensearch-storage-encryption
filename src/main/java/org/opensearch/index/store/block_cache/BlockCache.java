@@ -67,7 +67,7 @@ public interface BlockCache<T> {
      * Loads the block via {@code BlockLoader} WITHOUT consulting or populating the cache.
      *
      * <p>Used by readers opened with cache-bypass (see {@code CachedMemorySegmentIndexInput}'s
-     * {@code skipCache}): one-shot bulk readers whose blocks are never re-read, so caching them
+     * {@code skipBufferpool}): one-shot bulk readers whose blocks are never re-read, so caching them
      * would only evict blocks that search still needs.
      *
      * <p>The block is backed by a NON-POOLED buffer, so this read costs the segment pool nothing: no

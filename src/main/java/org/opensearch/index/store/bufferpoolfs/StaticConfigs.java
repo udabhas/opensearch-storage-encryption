@@ -160,7 +160,7 @@ public class StaticConfigs {
 
     /**
      * Feature flag for the block-cache bypass path on {@code CachedMemorySegmentIndexInput}: when
-     * enabled, inputs are opened with {@code skipCache}, so every block is read from disk via
+     * enabled, inputs are opened with {@code skipBufferpool}, so every block is read from disk via
      * DirectIO and decrypted without consulting or populating L1/L2.
      *
      * <p>Defaults to {@code false} — the cached path is the safe default and matches prior behavior.
