@@ -165,8 +165,10 @@ public class BufferPoolDirectory extends FSDirectory {
                 return openNIOInput(file, context, true);
             }
 
-            // DEFAULT path: full block cache for search reads (and recovery source on started shards)
-            traceRoute(trace, "POOL(L1+L2+readahead) skipCache=" + StaticConfigs.blockCacheBypassEnabled(), name, context, callsite);
+            // DEFAULT path: full block cache for search reads (and recovery source on started shards),
+            // EXCEPT the one-shot bulk readers identified by enableSkipBufferpool().
+            final boolean skipBufferpool = enableSkipBufferpool(name, context);
+            traceRoute(trace, "POOL(L1+L2+readahead) skipCache=" + skipBufferpool, name, context, callsite);
             long contentLength = calculateContentLengthWithValidation(file, rawFileSize);
 
             ReadaheadManager readAheadManager = new ReadaheadManagerImpl(readAheadworker, blockCache);
@@ -183,7 +185,7 @@ public class BufferPoolDirectory extends FSDirectory {
                     readAheadContext,
                     radixBlockTable,
                     radixBlockTableRegistry,
-                    StaticConfigs.blockCacheBypassEnabled()
+                    skipBufferpool
                 );
         } catch (Exception e) {
             CryptoMetricsService.getInstance().recordError(ErrorType.INDEX_INPUT_ERROR);
@@ -260,6 +262,69 @@ public class BufferPoolDirectory extends FSDirectory {
     /** Check if this context represents a READONCE (sequential one-pass) read. */
     private static boolean isReadOnce(IOContext context) {
         return context == IOContext.READONCE;
+    }
+
+    /** Thread pool whose DEFAULT-context reads are one-shot snapshot uploads. */
+    private static final String SNAPSHOT_POOL = "snapshot";
+
+    /**
+     * Decides whether a NEWLY OPENED input should bypass the bufferpool and the block cache.
+     *
+     * <p>Companion to {@code CachedMemorySegmentIndexInput.enableSkipBufferpool(boolean)}, which answers a
+     * different question: that one decides whether a <em>derived</em> input (clone/slice) inherits its
+     * parent's decision. This one makes the <em>initial</em> decision, where there is no parent and the only
+     * evidence is who is opening the file and why.
+     *
+     * <p>Single seam for every one-shot bulk read flow: readers that stream data once and never re-read it,
+     * so pooling their blocks costs pool capacity and evicts blocks search still needs for zero hit-rate
+     * benefit. Add flows here rather than scattering conditions through {@link #openInput}.
+     *
+     * <p><b>Returning true is not free.</b> Every block is read from disk and decrypted afresh, and
+     * {@code buildSlice} propagates the flag to every clone. A flow wrongly classified as one-shot loses its
+     * cache for the lifetime of the input - which for a segment-core input is the lifetime of the segment.
+     * Only add a flow once its read shape has been measured.
+     *
+     * @param name    file being opened, for extension-based decisions
+     * @param context the IOContext, for flows distinguishable by context or hints
+     * @return true to bypass pool + L1 + L2 for this input
+     */
+    boolean enableSkipBufferpool(String name, IOContext context) {
+        // Global A/B switch, retained so a whole run can be compared with and without the bypass.
+        if (StaticConfigs.blockCacheBypassEnabled()) {
+            return true;
+        }
+
+        // Snapshot upload. Opens as DEFAULT with an empty hint set, so it is indistinguishable from a search
+        // open by IOContext alone; the thread pool is the only available signal. Measured: one openInput per
+        // file, zero clones, one sequential pass, never re-read.
+        if (onThreadPool(SNAPSHOT_POOL)) {
+            return true;
+        }
+
+        // TODO remote store upload reads - probe first; pool not yet identified.
+        // TODO peer recovery source reads - runs on [generic], which also serves unrelated work, so a pool
+        // check alone is NOT sufficient here.
+        // TODO merge reads - currently routed to NIO-MERGE above and never reach this method.
+
+        return false;
+    }
+
+    /**
+     * True when the calling thread belongs to the named OpenSearch thread pool.
+     *
+     * <p>Matches {@code "[<pool>][T#"} rather than the bare pool name, and that precision is the whole reason
+     * this helper exists. Shard-scoped thread names embed the INDEX NAME -
+     * {@code opensearch[node][[my-index][0]: Lucene Merge Thread #0]} - so matching {@code "snapshot"} would
+     * fire on any index whose name contains "snapshot" and flag that index's merge-built SegmentCoreReaders
+     * inputs, which are segment-lifetime and propagate the flag to every clone. {@code [T#} is appended by the
+     * thread factory only after a POOL name, so this also excludes the {@code snapshot_deletion} /
+     * {@code snapshot_shards} / {@code snapshot_segments} siblings.
+     *
+     * <p>Fails open: if a pool is renamed upstream this returns false and behaviour reverts to pooled reads -
+     * a lost optimisation, not a correctness bug.
+     */
+    private static boolean onThreadPool(String pool) {
+        return Thread.currentThread().getName().contains("[" + pool + "][T#");
     }
 
     @Override
