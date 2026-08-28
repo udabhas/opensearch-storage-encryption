@@ -14,6 +14,8 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -1085,15 +1087,7 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         if (StaticConfigs.fieldDataStackDetectEnabled() == false) {
             return false;
         }
-        // Cheap tier before the expensive one. A field data build can only be on a search or warmer thread,
-        // so every other kind is answered by a ThreadLocal read instead of a stack walk. This is what keeps
-        // the hook affordable when it is not behind an experiment flag: merge, force-merge, refresh, flush,
-        // generic and write derivations never reach the walker at all, and a merge test measured 21,648
-        // derived inputs. Note buildSlice already short-circuits on the inherited flag, so the overwhelming
-        // majority of derivations do not even reach this method.
-        // Skip the walk only where a field data build is PROVABLY impossible - a denylist, not an allowlist of
-        // eligible pools. See ThreadKinds#provablyNotFieldDataBuild: an allowlist is a guess at what is
-        // possible and fails SILENTLY on any caller nobody enumerated.
+        // Skip the walk where a build is provably impossible; see ThreadKinds#provablyNotFieldDataBuild.
         if (ThreadKinds.provablyNotFieldDataBuild(ThreadKinds.current())) {
             return false;
         }
@@ -1151,18 +1145,16 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * the common case (ordinary search, no match) walks a bounded prefix rather than the whole stack.
      */
     private static String fieldDataBuildFrameOnStack() {
+        // Iterator, not filter().findFirst(): the Stream form allocates a limit stage, a filter stage and a
+        // sink chain on every call, and the miss path is the common one.
         return WALKER.walk(frames -> {
-            // Iterator rather than filter().findFirst().map(): the Stream form allocates a filter stage, a
-            // limit stage and TWO Optionals on every call, and the miss path - ordinary search discovering
-            // it is not a field data build - is the common case. The loop allocates nothing and builds the
-            // marker String only on a match.
-            final java.util.Iterator<StackWalker.StackFrame> it = frames.iterator();
+            Iterator<StackWalker.StackFrame> it = frames.iterator();
             for (int i = 0; i < FIELD_DATA_STACK_MAX_FRAMES && it.hasNext(); i++) {
-                final StackWalker.StackFrame f = it.next();
+                StackWalker.StackFrame f = it.next();
                 if ("loadDirect".equals(f.getMethodName()) == false) {
                     continue;
                 }
-                final String cls = f.getClassName();
+                String cls = f.getClassName();
                 if (cls.startsWith("org.opensearch.index.fielddata") || cls.startsWith("org.opensearch.indices.fielddata")) {
                     return cls + '.' + f.getMethodName() + ':' + f.getLineNumber();
                 }
@@ -1179,18 +1171,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      */
     private static final int FIELD_DATA_STACK_MAX_FRAMES = 24;
 
-    /**
-     * Hoisted deliberately. {@code StackWalker.getInstance()} and {@code getInstance(Set)} return the JDK's
-     * own cached {@code DEFAULT_WALKER} (StackWalker.java:324/348/378), so hoisting those would buy nothing -
-     * but {@code getInstance(Set, int)} ends in {@code new StackWalker(...)} (StackWalker.java:411) and
-     * allocates on EVERY call. The {@code estimateDepth} overload is worth using because it pre-sizes the
-     * frame buffer for the depth we actually walk; keeping it in a static field is what stops that costing
-     * an allocation per clone/slice.
-     *
-     * <p>Safe to share: "{@code StackWalker} is thread-safe. Multiple threads can share a single
-     * {@code StackWalker} object" (StackWalker.java:62).
-     */
-    private static final StackWalker WALKER = StackWalker.getInstance(java.util.Collections.emptySet(), FIELD_DATA_STACK_MAX_FRAMES);
+    /** Hoisted: getInstance(Set,int) allocates per call, unlike getInstance() which returns a cached walker. */
+    private static final StackWalker WALKER = StackWalker.getInstance(Collections.emptySet(), FIELD_DATA_STACK_MAX_FRAMES);
 
     /** Builds the actual sliced IndexInput. * */
     CachedMemorySegmentIndexInput buildSlice(String sliceDescription, long sliceOffset, long length) {
