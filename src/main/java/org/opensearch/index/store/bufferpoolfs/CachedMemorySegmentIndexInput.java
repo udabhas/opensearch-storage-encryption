@@ -1091,7 +1091,10 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         // generic and write derivations never reach the walker at all, and a merge test measured 21,648
         // derived inputs. Note buildSlice already short-circuits on the inherited flag, so the overwhelming
         // majority of derivations do not even reach this method.
-        if (ThreadKinds.canHostFieldDataBuild(ThreadKinds.current()) == false) {
+        // Skip the walk only where a field data build is PROVABLY impossible - a denylist, not an allowlist of
+        // eligible pools. See ThreadKinds#provablyNotFieldDataBuild: an allowlist is a guess at what is
+        // possible and fails SILENTLY on any caller nobody enumerated.
+        if (ThreadKinds.provablyNotFieldDataBuild(ThreadKinds.current())) {
             return false;
         }
         String marker = fieldDataBuildFrameOnStack();

@@ -86,15 +86,26 @@ final class ThreadKinds {
     }
 
     /**
-     * True on a thread where a field data build can occur, and therefore the only case where walking the
-     * stack to look for one can succeed.
+     * True only when this thread provably CANNOT be running a field data build, so the caller may skip the
+     * stack walk that would otherwise decide.
      *
-     * <p>{@code SEARCH} covers the on-demand build during aggregator construction. {@code WARMER} is included
-     * deliberately: {@code eager} / {@code eager_global_ordinals} field data is built by the index warmer on
-     * the {@code warmer} pool, so gating on {@code SEARCH} alone would produce silent false negatives — the
-     * build would not be detected and would quietly keep polluting the pool.
+     * <p><b>Deliberately a denylist, not an allowlist.</b> An earlier version asked the opposite question -
+     * "can this thread host a build?" - and answered it with {@code SEARCH || WARMER}. That is a guess at
+     * what is possible, and it is not enumerable: field data is loaded through
+     * {@code IndicesFieldDataCache} and any caller that touches a field can trigger it. A wrong guess fails
+     * SILENTLY - the build is not detected, the bypass does not apply, and nothing errors. It was caught only
+     * because {@code testFieldDataBuildDerivationBypassesEvenWhenParentDoesNot} derives on the JUnit thread,
+     * which the allowlist classified as ineligible.
+     *
+     * <p>So this asks the question that can actually be answered: is a field data build IMPOSSIBLE here?
+     * A snapshot upload streams files to a repository and never uninverts anything; a Lucene merge thread
+     * reads postings and doc values to merge them, never through {@code loadDirect}. Everything else -
+     * including any thread we have not thought of - still pays for the walk and is therefore still correct.
+     *
+     * <p>This keeps the win that mattered: a merge test measured 21,648 derived inputs, and none of them now
+     * walks the stack.
      */
-    static boolean canHostFieldDataBuild(ThreadKind kind) {
-        return kind == ThreadKind.SEARCH || kind == ThreadKind.WARMER;
+    static boolean provablyNotFieldDataBuild(ThreadKind kind) {
+        return kind == ThreadKind.SNAPSHOT || kind == ThreadKind.MERGE;
     }
 }

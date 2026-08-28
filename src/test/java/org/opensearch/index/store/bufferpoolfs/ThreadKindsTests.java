@@ -65,16 +65,20 @@ public class ThreadKindsTests extends OpenSearchTestCase {
     }
 
     /**
-     * Only search and warmer threads can host a field data build, so only they may reach the stack walk.
-     * WARMER is included because eager / eager_global_ordinals field data is built by the index warmer —
-     * omitting it would produce a silent false negative rather than a visible failure.
+     * The gate must skip the stack walk only where a field data build is PROVABLY impossible. An allowlist of
+     * eligible pools ({@code SEARCH || WARMER}) was tried first and was wrong: field data can be loaded by any
+     * caller that touches a field, so an allowlist fails silently on paths nobody enumerated. Anything not
+     * proven impossible - including OTHER, i.e. threads we have not classified - must still walk.
      */
-    public void testOnlySearchAndWarmerCanHostAFieldDataBuild() {
-        assertTrue(ThreadKinds.canHostFieldDataBuild(ThreadKind.SEARCH));
-        assertTrue(ThreadKinds.canHostFieldDataBuild(ThreadKind.WARMER));
-        assertFalse(ThreadKinds.canHostFieldDataBuild(ThreadKind.SNAPSHOT));
-        assertFalse(ThreadKinds.canHostFieldDataBuild(ThreadKind.MERGE));
-        assertFalse(ThreadKinds.canHostFieldDataBuild(ThreadKind.OTHER));
+    public void testWalkIsSkippedOnlyWhereABuildIsImpossible() {
+        assertTrue(ThreadKinds.provablyNotFieldDataBuild(ThreadKind.SNAPSHOT));
+        assertTrue(ThreadKinds.provablyNotFieldDataBuild(ThreadKind.MERGE));
+        assertFalse(ThreadKinds.provablyNotFieldDataBuild(ThreadKind.SEARCH));
+        assertFalse(ThreadKinds.provablyNotFieldDataBuild(ThreadKind.WARMER));
+        assertFalse(
+            "an unclassified thread must still be walked, not silently skipped",
+            ThreadKinds.provablyNotFieldDataBuild(ThreadKind.OTHER)
+        );
     }
 
     /** The cached per-thread lookup must agree with a direct classification of that thread's name. */
