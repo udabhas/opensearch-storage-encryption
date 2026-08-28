@@ -297,7 +297,7 @@ public class BufferPoolDirectory extends FSDirectory {
         // Snapshot upload. Opens as DEFAULT with an empty hint set, so it is indistinguishable from a search
         // open by IOContext alone; the thread pool is the only available signal. Measured: one openInput per
         // file, zero clones, one sequential pass, never re-read.
-        if (onThreadPool(SNAPSHOT_POOL)) {
+        if (StaticConfigs.snapshotBypassEnabled() && onThreadPool(SNAPSHOT_POOL)) {
             return true;
         }
 

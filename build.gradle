@@ -51,6 +51,7 @@ ext.applyFdcDebugProps = { task ->
      hotstacks: 'opensearch.store.fdcdebug.hotstacks',
      fdstack: 'opensearch.store.fielddata_stack_detect',
      bypass: 'opensearch.store.block_cache_bypass',
+     snapbypass: 'opensearch.store.snapshot_bufferpool_bypass',
      poolstate: 'opensearch.store.fdcdebug.poolstate',
      frames: 'opensearch.store.fdcdebug.frames'].each { shortName, propName ->
         String v = System.getProperty("fdc.${shortName}")

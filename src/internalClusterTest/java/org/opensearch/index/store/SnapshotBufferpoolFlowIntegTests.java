@@ -10,7 +10,10 @@ import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertHitCount;
 
 import java.lang.management.BufferPoolMXBean;
+import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryPoolMXBean;
+import java.lang.management.MemoryType;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -222,8 +225,18 @@ public class SnapshotBufferpoolFlowIntegTests extends OpenSearchIntegTestCase {
         final String snapshot = "snap-measured";
         FdcDebug.resetCounters();
 
+        // Rebase the JVM's peak watermarks and GC counters so everything reported below is attributable to
+        // THIS snapshot. Without the rebase, "peak heap" is whatever the ingest happened to reach, and the
+        // two arms of an A/B are not comparable - measured: two runs of this test started 63MiB apart.
+        System.gc();
+        resetHeapPeaks();
+        final Map<String, Long> gcCountBefore = gcCounts();
+        final Map<String, Long> gcTimeBefore = gcTimesMs();
+        final Map<String, Long> heapUsedBefore = usedHeapByPool();
+
         Sample before = sample(0L);
         logger.info("snap-metrics BEFORE {}", before);
+        logger.info("snap-heap   BEFORE perPoolUsed={}", asMib(heapUsedBefore));
 
         long startNanos = System.nanoTime();
         client().admin().cluster().prepareCreateSnapshot(REPO, snapshot).setWaitForCompletion(false).setIndices(INDEX).get();
@@ -260,6 +273,13 @@ public class SnapshotBufferpoolFlowIntegTests extends OpenSearchIntegTestCase {
 
         // ---- pool + heap trajectory ----
         reportTrajectory(before, samples, after);
+
+        // ---- GC and TRUE peak heap, attributable to this snapshot ----
+        logger.info("snap-heap   AFTER  perPoolUsed={}", asMib(usedHeapByPool()));
+        logger.info("snap-heap   PEAK   perPoolPeak={}  (JVM watermark, not sampled)", asMib(peakHeapByPool()));
+        logger.info("snap-heap   DELTA  perPoolUsed={}", asMib(deltaOf(heapUsedBefore, usedHeapByPool())));
+        logger.info("snap-gc     COUNT  delta={}", deltaOf(gcCountBefore, gcCounts()));
+        logger.info("snap-gc     TIMEMS delta={}", deltaOf(gcTimeBefore, gcTimesMs()));
 
         Map<String, Long> counts = FdcDebug.counters();
         logger.info("snap-flow: counters across measured snapshot = {}", counts);
@@ -570,5 +590,75 @@ public class SnapshotBufferpoolFlowIntegTests extends OpenSearchIntegTestCase {
             sb.append("term").append((i + w * 7) % 4096).append(' ');
         }
         return sb.toString();
+    }
+
+    // ---- GC and true peak heap ----
+
+    /**
+     * Resets the JVM's per-pool peak-usage watermarks so {@link #peakHeapByPool} afterwards reports the peak
+     * for THIS window only.
+     *
+     * <p>Needed because the sampled peak in {@link #reportTrajectory} is taken every {@link #POLL_INTERVAL_MS}
+     * and can miss a spike entirely between two samples — it is a lower bound on the peak, not the peak. The
+     * JVM tracks the real watermark continuously; this just rebases it.
+     */
+    private static void resetHeapPeaks() {
+        for (MemoryPoolMXBean pool : ManagementFactory.getMemoryPoolMXBeans()) {
+            if (pool.getType() == MemoryType.HEAP && pool.isValid()) {
+                pool.resetPeakUsage();
+            }
+        }
+    }
+
+    /** True per-generation peak since the last {@link #resetHeapPeaks}, in bytes. */
+    private static Map<String, Long> peakHeapByPool() {
+        Map<String, Long> out = new TreeMap<>();
+        for (MemoryPoolMXBean pool : ManagementFactory.getMemoryPoolMXBeans()) {
+            if (pool.getType() == MemoryType.HEAP && pool.isValid() && pool.getPeakUsage() != null) {
+                out.put(pool.getName(), pool.getPeakUsage().getUsed());
+            }
+        }
+        return out;
+    }
+
+    /** Current per-generation heap usage, in bytes. Old-gen movement is the promotion signal. */
+    private static Map<String, Long> usedHeapByPool() {
+        Map<String, Long> out = new TreeMap<>();
+        for (MemoryPoolMXBean pool : ManagementFactory.getMemoryPoolMXBeans()) {
+            if (pool.getType() == MemoryType.HEAP && pool.isValid() && pool.getUsage() != null) {
+                out.put(pool.getName(), pool.getUsage().getUsed());
+            }
+        }
+        return out;
+    }
+
+    /** Cumulative GC collection counts per collector. */
+    private static Map<String, Long> gcCounts() {
+        Map<String, Long> out = new TreeMap<>();
+        for (GarbageCollectorMXBean gc : ManagementFactory.getGarbageCollectorMXBeans()) {
+            out.put(gc.getName(), gc.getCollectionCount());
+        }
+        return out;
+    }
+
+    /** Cumulative GC time per collector, in milliseconds. */
+    private static Map<String, Long> gcTimesMs() {
+        Map<String, Long> out = new TreeMap<>();
+        for (GarbageCollectorMXBean gc : ManagementFactory.getGarbageCollectorMXBeans()) {
+            out.put(gc.getName(), gc.getCollectionTime());
+        }
+        return out;
+    }
+
+    private static Map<String, Long> deltaOf(Map<String, Long> before, Map<String, Long> after) {
+        Map<String, Long> out = new TreeMap<>();
+        after.forEach((k, v) -> out.put(k, v - before.getOrDefault(k, 0L)));
+        return out;
+    }
+
+    private static Map<String, String> asMib(Map<String, Long> bytes) {
+        Map<String, String> out = new TreeMap<>();
+        bytes.forEach((k, v) -> out.put(k, mib(v)));
+        return out;
     }
 }

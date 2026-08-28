@@ -193,6 +193,29 @@ public class StaticConfigs {
     }
 
     /**
+     * System property gating the SNAPSHOT-only bufferpool bypass (see
+     * {@code BufferPoolDirectory#enableSkipBufferpool}). Default ON.
+     *
+     * <p>Two purposes, and both are load-bearing. It is the kill switch if the routing turns out to hurt a
+     * workload we have not measured, and it is the only way to run a controlled A/B of snapshot-only routing:
+     * {@link #BLOCK_CACHE_BYPASS_PROPERTY} bypasses EVERY reader including search, so it cannot isolate the
+     * snapshot arm.
+     */
+    public static final String SNAPSHOT_BYPASS_PROPERTY = "opensearch.store.snapshot_bufferpool_bypass";
+
+    private static volatile boolean snapshotBypassEnabled = Boolean.parseBoolean(System.getProperty(SNAPSHOT_BYPASS_PROPERTY, "true"));
+
+    /** Returns whether snapshot upload reads bypass the bufferpool. */
+    public static boolean snapshotBypassEnabled() {
+        return snapshotBypassEnabled;
+    }
+
+    /** Sets the snapshot-bypass flag. */
+    public static void setSnapshotBypassEnabled(boolean value) {
+        snapshotBypassEnabled = value;
+    }
+
+    /**
      * System property gating the field-data stack-detection experiment. Default OFF.
      *
      * <p>Off by default because the mechanism costs a stack walk on every {@code clone()} / {@code slice()},
