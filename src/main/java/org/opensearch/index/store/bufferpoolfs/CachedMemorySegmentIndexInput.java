@@ -1085,6 +1085,15 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         if (StaticConfigs.fieldDataStackDetectEnabled() == false) {
             return false;
         }
+        // Cheap tier before the expensive one. A field data build can only be on a search or warmer thread,
+        // so every other kind is answered by a ThreadLocal read instead of a stack walk. This is what keeps
+        // the hook affordable when it is not behind an experiment flag: merge, force-merge, refresh, flush,
+        // generic and write derivations never reach the walker at all, and a merge test measured 21,648
+        // derived inputs. Note buildSlice already short-circuits on the inherited flag, so the overwhelming
+        // majority of derivations do not even reach this method.
+        if (ThreadKinds.canHostFieldDataBuild(ThreadKinds.current()) == false) {
+            return false;
+        }
         String marker = fieldDataBuildFrameOnStack();
         if (marker == null) {
             return false;
@@ -1139,13 +1148,24 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * the common case (ordinary search, no match) walks a bounded prefix rather than the whole stack.
      */
     private static String fieldDataBuildFrameOnStack() {
-        return StackWalker.getInstance().walk(frames -> frames.limit(FIELD_DATA_STACK_MAX_FRAMES).filter(f -> {
-            if ("loadDirect".equals(f.getMethodName()) == false) {
-                return false;
+        return WALKER.walk(frames -> {
+            // Iterator rather than filter().findFirst().map(): the Stream form allocates a filter stage, a
+            // limit stage and TWO Optionals on every call, and the miss path - ordinary search discovering
+            // it is not a field data build - is the common case. The loop allocates nothing and builds the
+            // marker String only on a match.
+            final java.util.Iterator<StackWalker.StackFrame> it = frames.iterator();
+            for (int i = 0; i < FIELD_DATA_STACK_MAX_FRAMES && it.hasNext(); i++) {
+                final StackWalker.StackFrame f = it.next();
+                if ("loadDirect".equals(f.getMethodName()) == false) {
+                    continue;
+                }
+                final String cls = f.getClassName();
+                if (cls.startsWith("org.opensearch.index.fielddata") || cls.startsWith("org.opensearch.indices.fielddata")) {
+                    return cls + '.' + f.getMethodName() + ':' + f.getLineNumber();
+                }
             }
-            String cls = f.getClassName();
-            return cls.startsWith("org.opensearch.index.fielddata") || cls.startsWith("org.opensearch.indices.fielddata");
-        }).findFirst().map(f -> f.getClassName() + '.' + f.getMethodName() + ':' + f.getLineNumber()).orElse(null));
+            return null;
+        });
     }
 
     /**
@@ -1155,6 +1175,19 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * only costs walk time on the miss path.
      */
     private static final int FIELD_DATA_STACK_MAX_FRAMES = 24;
+
+    /**
+     * Hoisted deliberately. {@code StackWalker.getInstance()} and {@code getInstance(Set)} return the JDK's
+     * own cached {@code DEFAULT_WALKER} (StackWalker.java:324/348/378), so hoisting those would buy nothing -
+     * but {@code getInstance(Set, int)} ends in {@code new StackWalker(...)} (StackWalker.java:411) and
+     * allocates on EVERY call. The {@code estimateDepth} overload is worth using because it pre-sizes the
+     * frame buffer for the depth we actually walk; keeping it in a static field is what stops that costing
+     * an allocation per clone/slice.
+     *
+     * <p>Safe to share: "{@code StackWalker} is thread-safe. Multiple threads can share a single
+     * {@code StackWalker} object" (StackWalker.java:62).
+     */
+    private static final StackWalker WALKER = StackWalker.getInstance(java.util.Collections.emptySet(), FIELD_DATA_STACK_MAX_FRAMES);
 
     /** Builds the actual sliced IndexInput. * */
     CachedMemorySegmentIndexInput buildSlice(String sliceDescription, long sliceOffset, long length) {
