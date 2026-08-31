@@ -277,12 +277,16 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
     }
 
     /**
-     * The harm question, answered directly: does building field data POPULATE the block cache?
+     * The harm question, answered directly: does building field data touch the block cache at all?
+     *
+     * <p>It must not. This is the guard on the thread-marker mechanism: core marks the thread around the
+     * uninversion, so the build's reads bypass the pool and land in non-pooled buffers. The test asserts
+     * that the marker fires, that the reads take the bypass, and that nothing is published.
      *
      * <p>{@link #testFieldDataBuildOpensNoFilesAndOnlyClones} runs warm - every block is already in L1,
-     * so no I/O happens and that test can say nothing about population. Here the index is closed and
+     * so no I/O happens and that test can say nothing about the load path. Here the index is closed and
      * reopened first, which drops the directories and invalidates their caches, so the build must reach
-     * disk. Only then is a populate count meaningful.
+     * disk. Only then are these counts meaningful.
      *
      * <p>Note what could NOT be instrumented to answer this: a log line inside
      * {@code CryptoDirectIOBlockLoader.load} cannot distinguish a populating read from a bypassing one.
@@ -290,7 +294,7 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
      * loadTransient} does not - and its signature carries nothing identifying the caller. The decision
      * lives with the caller, so it is counted there.
      */
-    public void testColdFieldDataBuildPopulatesBlockCache() throws Exception {
+    public void testColdFieldDataBuildBypassesBlockCache() throws Exception {
         internalCluster().startNode();
         createIndexAndIngest();
         enableFieldDataOnTextField();
@@ -324,35 +328,37 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
         long l1Hits = FdcDebug.counterOf("block.acquire.L1_HIT");
         long l2Hits = FdcDebug.counterOf("block.acquire.L2_HIT");
         long misses = FdcDebug.counterOf("block.acquire.MISS_LOADS_AND_POPULATES");
-        long bypassing = FdcDebug.counterOf("cache.loadTransient.NO_POPULATE");
+        long hookWidened = FdcDebug.counterOf("input.skipBufferpool.hookWidened");
+        long bypassed = FdcDebug.counterOf("input.acquireBlock.BYPASS");
+        long notPopulated = FdcDebug.counterOf("cache.loadTransient.NO_POPULATE");
 
-        // THE ANSWER, and it is about MEDIATION rather than population. Every block the build touches is
-        // acquired THROUGH the pool - L1, else L2, else a disk load that publishes into both. Field data
-        // itself is on heap, but it cannot be built without going through the pool for its source blocks.
-        assertThat(
-            "every field data source block must be acquired through the pool; counters were " + counts,
-            l1Hits + l2Hits + misses,
-            greaterThan(0L)
-        );
-
-        // Population is CONDITIONAL on the block not already being resident, so it is NOT asserted here.
-        // At this scale it is zero: the index is far smaller than the pool, so opening it leaves every
-        // block resident and the build finds them all in L1 - measured L1_HIT=5, MISS_LOADS=0. Population
-        // by the build needs a working set larger than the pool, which is a property of the deployment and
-        // not of this test. Asserting misses > 0 here would be asserting a coincidence of sizing, and it
-        // would fail for the wrong reason on any machine where the whole index fits.
         logger
             .info(
-                "fdc-flow: COLD build tiers L1_HIT={} L2_HIT={} MISS_LOADS={} rawIo={} (only misses populate)",
+                "fdc-flow: COLD build tiers L1_HIT={} L2_HIT={} MISS_LOADS={} rawIo={} hookWidened={} bypassed={}",
                 l1Hits,
                 l2Hits,
                 misses,
-                FdcDebug.counterOf("loader.load")
+                FdcDebug.counterOf("loader.load"),
+                hookWidened,
+                bypassed
             );
 
-        // The bypass path is off by default, so nothing should be taking it. If this ever trips, the tier
-        // split above is measuring a configuration we did not intend to test.
-        assertThat("cache bypass must be off by default; counters were " + counts, bypassing, equalTo(0L));
+        // THE CONTRACT, and it is the inverse of what this test asserted before the thread marker landed.
+        // The build's source blocks are deliberately NOT mediated by the pool: IndicesFieldDataCache marks
+        // the thread around the uninversion, enableSkipBufferpool reads that marker, and every input derived
+        // inside the build reads through DirectIO into a non-pooled buffer instead. A field data build is a
+        // high-volume sequential read with near-zero reuse, so pooling its blocks evicts what search still
+        // needs in order to store what nobody will ask for again.
+        assertThat("the thread marker must fire for a field data build; counters were " + counts, hookWidened, greaterThan(0L));
+        assertThat("the build's reads must take the bypass; counters were " + counts, bypassed, greaterThan(0L));
+        assertThat("bypassed reads must not populate the pool; counters were " + counts, notPopulated, greaterThan(0L));
+
+        // Pin the count, not just its sign. loadDirect performs the uninversion in three statements -
+        // estimator slice of the terms index, term-dictionary clone, postings clone - so a correct build
+        // widens exactly three derivations. Asserting the number is what makes a silently DEAD marker a
+        // test failure: a mechanism that never fires produces zero here while every other assertion in this
+        // class still passes, which is how the previous stack-walk mechanism could break unnoticed.
+        assertThat("expected exactly the three loadDirect derivations; counters were " + counts, hookWidened, equalTo(3L));
     }
 
     /**
