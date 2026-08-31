@@ -14,8 +14,6 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
-import java.util.Collections;
-import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -1061,23 +1059,14 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
     /**
      * Policy hook: should this DERIVED input bypass the block cache even though its parent does not?
      *
-     * <p>Returning {@code false} means "inherit whatever the parent decided", which is the current
-     * behaviour and the safe default. Returning {@code true} widens the bypass to this input and, because
-     * the decision is inherited, to everything derived from it.
+     * <p>This is the single funnel for every derived input - {@code clone()} and both {@code slice()}
+     * overloads all route through {@link #buildSlice} - and for a field data build it is the only seam
+     * crossed, because a build never calls {@code openInput} at all.
      *
-     * <p><b>What is knowable here, and what is not.</b> This is the single funnel for every derived input -
-     * {@code clone()} and both {@code slice()} overloads all route through {@link #buildSlice}, and for the
-     * flows that matter (field data builds, merge reads) it is the ONLY seam they cross, because those
-     * consumers never call {@code openInput} at all. So it is the right place for a decision. But the
-     * caller's identity has already been lost by the time control arrives here: available are the parent's
-     * path and extension, the region being derived, and the slice description. NOT available is who asked.
-     *
-     * <p>That matters because the same region of the same parent is derived by different consumers with
-     * opposite requirements - measured: a field data build and a query-phase precompute both slice the
-     * identical terms-index region from the same parent instance. A rule based only on the arguments below
-     * therefore cannot separate "bulk one-shot reader" from "latency-sensitive search". Making this hook a
-     * real policy needs intent supplied from above (a scoped marker set by the known bulk callers, or a
-     * context-carrying slice overload), not a cleverer predicate here.
+     * <p>The arguments cannot answer the question: a field data build and a query-phase precompute derive
+     * the identical region of the identical parent, so only the caller's intent separates them. Core
+     * supplies that intent by marking the thread for the duration of the uninversion
+     * ({@code IndicesFieldDataCache} -> {@code FielddataLoadContext}).
      *
      * @param sliceDescription the caller's slice label; {@code null} for {@code clone()}
      * @param absoluteOffset   absolute start offset of the derived region within the file
@@ -1085,126 +1074,8 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @return {@code true} to bypass L1/L2 for this input; {@code false} to inherit the parent's decision
      */
     boolean enableSkipBufferpool(String sliceDescription, long absoluteOffset, long length) {
-        // THREAD MARKER: the "intent supplied from above" this javadoc asks for. Core marks the thread for
-        // the duration of the uninversion (IndicesFieldDataCache -> FielddataLoadContext), so the decision
-        // is a ThreadLocal lookup instead of a stack walk on EVERY derivation. Measured on big5 search,
-        // where the walk fires ZERO times and still costs 6.5% of JVM CPU and up to 15.3x on a single
-        // query, because it is consulted per segment-field-open and cannot short-circuit when nothing
-        // matches. Checked first and returning either way, so a node on this mechanism never walks.
-        if (FIELD_DATA_THREAD_MARKER) {
-            if (FielddataLoadContext.isFielddataLoad() == false) {
-                return false;
-            }
-            FdcDebug.enableCounting();
-            LOGGER
-                .info(
-                    "fdc-skipbufferpool ENABLED reason=FIELD_DATA_THREAD_MARKER desc={} off={} len={} ext={} file={} thread={}",
-                    sliceDescription,
-                    absoluteOffset,
-                    length,
-                    fdcExt,
-                    path.getFileName(),
-                    Thread.currentThread().getName()
-                );
-            return true;
-        }
-        if (StaticConfigs.fieldDataStackDetectEnabled() == false) {
-            return false;
-        }
-        // Skip the walk where a build is provably impossible; see ThreadKinds#provablyNotFieldDataBuild.
-        if (ThreadKinds.provablyNotFieldDataBuild(ThreadKinds.current())) {
-            return false;
-        }
-        String marker = fieldDataBuildFrameOnStack();
-        if (marker == null) {
-            return false;
-        }
-        // Make the totals available on a node that enabled only this experiment, without switching on the
-        // whole fdc-debug stream. Idempotent.
-        FdcDebug.enableCounting();
-        // Logged at INFO and gated ONLY on the experiment flag, deliberately: on a node this is the whole
-        // point of enabling the experiment, and requiring package-level DEBUG as well would drag in every
-        // other trace statement in these packages. Volume is bounded by the number of field data build
-        // derivations - single digits per (field, segment) - not by read volume, because a derived input
-        // inherits the decision and never re-evaluates the hook.
-        //
-        // The matched frame is included as EVIDENCE. Without it the line asserts "this was a field data
-        // build" and offers no way to check the claim; with it, a wrong match is visible in the log rather
-        // than having to be reproduced under a debugger.
-        LOGGER
-            .info(
-                "fdc-skipbufferpool ENABLED reason=FIELD_DATA_STACK marker={} desc={} off={} len={} ext={} file={} thread={}",
-                marker,
-                sliceDescription,
-                absoluteOffset,
-                length,
-                fdcExt,
-                path.getFileName(),
-                Thread.currentThread().getName()
-            );
-        return true;
+        return FielddataLoadContext.isFielddataLoad();
     }
-
-    /**
-     * True when this derivation is happening inside a field data build.
-     *
-     * <p>Marker frame is {@code loadDirect} on a class under {@code org.opensearch.index.fielddata} -
-     * {@code PagedBytesIndexFieldData.loadDirect} for text fields, its siblings for other field types.
-     * That method IS the uninversion: its three statements produce every derived input a build makes
-     * (estimator slice of the terms index, term-dictionary clone, postings clone). Matching on it therefore
-     * catches the whole build and nothing else.
-     *
-     * <p>Deliberately NOT matching {@code IndicesFieldDataCache} alone. That class also appears on the stack
-     * of a cache HIT, which performs no reads, and on the global-ordinals path, which builds an
-     * {@code OrdinalMap} from already-cached leaves and likewise reads nothing. Keying on {@code loadDirect}
-     * targets the reads specifically.
-     *
-     * <p>Verified against the traced chains: the field data build reaches this method with {@code loadDirect}
-     * 6-8 filtered frames up, while the query-phase precompute path
-     * ({@code GlobalOrdinalsStringTermsAggregator.tryCollectFromTermFrequencies}) derives the SAME region of
-     * the SAME parent with no fielddata frame at all. So this predicate separates two consumers that no
-     * argument-based rule could.
-     *
-     * <p>Short-circuits on the first match and stops after {@link #FIELD_DATA_STACK_MAX_FRAMES} frames, so
-     * the common case (ordinary search, no match) walks a bounded prefix rather than the whole stack.
-     */
-    private static String fieldDataBuildFrameOnStack() {
-        // Iterator, not filter().findFirst(): the Stream form allocates a limit stage, a filter stage and a
-        // sink chain on every call, and the miss path is the common one.
-        return WALKER.walk(frames -> {
-            Iterator<StackWalker.StackFrame> it = frames.iterator();
-            for (int i = 0; i < FIELD_DATA_STACK_MAX_FRAMES && it.hasNext(); i++) {
-                StackWalker.StackFrame f = it.next();
-                if ("loadDirect".equals(f.getMethodName()) == false) {
-                    continue;
-                }
-                String cls = f.getClassName();
-                if (cls.startsWith("org.opensearch.index.fielddata") || cls.startsWith("org.opensearch.indices.fielddata")) {
-                    return cls + '.' + f.getMethodName() + ':' + f.getLineNumber();
-                }
-            }
-            return null;
-        });
-    }
-
-    /**
-     * Frame budget for {@link #isFieldDataBuildOnStack()}. The marker sits 6-8 filtered frames above the
-     * derivation in the measured chains; unfiltered adds lambda and wrapper frames, so this is set well
-     * clear of that. Too low silently produces false negatives (build not detected, no bypass); too high
-     * only costs walk time on the miss path.
-     */
-    private static final int FIELD_DATA_STACK_MAX_FRAMES = 24;
-
-    /**
-     * Selects the thread-marker mechanism over the stack walk. Requires the core-side marker
-     * ({@code IndicesFieldDataCache} -> {@code FielddataLoadContext}); without it the marker is never set
-     * and no bypass happens, which is why this is opt-in rather than the default.
-     */
-    private static final boolean FIELD_DATA_THREAD_MARKER = Boolean
-        .parseBoolean(System.getProperty("opensearch.store.fielddata_thread_marker", "false"));
-
-    /** Hoisted: getInstance(Set,int) allocates per call, unlike getInstance() which returns a cached walker. */
-    private static final StackWalker WALKER = StackWalker.getInstance(Collections.emptySet(), FIELD_DATA_STACK_MAX_FRAMES);
 
     /** Builds the actual sliced IndexInput. * */
     CachedMemorySegmentIndexInput buildSlice(String sliceDescription, long sliceOffset, long length) {

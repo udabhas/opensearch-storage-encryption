@@ -215,26 +215,6 @@ public class StaticConfigs {
         snapshotBypassEnabled = value;
     }
 
-    /**
-     * System property gating the field-data stack-detection experiment. Default OFF.
-     *
-     * <p>Off by default because the mechanism costs a stack walk on every {@code clone()} / {@code slice()},
-     * which is the query hot path (a clone per TermsEnum, a clone per DocsEnum). It exists to MEASURE
-     * whether bypassing the cache for field data builds is worth having, before a cheaper signal is built.
-     */
-    public static final String FIELD_DATA_STACK_DETECT_PROPERTY = "opensearch.store.fielddata_stack_detect";
-
-    private static final boolean FIELD_DATA_STACK_DETECT = Boolean
-        .parseBoolean(System.getProperty(FIELD_DATA_STACK_DETECT_PROPERTY, "false"));
-
-    /**
-     * Whether derived inputs should stack-walk to detect a field data build and bypass the cache for it.
-     * See {@link #FIELD_DATA_STACK_DETECT_PROPERTY}. Experiment only - not a production setting.
-     */
-    public static boolean fieldDataStackDetectEnabled() {
-        return FIELD_DATA_STACK_DETECT;
-    }
-
     private static int getPageSizeSafe() {
         try {
             return PanamaNativeAccess.getPageSize();
