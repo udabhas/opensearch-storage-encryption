@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 import org.junit.Before;
+import org.opensearch.index.fielddata.FielddataLoadContext;
 import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheValue;
@@ -1654,6 +1655,79 @@ public class CachedMemorySegmentIndexInputTests extends OpenSearchTestCase {
      * against 21,648 derived inputs, so that mistake would apply the bypass to 0.2% of reads while appearing
      * enabled, and would read as "the bypass does not help" in an A/B.
      */
+    /**
+     * The derive-side decision now reads a thread marker set by core in {@code IndicesFieldDataCache}
+     * rather than walking the stack, so the whole policy is: is a field data build running on this thread.
+     * Asserted in both directions, because only the pair distinguishes a working hook from one wired to a
+     * constant - a hook stuck at false loses the bypass silently, and one stuck at true bypasses the pool
+     * for ordinary search.
+     */
+    public void testEnableSkipBufferpoolFollowsTheThreadMarker() throws IOException {
+        long fileLength = BLOCK_SIZE * 4;
+        CachedMemorySegmentIndexInput input = CachedMemorySegmentIndexInput
+            .newInstance(
+                "marker",
+                testPath,
+                fileLength,
+                mockCache,
+                mockReadaheadManager,
+                null,
+                radixBlockTable,
+                radixBlockTableRegistry,
+                false
+            );
+        try {
+            assertFalse(
+                "no build on this thread: derived inputs must inherit, not widen",
+                input.enableSkipBufferpool(null, 0L, BLOCK_SIZE)
+            );
+
+            FielddataLoadContext.markFielddataLoad();
+            try {
+                assertTrue("a build on this thread must widen the bypass", input.enableSkipBufferpool(null, 0L, BLOCK_SIZE));
+            } finally {
+                FielddataLoadContext.clearFielddataLoad();
+            }
+
+            assertFalse("once the build ends the bypass must stop widening", input.enableSkipBufferpool(null, 0L, BLOCK_SIZE));
+        } finally {
+            input.close();
+        }
+    }
+
+    /** A derived input created during a build must actually carry the bypass, not merely be eligible for it. */
+    public void testCloneDuringAFieldDataBuildBypasses() throws IOException {
+        long fileLength = BLOCK_SIZE * 4;
+        CachedMemorySegmentIndexInput parent = CachedMemorySegmentIndexInput
+            .newInstance(
+                "marker-clone",
+                testPath,
+                fileLength,
+                mockCache,
+                mockReadaheadManager,
+                null,
+                radixBlockTable,
+                radixBlockTableRegistry,
+                false
+            );
+        try {
+            assertFalse("parent itself is not bypassing", parent.isSkipBufferpool());
+            assertFalse("a clone outside a build must not bypass", parent.clone().isSkipBufferpool());
+
+            FielddataLoadContext.markFielddataLoad();
+            try {
+                assertTrue("a clone taken during a build must bypass", parent.clone().isSkipBufferpool());
+                assertTrue("a slice taken during a build must bypass", parent.slice("s", 0, BLOCK_SIZE).isSkipBufferpool());
+            } finally {
+                FielddataLoadContext.clearFielddataLoad();
+            }
+
+            assertFalse("a clone after the build must not bypass", parent.clone().isSkipBufferpool());
+        } finally {
+            parent.close();
+        }
+    }
+
     public void testSkipBufferpoolIsInheritedByClonesAndSlices() throws IOException {
         long fileLength = BLOCK_SIZE * 4;
         CachedMemorySegmentIndexInput bypassing = CachedMemorySegmentIndexInput
