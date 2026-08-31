@@ -1074,7 +1074,27 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @return {@code true} to bypass L1/L2 for this input; {@code false} to inherit the parent's decision
      */
     boolean enableSkipBufferpool(String sliceDescription, long absoluteOffset, long length) {
-        return FielddataLoadContext.isFielddataLoad();
+        if (FielddataLoadContext.isFielddataLoad() == false) {
+            return false;
+        }
+        // Make the totals available on a node without switching on the whole fdc-debug stream. Idempotent.
+        FdcDebug.enableCounting();
+        // Logged at INFO on purpose. On a node this line is the only direct evidence the bypass fired at
+        // all - the alternative is inferring it from a pool-growth delta, which cannot distinguish "did not
+        // fire" from "fired and the pool grew for another reason". Volume is bounded by DERIVATIONS, not
+        // reads: a derived input inherits the decision and never re-evaluates this hook, so it is three
+        // lines per (field, segment) - the estimator slice, the term-dictionary clone, the postings clone.
+        LOGGER
+            .info(
+                "fdc-skipbufferpool ENABLED reason=FIELD_DATA_THREAD_MARKER desc={} off={} len={} ext={} file={} thread={}",
+                sliceDescription,
+                absoluteOffset,
+                length,
+                fdcExt,
+                path.getFileName(),
+                Thread.currentThread().getName()
+            );
+        return true;
     }
 
     /** Builds the actual sliced IndexInput. * */
