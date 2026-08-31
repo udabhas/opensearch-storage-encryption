@@ -24,6 +24,7 @@ import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
+import org.opensearch.index.fielddata.FielddataLoadContext;
 import org.opensearch.index.store.block.RefCountedByteBuffer;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheValue;
@@ -1084,6 +1085,29 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * @return {@code true} to bypass L1/L2 for this input; {@code false} to inherit the parent's decision
      */
     boolean enableSkipBufferpool(String sliceDescription, long absoluteOffset, long length) {
+        // THREAD MARKER: the "intent supplied from above" this javadoc asks for. Core marks the thread for
+        // the duration of the uninversion (IndicesFieldDataCache -> FielddataLoadContext), so the decision
+        // is a ThreadLocal lookup instead of a stack walk on EVERY derivation. Measured on big5 search,
+        // where the walk fires ZERO times and still costs 6.5% of JVM CPU and up to 15.3x on a single
+        // query, because it is consulted per segment-field-open and cannot short-circuit when nothing
+        // matches. Checked first and returning either way, so a node on this mechanism never walks.
+        if (FIELD_DATA_THREAD_MARKER) {
+            if (FielddataLoadContext.isFielddataLoad() == false) {
+                return false;
+            }
+            FdcDebug.enableCounting();
+            LOGGER
+                .info(
+                    "fdc-skipbufferpool ENABLED reason=FIELD_DATA_THREAD_MARKER desc={} off={} len={} ext={} file={} thread={}",
+                    sliceDescription,
+                    absoluteOffset,
+                    length,
+                    fdcExt,
+                    path.getFileName(),
+                    Thread.currentThread().getName()
+                );
+            return true;
+        }
         if (StaticConfigs.fieldDataStackDetectEnabled() == false) {
             return false;
         }
@@ -1170,6 +1194,14 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      * only costs walk time on the miss path.
      */
     private static final int FIELD_DATA_STACK_MAX_FRAMES = 24;
+
+    /**
+     * Selects the thread-marker mechanism over the stack walk. Requires the core-side marker
+     * ({@code IndicesFieldDataCache} -> {@code FielddataLoadContext}); without it the marker is never set
+     * and no bypass happens, which is why this is opt-in rather than the default.
+     */
+    private static final boolean FIELD_DATA_THREAD_MARKER = Boolean
+        .parseBoolean(System.getProperty("opensearch.store.fielddata_thread_marker", "false"));
 
     /** Hoisted: getInstance(Set,int) allocates per call, unlike getInstance() which returns a cached walker. */
     private static final StackWalker WALKER = StackWalker.getInstance(Collections.emptySet(), FIELD_DATA_STACK_MAX_FRAMES);
