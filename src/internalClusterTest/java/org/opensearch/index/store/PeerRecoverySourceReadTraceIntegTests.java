@@ -14,6 +14,7 @@ import java.util.Map;
 
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.routing.ShardRouting;
+import org.opensearch.common.Booleans;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.index.store.debug.FdcDebug;
@@ -104,7 +105,7 @@ public class PeerRecoverySourceReadTraceIntegTests extends OpenSearchIntegTestCa
      * files ({@code .fdt}, {@code .dvd}, {@code .tim}) instead of one {@code .cfs} blob. Off by default to
      * keep the requested scenario intact: {@code -Dpr.nocfs=true}.
      */
-    private static final boolean NO_CFS = Boolean.getBoolean("pr.nocfs");
+    private static final boolean NO_CFS = Booleans.parseBoolean(System.getProperty("pr.nocfs", "false"));
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {

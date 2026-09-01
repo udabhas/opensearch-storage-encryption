@@ -215,6 +215,33 @@ public class StaticConfigs {
         snapshotBypassEnabled = value;
     }
 
+    /**
+     * System property gating the PEER-RECOVERY-COPY-only bufferpool bypass (see
+     * {@code BufferPoolDirectory#enableSkipBufferpool}). Default OFF until the A/B is measured.
+     *
+     * <p>Default differs from {@link #SNAPSHOT_BYPASS_PROPERTY} on purpose. Snapshot upload streams to a
+     * repository and is unambiguously zero-reuse. The recovery copy reads a <em>live, searchable</em>
+     * primary's segments, so blocks it would admit are not certainly worthless - measured on a
+     * just-flushed shard 32 of 45 source-side acquires were misses that populate, but that was with a cold
+     * read cache, and a primary that search has already warmed is a different case. Off until the A/B says
+     * otherwise; this flag is what makes that A/B possible without {@link #BLOCK_CACHE_BYPASS_PROPERTY},
+     * which bypasses every reader including search and so cannot isolate the recovery arm.
+     */
+    public static final String RECOVERY_COPY_BYPASS_PROPERTY = "opensearch.store.recovery_copy_bufferpool_bypass";
+
+    private static volatile boolean recoveryCopyBypassEnabled = Boolean
+        .parseBoolean(System.getProperty(RECOVERY_COPY_BYPASS_PROPERTY, "false"));
+
+    /** Returns whether peer-recovery phase-1 copy reads bypass the bufferpool. */
+    public static boolean recoveryCopyBypassEnabled() {
+        return recoveryCopyBypassEnabled;
+    }
+
+    /** Sets the recovery-copy-bypass flag. */
+    public static void setRecoveryCopyBypassEnabled(boolean value) {
+        recoveryCopyBypassEnabled = value;
+    }
+
     private static int getPageSizeSafe() {
         try {
             return PanamaNativeAccess.getPageSize();
