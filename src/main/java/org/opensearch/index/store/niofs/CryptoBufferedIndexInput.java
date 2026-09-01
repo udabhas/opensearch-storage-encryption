@@ -22,6 +22,8 @@ import javax.crypto.ShortBufferException;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.BufferedIndexInput;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -36,6 +38,7 @@ import org.opensearch.index.store.bufferpoolfs.StaticConfigs;
 import org.opensearch.index.store.cipher.AesCipherFactory;
 import org.opensearch.index.store.cipher.EncryptionAlgorithm;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
+import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
@@ -48,6 +51,9 @@ import org.opensearch.index.store.metrics.ErrorType;
  * @opensearch.internal
  */
 public final class CryptoBufferedIndexInput extends BufferedIndexInput {
+    // fdc-debug only (throwaway instrumentation): the per-read access-pattern trace in traceRead().
+    private static final Logger LOGGER = LogManager.getLogger(CryptoBufferedIndexInput.class);
+
     private static final byte[] ZERO_SKIP = new byte[1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER];
     private static final ByteBuffer EMPTY_BYTEBUFFER = ByteBuffer.allocate(0);
     private static final int CHUNK_SIZE = 16_384;
@@ -96,6 +102,16 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     private final String normalizedFilePath;
     private final Path filePath;
+
+    // ---- fdc-debug (throwaway instrumentation): per-read access-pattern trace ----
+    // The pool path can prove its access pattern from block.acquire blockOffsets, but this NIO path
+    // emitted nothing per read, so "is this reader sequential?" was unanswerable for every flow routed
+    // here (READONCE, MERGE, and the nioExtensions on HYBRIDFS). lastReadEnd is the end offset of the
+    // previous readInternal on THIS instance, so each line can state contiguity as a fact instead of
+    // leaving it to be reconstructed by sorting a log. Not thread-safe and deliberately not volatile:
+    // an IndexInput is single-threaded by Lucene contract, clones get their own instance, and a torn
+    // read here would corrupt a trace field, not data.
+    private long lastReadEnd = -1L;
 
     /** Block cache for pool-backed randomAccessSlice. Null if not available. */
     private final BlockCache<RefCountedByteBuffer> blockCache;
@@ -337,6 +353,7 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         }
 
         int readLength = b.remaining();
+        traceRead(pos, readLength);
         while (readLength > 0) {
             final int toRead = Math.min(CHUNK_SIZE, readLength);
             b.limit(b.position() + toRead);
@@ -356,6 +373,68 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
         if (pos > length()) {
             throw new EOFException("seek past EOF: pos=" + pos + ", length=" + length());
         }
+        if (FdcDebug.on(LOGGER)) {
+            FdcDebug.count("niofs.read.seek");
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug niofs.seekInternal pos={} lastReadEnd={} path={} isClone={} isSlice={} thread={} callsite={}",
+                    pos,
+                    lastReadEnd,
+                    normalizedFilePath,
+                    isClone,
+                    isSlice,
+                    FdcDebug.thread(),
+                    FdcDebug.hotSite(LOGGER, "niofs.read.seek", normalizedFilePath)
+                );
+        }
+    }
+
+    /**
+     * fdc-debug: one line per {@code readInternal}, stating the access pattern as an observed fact.
+     *
+     * <p>{@code seq=true} means this read starts exactly where the previous one on this instance ended —
+     * i.e. a contiguous forward scan. {@code gap} is the signed distance from {@code lastReadEnd}
+     * (0 when contiguous, negative for a backward re-read, positive for a skip-forward), which is what
+     * distinguishes a streaming reader from a random-access one without post-processing the log.
+     *
+     * <p>Counters carry the same fact in assertable form: {@code niofs.read.seq} vs
+     * {@code niofs.read.nonseq}, so a test can state "this flow was N% sequential" instead of a
+     * reviewer grepping for it. Both are per-JVM, so with an in-process multi-node test cluster they
+     * aggregate across nodes — attribute by the {@code path=} field, not by the counter, when it matters.
+     *
+     * <p>Emitted per read and therefore only affordable under {@code -Dopensearch.store.fdcdebug=true};
+     * the stack walk stays behind {@code hotSite} (hot-stacks off by default).
+     */
+    private void traceRead(long pos, int readLength) {
+        if (FdcDebug.on(LOGGER)) {
+            final boolean first = lastReadEnd < 0;
+            final boolean sequential = first == false && pos == lastReadEnd;
+            final long gap = first ? 0L : pos - lastReadEnd;
+            // Three buckets, not two: the FIRST read on an input has no predecessor, so scoring it as
+            // non-sequential would make every one-read-per-file flow look 100% random. Sequentiality is a
+            // property of a read PAIR, so only reads that have a predecessor are classified.
+            FdcDebug.count(first ? "niofs.read.first" : (sequential ? "niofs.read.seq" : "niofs.read.nonseq"));
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug niofs.readInternal pos={} len={} end={} seq={} gap={} first={} path={} isClone={} isSlice={} "
+                        + "frameSize={} thread={} callsite={}",
+                    pos,
+                    readLength,
+                    pos + readLength,
+                    sequential,
+                    gap,
+                    first,
+                    normalizedFilePath,
+                    isClone,
+                    isSlice,
+                    frameSize,
+                    FdcDebug.thread(),
+                    FdcDebug.hotSite(LOGGER, "niofs.readInternal", normalizedFilePath)
+                );
+        }
+        lastReadEnd = pos + readLength;
     }
 
     // ---- randomAccessSlice: selective block cache usage for random access patterns ----
