@@ -397,7 +397,36 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
         return dot < 0 || dot == name.length() - 1 ? "none" : name.substring(dot + 1);
     }
 
+    /**
+     * fdc-debug: per-input read-cost accumulation, so "how long did THIS consumer spend reading THIS file"
+     * is answerable from the trace instead of inferred from wall-clock around a whole flow.
+     *
+     * <p>Wraps the real {@link #acquireBlockInner} rather than timing inside it: acquisition has three
+     * exits (L1, L2, disk load) and timing each separately would either miss one or need the timer
+     * threaded through all of them. The timing branch is behind the same {@code FdcDebug.on} gate as the
+     * rest of the hot-site tracing, so production takes one boolean read and a direct call.
+     *
+     * <p>Fields are plain longs, not volatile or atomic: an {@code IndexInput} is single-threaded by Lucene
+     * contract and clones get their own instance (see {@code buildSlice}), so the only cost of being wrong
+     * here is a wrong number in a trace line.
+     */
+    private long fdcAcquireNanos;
+    private long fdcAcquireBlocks;
+
     private BlockCacheValue<RefCountedByteBuffer> acquireBlock(long blockOffset) throws IOException {
+        if (FdcDebug.on(LOGGER) == false) {
+            return acquireBlockInner(blockOffset);
+        }
+        final long startNs = System.nanoTime();
+        try {
+            return acquireBlockInner(blockOffset);
+        } finally {
+            fdcAcquireNanos += System.nanoTime() - startNs;
+            fdcAcquireBlocks++;
+        }
+    }
+
+    private BlockCacheValue<RefCountedByteBuffer> acquireBlockInner(long blockOffset) throws IOException {
         // Cache-bypass reader: read+decrypt this block from disk and hand it straight back. No L1
         // lookup, no L2 lookup, no publish to either — so this read can neither be served by nor
         // evict anything search has cached. The block is also NOT pooled, so it costs the segment pool
@@ -1210,10 +1239,12 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
             FdcDebug
                 .log(
                     LOGGER,
-                    "fdc-debug close isSlice={} id={} path={} closesite={}",
+                    "fdc-debug close isSlice={} id={} path={} blocks={} acquireNanos={} closesite={}",
                     isSlice,
                     System.identityHashCode(this),
                     path,
+                    fdcAcquireBlocks,
+                    fdcAcquireNanos,
                     closesite
                 );
         }

@@ -112,6 +112,16 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
     // an IndexInput is single-threaded by Lucene contract, clones get their own instance, and a torn
     // read here would corrupt a trace field, not data.
     private long lastReadEnd = -1L;
+    // Per-input read-cost accumulation, summarised once at close(). Plain longs for the same reason as
+    // lastReadEnd above: single-threaded per input, and a torn value costs a wrong trace field, not data.
+    private long fdcBytes;
+    private long fdcReads;
+    private long fdcReadNanos;
+    private long fdcSeqReads;
+    private long fdcNonSeqReads;
+    private long fdcFirstPos = -1L;
+    /** Latched once per input: whether this input should time its reads. Avoids a logger check per read. */
+    private final boolean fdcTiming = FdcDebug.on(LOGGER);
 
     /** Block cache for pool-backed randomAccessSlice. Null if not available. */
     private final BlockCache<RefCountedByteBuffer> blockCache;
@@ -239,6 +249,30 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     @Override
     public void close() throws IOException {
+        // fdc-debug: per-input read-cost summary. Emitted on EVERY close (clones included) because a clone
+        // does its own reads on the shared channel, and attributing those to the parent would hide them.
+        // bytes/nanos are what make the three source-side recovery passes over one file comparable: they
+        // read very different amounts (full file vs a 16-byte footer), so time alone would be misleading.
+        if (fdcReads > 0 && FdcDebug.on(LOGGER)) {
+            FdcDebug
+                .log(
+                    LOGGER,
+                    "fdc-debug niofs.input.summary bytes={} reads={} readNanos={} first={} lastEnd={} seq={} nonseq={} "
+                        + "isClone={} isSlice={} len={} path={} thread={}",
+                    fdcBytes,
+                    fdcReads,
+                    fdcReadNanos,
+                    fdcFirstPos,
+                    lastReadEnd,
+                    fdcSeqReads,
+                    fdcNonSeqReads,
+                    isClone,
+                    isSlice,
+                    length(),
+                    normalizedFilePath,
+                    FdcDebug.thread()
+                );
+        }
         if (!isClone) {
             channel.close();
             // Release the L1 RadixBlockTable only if it was acquired (lazily on randomAccessSlice)
@@ -354,6 +388,9 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
         int readLength = b.remaining();
         traceRead(pos, readLength);
+        // Timed region covers disk read + decrypt for the whole logical read, not per CHUNK_SIZE slice:
+        // the caller asked for readLength bytes and that is the unit a cost comparison is made in.
+        final long startNs = fdcTiming ? System.nanoTime() : 0L;
         while (readLength > 0) {
             final int toRead = Math.min(CHUNK_SIZE, readLength);
             b.limit(b.position() + toRead);
@@ -365,6 +402,9 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
             pos += bytesRead;
             readLength -= bytesRead;
+        }
+        if (fdcTiming) {
+            fdcReadNanos += System.nanoTime() - startNs;
         }
     }
 
@@ -407,6 +447,20 @@ public final class CryptoBufferedIndexInput extends BufferedIndexInput {
      * the stack walk stays behind {@code hotSite} (hot-stacks off by default).
      */
     private void traceRead(long pos, int readLength) {
+        if (fdcTiming) {
+            fdcReads++;
+            fdcBytes += readLength;
+            if (fdcFirstPos < 0) {
+                fdcFirstPos = pos;
+            }
+            if (lastReadEnd >= 0) {
+                if (pos == lastReadEnd) {
+                    fdcSeqReads++;
+                } else {
+                    fdcNonSeqReads++;
+                }
+            }
+        }
         if (FdcDebug.on(LOGGER)) {
             final boolean first = lastReadEnd < 0;
             final boolean sequential = first == false && pos == lastReadEnd;
