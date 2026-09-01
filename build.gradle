@@ -45,6 +45,7 @@ plugins {
 // -Dfdc.hotstacks=true  ALSO walk stacks at per-block sites. Diagnostic only - never while timing.
 // -Dfdc.stacks=false    log lines with no caller chains at all.
 // -Dfdc.frames=N        cap frames per chain (default 24).
+// -Dfdc.recbypass=true  turn ON the peer-recovery-copy bufferpool bypass (default OFF in StaticConfigs).
 ext.applyFdcDebugProps = { task ->
     [debug: 'opensearch.store.fdcdebug',
      stacks: 'opensearch.store.fdcdebug.stacks',
@@ -52,6 +53,7 @@ ext.applyFdcDebugProps = { task ->
      fdstack: 'opensearch.store.fielddata_stack_detect',
      bypass: 'opensearch.store.block_cache_bypass',
      snapbypass: 'opensearch.store.snapshot_bufferpool_bypass',
+     recbypass: 'opensearch.store.recovery_copy_bufferpool_bypass',
      poolstate: 'opensearch.store.fdcdebug.poolstate',
      frames: 'opensearch.store.fdcdebug.frames'].each { shortName, propName ->
         String v = System.getProperty("fdc.${shortName}")
