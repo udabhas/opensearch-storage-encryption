@@ -4,28 +4,44 @@
  */
 package org.opensearch.index.store;
 
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertHitCount;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertNoFailures;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.core.LogEvent;
 import org.opensearch.action.admin.cluster.node.stats.NodesStatsResponse;
 import org.opensearch.action.admin.indices.stats.CommonStatsFlags;
 import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
+import org.opensearch.index.fielddata.FielddataLoadContext;
+import org.opensearch.index.store.bufferpoolfs.CachedMemorySegmentIndexInput;
 import org.opensearch.index.store.bufferpoolfs.StaticConfigs;
 import org.opensearch.index.store.debug.FdcDebug;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.search.aggregations.AggregationBuilders;
 import org.opensearch.search.aggregations.bucket.terms.Terms;
+import org.opensearch.test.MockLogAppender;
 import org.opensearch.test.OpenSearchIntegTestCase;
 import org.opensearch.test.junit.annotations.TestLogging;
 
@@ -611,6 +627,470 @@ public class FieldDataCacheFlowIntegTests extends OpenSearchIntegTestCase {
     }
 
     // ---- helpers ----
+
+    /**
+     * Answers the reviewer question directly: does the thread marker survive the OpenSearch -> Lucene ->
+     * plugin boundary?
+     *
+     * <p>Nothing is "passed" anywhere - the marker is a {@link FielddataLoadContext} ThreadLocal, so it is
+     * only visible at the derivation site if the entire chain from the mark site to that derivation ran on
+     * ONE thread. Core marks in {@code IndicesFieldDataCache.load}, then control descends through
+     * {@code PagedBytesIndexFieldData.loadDirect} into Lucene ({@code SegmentTermsEnum},
+     * {@code SegmentTermsEnumFrame}), and Lucene is what finally calls {@code clone()}/{@code slice()} on the
+     * plugin's IndexInput. If Lucene dispatched that work to another thread, or if the marker did not survive
+     * the boundary, the bypass would fire zero times.
+     *
+     * <p>This does not assert that from a hand-set marker: the build here is real, driven by a terms
+     * aggregation over a {@code text} field with {@code fielddata: true}. What it asserts is the EVIDENCE
+     * line the hook emits at DEBUG, which carries the marker state and the caller chain observed at the
+     * moment of the derivation. Three things must be true of that chain, and together they are the proof:
+     *
+     * <ul>
+     *   <li>{@code marker=true} - the ThreadLocal was readable at the derivation site;
+     *   <li>the chain contains {@code IndicesFieldDataCache} - the mark site is on the SAME stack, so the
+     *       same thread; a different thread could not show that frame;
+     *   <li>the chain contains {@code org.apache.lucene} frames - Lucene sits BETWEEN the mark site and this
+     *       derivation, so the marker demonstrably crossed the boundary rather than being read before it.
+     * </ul>
+     */
+    public void testMarkerCrossesTheLuceneBoundaryDuringABuild() throws Exception {
+        internalCluster().startNode();
+        createIndexAndIngest();
+        enableFieldDataOnTextField();
+
+        assertThat("field data must start empty", indexFieldDataBytes(), equalTo(0L));
+
+        final List<String> evidence = new ArrayList<>();
+        final Logger hookLogger = LogManager.getLogger(CachedMemorySegmentIndexInput.class);
+        try (MockLogAppender appender = MockLogAppender.createForLoggers(hookLogger)) {
+            appender.addExpectation(new MockLogAppender.LoggingExpectation() {
+                @Override
+                public void match(LogEvent event) {
+                    String message = event.getMessage().getFormattedMessage();
+                    if (message.contains("fdc-skipbufferpool EVIDENCE")) {
+                        evidence.add(message);
+                    }
+                }
+
+                @Override
+                public void assertMatched() {
+                    // Collection only; the assertions live below so failures report the captured lines.
+                }
+            });
+
+            FdcDebug.resetCounters();
+            runTermsAgg();
+        }
+
+        assertThat("field data must be resident, else there was no build to observe", indexFieldDataBytes(), greaterThan(0L));
+
+        long widened = FdcDebug.counterOf("input.skipBufferpool.hookWidened");
+        assertThat("the marker must have widened at least one derivation; counters=" + FdcDebug.counters(), widened, greaterThan(0L));
+
+        assertThat("the hook must have emitted its EVIDENCE line at DEBUG; counters=" + FdcDebug.counters(), evidence, not(empty()));
+        logEvidence(evidence);
+
+        // Same-thread by IDENTITY, not by name: two threads can share a name, so assert every derivation
+        // reported the same thread id. This is what rules out "Lucene handed the work to another thread and
+        // the marker happened to be set there too".
+        Set<String> threadIds = new HashSet<>();
+        for (String line : evidence) {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("tid=(\\d+)").matcher(line);
+            assertTrue("EVIDENCE line must carry a thread id: " + line, m.find());
+            threadIds.add(m.group(1));
+        }
+        assertThat("every derivation must have happened on ONE thread; ids=" + threadIds, threadIds.size(), equalTo(1));
+
+        for (String line : evidence) {
+            assertThat("the ThreadLocal must be readable at the derivation site: " + line, line, containsString("marker=true"));
+            assertThat(
+                "the parent must NOT already be bypassing, else the marker is not what widened this: " + line,
+                line,
+                containsString("parentSkip=false")
+            );
+            assertThat(
+                "the mark site must be on the SAME stack, which is only possible on the same thread: " + line,
+                line,
+                containsString("IndicesFieldDataCache")
+            );
+            assertThat(
+                "Lucene frames must sit between the mark site and this derivation, proving the marker crossed "
+                    + "the OpenSearch -> Lucene boundary: "
+                    + line,
+                line,
+                containsString("org.apache.lucene")
+            );
+        }
+
+        // The build runs on a pooled search thread, and the marker must not outlive it. Read from a fresh
+        // thread rather than this one, because the JUnit thread never carried the marker in the first place.
+        final AtomicBoolean leakedToAnotherThread = new AtomicBoolean(true);
+        Thread probe = new Thread(() -> leakedToAnotherThread.set(FielddataLoadContext.isFielddataLoad()), "fdc-leak-probe");
+        probe.start();
+        probe.join();
+        assertFalse("the marker must not be visible outside the build", leakedToAnotherThread.get());
+    }
+
+    /**
+     * The clear half of the contract, end to end on ONE physical thread: a field data build bypasses the
+     * pool, and the very next ordinary search on that same thread does NOT.
+     *
+     * <p>This is the failure mode that made {@code finally} mandatory rather than stylistic. Search threads
+     * are pooled and reused across unrelated requests. If the marker leaked past the build, the next query
+     * to land on that thread would silently bypass the buffer pool - reading through DirectIO into
+     * non-pooled buffers and populating nothing - which looks like random cache misses and would be
+     * miserable to trace back to its cause.
+     *
+     * <p><b>How "same thread" is established.</b> Not inferred: the node is started with
+     * {@code thread_pool.search.size: 1} and concurrent segment search disabled, and the test asserts the
+     * pool really has one thread. Both phases therefore run on the same worker by construction, and phase 1
+     * prints its name and id so it is visible in the output.
+     *
+     * <p><b>What each phase asserts.</b> Phase 1: the bypass fires ({@code hookWidened > 0}) and EVIDENCE
+     * lines appear. Phase 2: derivations still happen ({@code input.clone + input.slice > 0}, so the search
+     * really did read), the reads go THROUGH the pool ({@code L1_HIT + L2_HIT + MISS > 0}), the bypass does
+     * NOT fire ({@code hookWidened == 0}), and no EVIDENCE line is emitted at all. Phase 2's positive
+     * counters are what make its zero meaningful - a zero with no work would prove nothing.
+     */
+    public void testMarkerIsClearedForTheNextSearchOnTheSameThread() throws Exception {
+        internalCluster()
+            .startNode(
+                Settings
+                    .builder()
+                    // One search worker, so both phases are forced onto the same physical thread.
+                    .put("thread_pool.search.size", 1)
+                    .put("thread_pool.search.queue_size", 200)
+                    // Concurrent segment search would fan leaf collection onto the index_searcher pool and
+                    // defeat the pinning, so keep collection on the search thread itself.
+                    .put("search.concurrent_segment_search.mode", "none")
+                    .build()
+            );
+        createIndexAndIngest();
+        enableFieldDataOnTextField();
+
+        int searchPoolSize = searchThreadPoolSize();
+        assertThat("both phases must be forced onto one worker for this test to mean anything", searchPoolSize, equalTo(1));
+
+        final Logger hookLogger = LogManager.getLogger(CachedMemorySegmentIndexInput.class);
+
+        // ---------- PHASE 1: the build. The bypass must fire. ----------
+        final List<String> buildEvidence = new ArrayList<>();
+        try (MockLogAppender appender = MockLogAppender.createForLoggers(hookLogger)) {
+            appender.addExpectation(collectEvidence(buildEvidence));
+            FdcDebug.resetCounters();
+            runTermsAgg();
+        }
+
+        long widenedDuringBuild = FdcDebug.counterOf("input.skipBufferpool.hookWidened");
+        assertThat("the build must bypass; counters=" + FdcDebug.counters(), widenedDuringBuild, greaterThan(0L));
+        assertThat("the build must emit EVIDENCE", buildEvidence, not(empty()));
+        assertThat("field data must be resident after the build", indexFieldDataBytes(), greaterThan(0L));
+
+        String buildThread = threadOf(buildEvidence.get(0));
+        logger.info("fdc-flow: PHASE 1 build ran on {} and widened {} derivation(s)", buildThread, widenedDuringBuild);
+        logEvidence(buildEvidence);
+
+        // ---------- PHASE 2: an ordinary search on that SAME worker. The bypass must NOT fire. ----------
+        final List<String> searchEvidence = new ArrayList<>();
+        try (MockLogAppender appender = MockLogAppender.createForLoggers(hookLogger)) {
+            appender.addExpectation(collectEvidence(searchEvidence));
+            FdcDebug.resetCounters();
+            runPlainSearch();
+        }
+
+        Map<String, Long> after = FdcDebug.counters();
+        long derivations = FdcDebug.counterOf("input.clone") + FdcDebug.counterOf("input.slice");
+        long pooledReads = FdcDebug.counterOf("block.acquire.L1_HIT") + FdcDebug.counterOf("block.acquire.L2_HIT") + FdcDebug
+            .counterOf("block.acquire.MISS_LOADS_AND_POPULATES");
+        long widenedDuringSearch = FdcDebug.counterOf("input.skipBufferpool.hookWidened");
+        long bypassedReads = FdcDebug.counterOf("input.acquireBlock.BYPASS");
+
+        logger
+            .info(
+                "fdc-flow: PHASE 2 plain search on the same worker: derivations={} pooledReads={} widened={} bypassedReads={} counters={}",
+                derivations,
+                pooledReads,
+                widenedDuringSearch,
+                bypassedReads,
+                after
+            );
+
+        // The search must actually have done work, or its zeros below prove nothing.
+        assertThat("the plain search must have derived inputs; counters=" + after, derivations, greaterThan(0L));
+        assertThat("the plain search must have read THROUGH the pool; counters=" + after, pooledReads, greaterThan(0L));
+
+        // ...and none of it bypassed.
+        assertThat("the marker must not survive the build; counters=" + after, widenedDuringSearch, equalTo(0L));
+        assertThat("no read may take the bypass path after the build; counters=" + after, bypassedReads, equalTo(0L));
+        assertThat("no EVIDENCE line may be emitted by an ordinary search: " + searchEvidence, searchEvidence, empty());
+    }
+
+    /**
+     * The full marker lifecycle across FOUR phases on pinned pools, printing the stack and every ThreadLocal
+     * at each decision so the behaviour is shown rather than asserted from silence.
+     *
+     * <ol>
+     *   <li><b>search builds</b> - a terms agg triggers the field data load on the single search worker.
+     *       Marker must be SET at the derivation.
+     *   <li><b>search again</b> - the same query on the same worker. Field data is now cached, so no build
+     *       happens and the marker must be ABSENT, proving the {@code finally} cleared it.
+     *   <li><b>warmer builds</b> - {@code eager_global_ordinals} makes a refresh drive the build on the
+     *       WARMER worker instead. Marker must be SET there too, on a different thread.
+     *   <li><b>search again</b> - back on the search worker. Marker must be ABSENT again, proving the
+     *       warmer's marker did not leak across pools.
+     * </ol>
+     *
+     * <p>Pools are pinned to one thread each ({@code thread_pool.search.size=1},
+     * {@code thread_pool.warmer.size=1}) with concurrent segment search off, and both sizes are asserted, so
+     * "same thread" is a property of the setup rather than an inference. Phase 3 is the interesting one: it
+     * also confirms the per-leaf loads under {@code loadGlobalDirect} mark normally, which is why
+     * {@code loadGlobalDirect} itself is deliberately left unmarked.
+     */
+    public void testMarkerLifecycleAcrossSearchAndWarmerThreads() throws Exception {
+        internalCluster()
+            .startNode(
+                Settings
+                    .builder()
+                    .put("thread_pool.search.size", 1)
+                    .put("thread_pool.search.queue_size", 200)
+                    // warmer is a SCALING pool: it takes core/max, not size (validation rejects .size).
+                    .put("thread_pool.warmer.core", 1)
+                    .put("thread_pool.warmer.max", 1)
+                    .put("search.concurrent_segment_search.mode", "none")
+                    .build()
+            );
+        createIndexAndIngest();
+
+        assertThat("search pool must be pinned to one worker", threadPoolSize("search"), equalTo(1));
+        assertThat("warmer pool must be pinned to one worker", threadPoolSize("warmer"), equalTo(1));
+
+        // fielddata + eager_global_ordinals: the first enables the uninversion at all, the second is what
+        // moves a later build onto the warmer pool in phase 3.
+        assertAcked(
+            client()
+                .admin()
+                .indices()
+                .preparePutMapping(INDEX)
+                .setSource(
+                    "{\"properties\":{\"" + TEXT_FIELD + "\":{\"type\":\"text\",\"fielddata\":true,\"eager_global_ordinals\":true}}}",
+                    MediaTypeRegistry.JSON
+                )
+                .get()
+        );
+
+        final Logger hookLogger = LogManager.getLogger(CachedMemorySegmentIndexInput.class);
+
+        // ================= PHASE 1: search thread builds field data =================
+        List<String> p1 = phase(hookLogger, "1 search builds", this::runTermsAgg);
+        long widened1 = FdcDebug.counterOf("input.skipBufferpool.hookWidened");
+        assertThat("phase 1: the build must widen; counters=" + FdcDebug.counters(), widened1, greaterThan(0L));
+        assertThat("phase 1: must emit evidence", p1, not(empty()));
+        String searchThread = threadOf(firstWidened(p1));
+        assertThat("phase 1: the build must run on the search pool", searchThread, containsString("[search]"));
+        assertThat("phase 1: field data must be resident", indexFieldDataBytes(), greaterThan(0L));
+
+        // ================= PHASE 2: same search, same worker, no build =================
+        List<String> p2 = phase(hookLogger, "2 search again (cached)", this::runTermsAgg);
+        assertThat(
+            "phase 2: field data is cached, so nothing may widen; counters=" + FdcDebug.counters(),
+            FdcDebug.counterOf("input.skipBufferpool.hookWidened"),
+            equalTo(0L)
+        );
+        assertThat(
+            "phase 2: no read may take the bypass; counters=" + FdcDebug.counters(),
+            FdcDebug.counterOf("input.acquireBlock.BYPASS"),
+            equalTo(0L)
+        );
+        for (String line : p2) {
+            assertThat("phase 2: every probed derivation must see the marker cleared: " + line, line, containsString("marker=false"));
+        }
+
+        // ================= PHASE 3: ingest + refresh -> WARMER thread builds =================
+        List<String> p3 = phase(hookLogger, "3 warmer builds", () -> {
+            indexMoreDocsAndRefresh();
+            // The warmer runs asynchronously off the refresh, so wait for a widening on a warmer thread.
+            try {
+                assertBusy(() -> assertThat(FdcDebug.counterOf("input.skipBufferpool.hookWidened"), greaterThan(0L)), 30, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                throw new AssertionError("no field data build observed after refresh with eager_global_ordinals", e);
+            }
+        });
+        assertThat(
+            "phase 3: a build must have widened after the refresh",
+            FdcDebug.counterOf("input.skipBufferpool.hookWidened"),
+            greaterThan(0L)
+        );
+        assertThat("phase 3: must emit evidence", p3, not(empty()));
+        String warmerThread = threadOf(firstWidened(p3));
+        logger.info("fdc-flow: PHASE 3 build ran on {}", warmerThread);
+        assertThat(
+            "phase 3: the build must run on the warmer pool, not the search pool; thread=" + warmerThread,
+            warmerThread,
+            containsString("[warmer]")
+        );
+        assertThat("phase 3: warmer and search must be different threads", warmerThread, not(equalTo(searchThread)));
+
+        // ================= PHASE 4: back on the search worker, still clean =================
+        List<String> p4 = phase(hookLogger, "4 search again after warmer", this::runPlainSearch);
+        assertThat(
+            "phase 4: the warmer's marker must not leak to the search pool; counters=" + FdcDebug.counters(),
+            FdcDebug.counterOf("input.skipBufferpool.hookWidened"),
+            equalTo(0L)
+        );
+        assertThat(
+            "phase 4: no read may take the bypass; counters=" + FdcDebug.counters(),
+            FdcDebug.counterOf("input.acquireBlock.BYPASS"),
+            equalTo(0L)
+        );
+        for (String line : p4) {
+            assertThat("phase 4: marker must still be clear on the search worker: " + line, line, containsString("marker=false"));
+            assertThat("phase 4: must be the SAME search worker as phase 1: " + line, line, containsString(searchThread));
+        }
+    }
+
+    /**
+     * Runs one phase with a clean counter and probe window, captures its EVIDENCE, and prints stack plus
+     * ThreadLocals for every decision it observed.
+     */
+    private List<String> phase(Logger hookLogger, String label, Runnable body) throws Exception {
+        final List<String> captured = new ArrayList<>();
+        logger.info("fdc-flow:");
+        logger.info("fdc-flow: ##################### PHASE {} #####################", label);
+        try (MockLogAppender appender = MockLogAppender.createForLoggers(hookLogger)) {
+            appender.addExpectation(collectEvidence(captured));
+            FdcDebug.resetCounters();
+            FdcDebug.resetCallsites();   // reopens the per-thread probe window
+            body.run();
+        }
+        logger.info("fdc-flow: PHASE {} -> {} decision(s) observed, counters={}", label, captured.size(), FdcDebug.counters());
+        logEvidence(captured);
+        return captured;
+    }
+
+    /** First line that actually widened, which is the one whose chain shows the build. */
+    private static String firstWidened(List<String> evidence) {
+        for (String line : evidence) {
+            if (line.contains("widened=true")) {
+                return line;
+            }
+        }
+        throw new AssertionError("no widened EVIDENCE line among: " + evidence);
+    }
+
+    /** Configured max size of a named thread pool, so the pinning this test relies on is asserted. */
+    private int threadPoolSize(String poolName) {
+        for (org.opensearch.action.admin.cluster.node.info.NodeInfo node : client()
+            .admin()
+            .cluster()
+            .prepareNodesInfo()
+            .clear()
+            .addMetric(org.opensearch.action.admin.cluster.node.info.NodesInfoRequest.Metric.THREAD_POOL.metricName())
+            .get()
+            .getNodes()) {
+            for (org.opensearch.threadpool.ThreadPool.Info info : node.getInfo(org.opensearch.threadpool.ThreadPoolInfo.class)) {
+                if (poolName.equals(info.getName())) {
+                    return info.getMax();
+                }
+            }
+        }
+        throw new AssertionError("no " + poolName + " thread pool reported");
+    }
+
+    /** New docs in a new segment, so the refresh gives the warmer something to build. */
+    private void indexMoreDocsAndRefresh() {
+        for (int i = 0; i < 50; i++) {
+            client().prepareIndex(INDEX).setId("warm-" + i).setSource(TEXT_FIELD, "warmer user " + (i % 7), "value", 1000 + i).get();
+        }
+        client().admin().indices().prepareRefresh(INDEX).get();
+    }
+
+    /** Collects EVIDENCE lines; assertions live at the call site so failures can report what was captured. */
+    private static MockLogAppender.LoggingExpectation collectEvidence(List<String> sink) {
+        return new MockLogAppender.LoggingExpectation() {
+            @Override
+            public void match(LogEvent event) {
+                String message = event.getMessage().getFormattedMessage();
+                if (message.contains("fdc-skipbufferpool EVIDENCE")) {
+                    sink.add(message);
+                }
+            }
+
+            @Override
+            public void assertMatched() {
+                // collection only
+            }
+        };
+    }
+
+    /** {@code thread=<name>} out of an EVIDENCE line. */
+    private static String threadOf(String evidenceLine) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("thread=(\\S+)").matcher(evidenceLine);
+        assertTrue("EVIDENCE line must carry a thread name: " + evidenceLine, m.find());
+        return m.group(1);
+    }
+
+    /** Configured size of the search pool, so the pinning this test relies on is asserted rather than assumed. */
+    private int searchThreadPoolSize() {
+        for (org.opensearch.action.admin.cluster.node.info.NodeInfo node : client()
+            .admin()
+            .cluster()
+            .prepareNodesInfo()
+            .clear()
+            .addMetric(org.opensearch.action.admin.cluster.node.info.NodesInfoRequest.Metric.THREAD_POOL.metricName())
+            .get()
+            .getNodes()) {
+            for (org.opensearch.threadpool.ThreadPool.Info info : node.getInfo(org.opensearch.threadpool.ThreadPoolInfo.class)) {
+                if ("search".equals(info.getName())) {
+                    return info.getMax();
+                }
+            }
+        }
+        throw new AssertionError("no search thread pool reported");
+    }
+
+    /** An ordinary search: no aggregation, so nothing builds field data. Request cache off per R53.1. */
+    private void runPlainSearch() {
+        SearchResponse response = client()
+            .prepareSearch(INDEX)
+            .setSize(10)
+            .setRequestCache(false)
+            .setQuery(org.opensearch.index.query.QueryBuilders.matchAllQuery())
+            .get();
+        assertNoFailures(response);
+        // At least the original corpus: a phase that ingests more docs before searching must not have to
+        // restate the expected count here.
+        assertThat(
+            "the plain search must match the corpus",
+            response.getHits().getTotalHits().value(),
+            greaterThanOrEqualTo((long) DOC_COUNT)
+        );
+    }
+
+    /**
+     * Prints each EVIDENCE line one frame per line, annotating the frames that carry the argument. A 24-frame
+     * chain on a single log line is unreadable, and the whole point of this output is that a reader can see
+     * for themselves that CORE marks, LUCENE sits in the middle, and the PLUGIN reads - all on one stack.
+     */
+    private void logEvidence(List<String> evidence) {
+        logger.info("fdc-flow: ===== {} EVIDENCE line(s) captured during the field data build =====", evidence.size());
+        for (int i = 0; i < evidence.size(); i++) {
+            String line = evidence.get(i);
+            int at = line.indexOf(" chain=");
+            String head = at < 0 ? line : line.substring(0, at);
+            String chain = at < 0 ? "" : line.substring(at + " chain=".length());
+            logger.info("fdc-flow:");
+            logger.info("fdc-flow: --- evidence #{}: {}", i + 1, head);
+            String[] frames = chain.split(" <- ");
+            for (int f = 0; f < frames.length; f++) {
+                String frame = frames[f].trim();
+                if (frame.isEmpty()) {
+                    continue;
+                }
+                logger.info("fdc-flow:   [{}] {}", String.format("%2d", f), frame);
+            }
+        }
+        logger.info("fdc-flow: ===== end of evidence =====");
+    }
 
     private void createIndexAndIngest() throws Exception {
         assertAcked(client().admin().indices().prepareCreate(INDEX).setSettings(cryptoIndexSettings()).get());

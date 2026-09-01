@@ -226,6 +226,10 @@ tasks.named('internalClusterTest').configure {
     captureFdcTestLogs(it, 'internalClusterTest')
     systemProperty 'tests.security.manager', 'false'
     systemProperty 'java.security.policy', 'test.policy'
+    // Diagnostics for the field-data marker tests. Bounded: the EVIDENCE line fires per derivation of a
+    // build (single digits per field/segment) and the probe is deduped to one line per thread.
+    systemProperty 'opensearch.store.fdcdebug.threadlocals', 'true'
+    systemProperty 'opensearch.store.fdcdebug.markerprobe', 'true'
     testLogging {
         events "passed", "skipped", "failed"
         showStandardStreams = true
@@ -234,7 +238,11 @@ tasks.named('internalClusterTest').configure {
         '--enable-native-access=ALL-UNNAMED',
         // cryptofs pool sizing requires an explicit -XX:MaxDirectMemorySize (PoolSizeCalculator fails
         // fast otherwise). The test cluster JVM does not set one by default, so provide it here.
-        '-XX:MaxDirectMemorySize=1g'
+        '-XX:MaxDirectMemorySize=1g',
+        // Lets FdcDebug#threadLocalsDump reflect into Thread.threadLocals. Diagnostic only, and inert
+        // unless -Dopensearch.store.fdcdebug.threadlocals=true; without this flag the dump reports
+        // InaccessibleObjectException instead of printing entries.
+        '--add-opens=java.base/java.lang=ALL-UNNAMED'
     ]
     // Runnable on demand (./gradlew internalClusterTest [--tests ...]) but kept OUT of check/build:
     // these real-cluster tests still need harness tuning (heap sizing, MaxDirectMemorySize, thread-leak

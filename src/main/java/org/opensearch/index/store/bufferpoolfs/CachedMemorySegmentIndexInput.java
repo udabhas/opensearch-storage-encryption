@@ -1104,6 +1104,12 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
      */
     boolean enableSkipBufferpool(String sliceDescription, long absoluteOffset, long length) {
         if (FielddataLoadContext.isFielddataLoad() == false) {
+            // Diagnostic only, and deduped to one line per thread per FdcDebug#resetCallsites window: without
+            // that this is the query hot path and would log per derivation. It exists so a run can SHOW that
+            // an ordinary search reaches this hook and reads false, rather than inferring it from silence.
+            if (FdcDebug.probeOnce()) {
+                emitMarkerEvidence(false, sliceDescription, absoluteOffset, length);
+            }
             return false;
         }
         // Make the totals available on a node without switching on the whole fdc-debug stream. Idempotent.
@@ -1123,7 +1129,40 @@ public class CachedMemorySegmentIndexInput extends IndexInput implements RandomA
                 path.getFileName(),
                 Thread.currentThread().getName()
             );
+        // EVIDENCE line, DEBUG-gated so it is free when off. The marker is a ThreadLocal, so it is only
+        // visible here if the whole chain from the mark site to this derivation ran on ONE thread. Printing
+        // the caller chain alongside the marker state makes that checkable rather than asserted: the chain
+        // must show the mark site (IndicesFieldDataCache), the uninversion (loadDirect) and the Lucene frames
+        // in between, all below this frame. Asserted by
+        // FieldDataCacheFlowIntegTests#testMarkerCrossesTheLuceneBoundaryDuringABuild.
+        if (FdcDebug.on(LOGGER)) {
+            emitMarkerEvidence(true, sliceDescription, absoluteOffset, length);
+        }
         return true;
+    }
+
+    /**
+     * One shape for both marker outcomes, so a widened derivation and a non-widened one are directly
+     * comparable in a log. Carries the thread identity, the parent's inherited decision, and the caller
+     * chain, then the exhaustive ThreadLocal dump on its own line because that is multi-line.
+     */
+    private void emitMarkerEvidence(boolean widened, String sliceDescription, long absoluteOffset, long length) {
+        FdcDebug
+            .log(
+                LOGGER,
+                "fdc-skipbufferpool EVIDENCE marker={} widened={} tid={} thread={} parentSkip={} desc={} off={} len={} ext={} chain={}",
+                FielddataLoadContext.isFielddataLoad(),
+                widened,
+                Thread.currentThread().threadId(),
+                FdcDebug.thread(),
+                skipBufferpool,
+                sliceDescription,
+                absoluteOffset,
+                length,
+                fdcExt,
+                FdcDebug.chain(24)
+            );
+        FdcDebug.log(LOGGER, "fdc-skipbufferpool THREADLOCALS {}", FdcDebug.threadLocalsDump());
     }
 
     /** Builds the actual sliced IndexInput. * */

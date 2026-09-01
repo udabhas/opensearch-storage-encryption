@@ -65,11 +65,23 @@ public final class FdcDebug {
      */
     private static final String PROP_POOL_STATE = "opensearch.store.fdcdebug.poolstate";
 
+    /** Exhaustive reflective dump of the calling thread's ThreadLocals. Diagnostic only; see {@link #threadLocalsDump()}. */
+    private static final String PROP_THREAD_LOCALS = "opensearch.store.fdcdebug.threadlocals";
+
+    /**
+     * Logs the derive-side marker decision for BOTH outcomes, deduped per thread, so a diagnostic run can
+     * see that an ordinary search reaches the hook and reads {@code false}. Off by default: without the
+     * dedupe this would be one line per derivation on the query hot path.
+     */
+    private static final String PROP_MARKER_PROBE = "opensearch.store.fdcdebug.markerprobe";
+
     private static final boolean FORCE = Boolean.parseBoolean(System.getProperty(PROP_FORCE, "false"));
     private static final boolean STACKS = Boolean.parseBoolean(System.getProperty(PROP_STACKS, "true"));
     private static final boolean HOT_STACKS = Boolean.parseBoolean(System.getProperty(PROP_HOT_STACKS, "false"));
     private static final int MAX_FRAMES = Integer.parseInt(System.getProperty(PROP_FRAMES, "24"));
     private static final boolean POOL_STATE = Boolean.parseBoolean(System.getProperty(PROP_POOL_STATE, "false"));
+    private static final boolean THREAD_LOCALS = Boolean.parseBoolean(System.getProperty(PROP_THREAD_LOCALS, "false"));
+    private static final boolean MARKER_PROBE = Boolean.parseBoolean(System.getProperty(PROP_MARKER_PROBE, "false"));
 
     /** Call-site hashes already emitted with a full chain. Bounded by the number of distinct paths. */
     private static final Set<Integer> SEEN = ConcurrentHashMap.newKeySet();
@@ -96,6 +108,8 @@ public final class FdcDebug {
      * one to every call site would push the check to places (the block cache) that have no business knowing
      * about tracing.
      */
+    private static final Set<Long> PROBE_SEEN = ConcurrentHashMap.newKeySet();
+
     private static volatile boolean counting = FORCE;
 
     /**
@@ -368,5 +382,115 @@ public final class FdcDebug {
     /** Clears the emitted-call-site set so a fresh run re-emits every chain. Test/diagnostic use. */
     public static void resetCallsites() {
         SEEN.clear();
+        PROBE_SEEN.clear();
     }
+
+    /**
+     * Exhaustive dump of EVERY {@code ThreadLocal} on the calling thread, both the ordinary and the
+     * inheritable map, by reflecting into {@code Thread.threadLocals}.
+     *
+     * <p>Diagnostic only, and OFF by default. Enable with
+     * {@code -Dopensearch.store.fdcdebug.threadlocals=true}, which also requires
+     * {@code --add-opens java.base/java.lang=ALL-UNNAMED} on the JVM - without it the reflective access
+     * throws and this returns the reason rather than failing the caller.
+     *
+     * <p>Deliberately not used for assertions anywhere. The output is dominated by entries that have
+     * nothing to do with this code - Lucene codec scratch, Netty buffers, randomized-testing seeds,
+     * MessageDigests, DeflateCompressor - so it is useful for answering "what else is on this thread"
+     * during an investigation and useless as a proof. The targeted state is logged by the caller instead.
+     *
+     * @return one {@code key=value} entry per line, or a single line explaining why it could not be read
+     */
+    public static String threadLocalsDump() {
+        if (THREAD_LOCALS == false) {
+            return "disabled (set -D" + PROP_THREAD_LOCALS + "=true)";
+        }
+        StringBuilder sb = new StringBuilder(512);
+        final Thread thread = Thread.currentThread();
+        sb.append("tid=").append(thread.threadId()).append(" name=").append(thread.getName());
+        int total = 0;
+        for (String field : new String[] { "threadLocals", "inheritableThreadLocals" }) {
+            try {
+                java.lang.reflect.Field mapField = Thread.class.getDeclaredField(field);
+                mapField.setAccessible(true);
+                Object map = mapField.get(thread);
+                if (map == null) {
+                    sb.append("\n  ").append(field).append(": (none)");
+                    continue;
+                }
+                java.lang.reflect.Field tableField = map.getClass().getDeclaredField("table");
+                tableField.setAccessible(true);
+                Object[] table = (Object[]) tableField.get(map);
+                sb.append("\n  ").append(field).append(": slots=").append(table == null ? 0 : table.length);
+                if (table == null) {
+                    continue;
+                }
+                java.lang.reflect.Field valueField = null;
+                for (Object entry : table) {
+                    if (entry == null) {
+                        continue;
+                    }
+                    if (valueField == null) {
+                        valueField = entry.getClass().getDeclaredField("value");
+                        valueField.setAccessible(true);
+                    }
+                    Object key = ((java.lang.ref.Reference<?>) entry).get();
+                    Object value = valueField.get(entry);
+                    total++;
+                    sb
+                        .append("\n    [")
+                        .append(total)
+                        .append("] key=")
+                        .append(key == null ? "<cleared weak ref>" : key.getClass().getName())
+                        .append(" value=")
+                        .append(describeValue(value));
+                }
+            } catch (RuntimeException | ReflectiveOperationException e) {
+                // InaccessibleObjectException without --add-opens; report it rather than throwing, so a
+                // missing JVM flag degrades this diagnostic instead of failing the operation being traced.
+                sb
+                    .append("\n  ")
+                    .append(field)
+                    .append(": UNREADABLE (")
+                    .append(e.getClass().getSimpleName())
+                    .append(": ")
+                    .append(e.getMessage())
+                    .append(")");
+            }
+        }
+        return sb.append("\n  entries=").append(total).toString();
+    }
+
+    /** Type plus a bounded rendering: a ThreadLocal value can be a huge buffer, and toString may be costly. */
+    private static String describeValue(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        String type = value.getClass().getName();
+        if (value instanceof byte[] a) {
+            return type + "(len=" + a.length + ")";
+        }
+        if (value instanceof Object[] a) {
+            return type + "(len=" + a.length + ")";
+        }
+        if (value instanceof Boolean || value instanceof Number || value instanceof CharSequence) {
+            String text = String.valueOf(value);
+            return type + "(" + (text.length() > 60 ? text.substring(0, 60) + "..." : text) + ")";
+        }
+        return type;
+    }
+
+    /** Whether the marker probe is enabled at all. See {@code opensearch.store.fdcdebug.markerprobe}. */
+    public static boolean markerProbe() {
+        return MARKER_PROBE;
+    }
+
+    /**
+     * True once per thread per {@link #resetCallsites()} window, so the probe can log a per-derivation
+     * decision without emitting a line for every derivation on the query hot path.
+     */
+    public static boolean probeOnce() {
+        return MARKER_PROBE && PROBE_SEEN.add(Thread.currentThread().threadId());
+    }
+
 }
