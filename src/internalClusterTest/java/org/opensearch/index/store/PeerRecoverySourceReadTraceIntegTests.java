@@ -58,33 +58,35 @@ import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
  *
  * <pre>
  * ./gradlew internalClusterTest --tests '*PeerRecoverySourceReadTraceIntegTests*' \
- *     -Dfdc.debug=true -Dfdc.hotstacks=true -Dfdc.poolstate=true -Dfdc.frames=40 \
- *     -Dfdc.run=peer-recovery-trace
+ *     -Dfdc.hotstacks=true -Dfdc.poolstate=true -Dfdc.frames=40 \
+ *     -Dpr.docs=60000 -Dpr.nocfs=true -Dfdc.run=peer-recovery-trace
  * </pre>
  *
- * {@code -Dfdc.debug=true} forces tracing on and emits at INFO; {@code -Dfdc.hotstacks=true} adds the
- * stack walk at per-block and per-read sites (diagnostic only — never while timing anything);
- * {@code -Dfdc.poolstate=true} inlines pool state at every derivation. Output:
- * {@code <workspace>/debug-internal-cluster-tests/peer-recovery-trace/<Class>.<method>.log}.
+ * <b>Deliberately no {@code -Dfdc.debug=true}</b> — see {@link #setStoreTracing}. The store packages are
+ * raised to DEBUG on the live cluster for the migration window only, so ingest is not traced.
+ * {@code -Dfdc.hotstacks=true} adds the stack walk at per-block and per-read sites (diagnostic only — never
+ * while timing anything); {@code -Dfdc.poolstate=true} inlines pool state at every derivation. Output:
+ * {@code <workspace>/debug-internal-cluster-tests/<fdc.run>/<Class>.<method>.log}.
  *
  * <h2>Two limits of this harness, stated up front</h2>
  * <ul>
  * <li>{@code FdcDebug} counters are <b>per-JVM</b> and {@code internalCluster} runs both nodes in one
  *     JVM, so every counter here is source+target combined. Attribute by the {@code path=} field (each
  *     node has its own data dir) or by {@code thread=}, never by a bare counter total.</li>
- * <li>Nothing here is a timing measurement. Tracing at INFO with stack walks changes the cost of every
- *     read; use it to establish <em>shape</em>, then measure cost separately with tracing off.</li>
+ * <li>Nothing here is a timing measurement. Tracing with stack walks changes the cost of every read; use it
+ *     to establish <em>shape</em>. The per-input {@code readNanos}/{@code acquireNanos} it records are for
+ *     comparing flows WITHIN one run, not for absolute cost.</li>
  * </ul>
  */
 @ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
-@TestLogging(value = "org.opensearch.index.store:DEBUG,"
-    + "org.opensearch.indices.recovery:TRACE,"
+@TestLogging(value = "org.opensearch.indices.recovery:TRACE,"
     + "org.opensearch.indices.replication:TRACE,"
     + "org.opensearch.indices.store:TRACE,"
     + "org.opensearch.index.shard:DEBUG,"
-    + "org.opensearch.indices.cluster:DEBUG", reason = "full recovery lifecycle (signal -> phase-1 copy -> cleanFiles -> source shard delete) alongside "
-        + "fdc-debug directory tracing, so route/IOContext/access-pattern can be read off one interleaved log")
+    + "org.opensearch.indices.cluster:DEBUG", reason = "full recovery lifecycle: signal -> phase-1 copy -> cleanFiles -> source shard delete. The store "
+        + "packages are deliberately NOT raised here - they are raised dynamically for the migration window "
+        + "only (see setStoreTracing), because tracing a whole ingest buries the window and pollutes timings")
 public class PeerRecoverySourceReadTraceIntegTests extends OpenSearchIntegTestCase {
 
     private static final String INDEX = "peer-recovery-trace";
@@ -179,6 +181,7 @@ public class PeerRecoverySourceReadTraceIntegTests extends OpenSearchIntegTestCa
         logger.info("fdc-trace PHASE=nodeB-joined nodeB={}", nodeB);
 
         // Open the measurement window as late as possible: everything before this is ingest/flush noise.
+        setStoreTracing(true);
         FdcDebug.resetCounters();
         FdcDebug.enableCounting();
         logger.info("fdc-trace PHASE=migration-window-open source={} target={}", nodeA, nodeB);
@@ -208,6 +211,8 @@ public class PeerRecoverySourceReadTraceIntegTests extends OpenSearchIntegTestCa
         logger.info("fdc-trace PHASE=source-shard-released node={}", nodeA);
 
         final Map<String, Long> counters = FdcDebug.counters();
+        setStoreTracing(false);
+        logger.info("fdc-trace PHASE=migration-window-closed");
         logger.info("fdc-trace PHASE=counters\n{}", renderCounters(counters));
 
         // Guard against a vacuously readable log: if the directory was never traced, the whole run is
@@ -228,6 +233,34 @@ public class PeerRecoverySourceReadTraceIntegTests extends OpenSearchIntegTestCa
             equalTo((long) NUM_DOCS)
         );
         logger.info("fdc-trace PHASE=done");
+    }
+
+    /**
+     * Raises (or resets) the store packages to DEBUG on the live cluster, so {@code fdc-debug} tracing covers
+     * the migration window and nothing else.
+     *
+     * <p>Why dynamic rather than {@code @TestLogging} or {@code -Dfdc.debug=true}: both are process-wide for
+     * the whole test, so a 60k-doc ingest gets fully traced. Measured: that produced a 365 MB trace whose
+     * on-disk content never even reached the migration window, because the Gradle worker then hung for 24
+     * minutes in output forwarding (MessageHub.stop -> awaitTermination) shipping it. It also puts tracing
+     * cost inside every timed region, which invalidates the per-input nanos this test records.
+     *
+     * <p>{@code FdcDebug.on} keys off {@code logger.isDebugEnabled()}, so flipping the level here enables the
+     * full trace - routes, call-site chains, per-block acquires, per-read access pattern, timing accumulators
+     * - for exactly the window. The copy opens its inputs INSIDE the window, so the per-input latches see the
+     * raised level.
+     *
+     * <p>Do NOT pass {@code -Dfdc.debug=true} with this test: it forces tracing on globally at INFO and
+     * defeats the scoping. {@code -Dfdc.hotstacks=true} is additive and still fine.
+     */
+    private void setStoreTracing(boolean on) {
+        Settings.Builder s = Settings.builder();
+        if (on) {
+            s.put("logger.org.opensearch.index.store", "DEBUG");
+        } else {
+            s.putNull("logger.org.opensearch.index.store");
+        }
+        client().admin().cluster().prepareUpdateSettings().setTransientSettings(s).get();
     }
 
     private void assertPrimaryOnNode(String expectedNodeName) {
