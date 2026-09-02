@@ -307,20 +307,26 @@ public class BufferPoolDirectory extends FSDirectory {
             return true;
         }
 
-        // Peer-recovery / segment-replication phase-1 file copy. Two signals, both required.
+        // Peer-recovery / segment-replication phase-1 file copy, identified by the SEQUENTIAL hint alone.
         //
-        // The hint is the cheap filter: core marks the copy's opens with DataAccessHint.SEQUENTIAL, which no
-        // other flow currently carries, so the walk below runs on a small minority of opens (measured: 20 of
-        // 108 opens in a relocation window) instead of every one. The walk is the precise part: SEQUENTIAL
-        // states an access PATTERN, and the bypass decision is about REUSE - a warmup scan is sequential and
-        // wants caching. Keying on the hint alone would silently retune the cache the day upstream tags any
-        // other sequential flow, which is a change we would not see. Requiring the caller as well means the
-        // predicate is "the recovery copy is reading", which is what we actually mean.
+        // Core marks the copy's opens with DataAccessHint.SEQUENTIAL. Of everything that reaches this method,
+        // that hint is currently unique to the copy: the only other producer of SEQUENTIAL at an openInput is
+        // IOContext.READONCE (which is SEQUENTIAL + ReadOnceHint), and a READONCE open is routed to the NIO
+        // path earlier in openInput and never gets here. MERGE likewise exits earlier. The two remaining
+        // SEQUENTIAL sites in Lucene (Lucene90CompressingStoredFieldsReader, Lucene99FlatVectorsReader) call
+        // updateIOContext on an already-open input rather than Directory.openInput, so they do not reach it
+        // either.
         //
-        // FAILS OPEN by design: if the hint stops arriving or the caller is renamed upstream, this returns
-        // false and the copy goes back to being pooled - a lost optimisation, never a correctness change.
-        // The contract tests in the plugin are what make that drift visible instead of silent.
-        if (StaticConfigs.recoveryCopyBypassEnabled() && hasSequentialHint(context) && calledByRecoveryFileCopy()) {
+        // KNOWN LIMITATION, accepted deliberately. SEQUENTIAL states an access PATTERN while the bypass
+        // decision is about REUSE, and the two are not the same - a sequential warmup scan wants caching. So
+        // the day upstream tags any other sequential flow that DOES reach this method, the cache is silently
+        // retuned for it. That risk is accepted in exchange for not coupling the plugin to a core class and
+        // method name; the contract tests pin the assumption so a violation shows up as a test failure rather
+        // than as an unexplained latency change.
+        //
+        // FAILS OPEN: if the hint stops arriving, this returns false and the copy goes back to being pooled -
+        // a lost optimisation, never a correctness change.
+        if (StaticConfigs.recoveryCopyBypassEnabled() && hasSequentialHint(context)) {
             return true;
         }
 
@@ -340,43 +346,6 @@ public class BufferPoolDirectory extends FSDirectory {
      */
     private static boolean hasSequentialHint(IOContext context) {
         return context != null && context.hints().contains(DataAccessHint.SEQUENTIAL);
-    }
-
-    /** Frames of the recovery/segment-replication copy that opens one input per file and streams it once. */
-    private static final String RECOVERY_COPY_CLASS = "org.opensearch.indices.replication.SegmentFileTransferHandler";
-    private static final String RECOVERY_COPY_METHOD = "onNewResource";
-
-    /**
-     * Walk budget. The copy's chain reaches {@code onNewResource} within ~6 frames
-     * ({@code BufferPoolDirectory.openInput} -> {@code HybridCryptoDirectory.openInput} ->
-     * {@code FilterDirectory.openInput} x3 -> caller), so a small budget is enough and bounds the cost of a
-     * walk that fires on a hinted open which turns out NOT to be the copy.
-     */
-    private static final int RECOVERY_WALK_FRAMES = 16;
-
-    /**
-     * True when this {@code openInput} is being called by the recovery/seg-rep phase-1 file copy.
-     *
-     * <p>Affordable here because it is gated on the hint and because {@code openInput} is a per-FILE event on
-     * this path: the copy opens each file exactly once and never clones or slices it, so there is no per-block
-     * or per-read amplification (unlike the field data build, where the equivalent check had to sit on the
-     * derive path and cost more than the bypass was worth).
-     */
-    private static boolean calledByRecoveryFileCopy() {
-        return StackWalker
-            .getInstance()
-            .walk(frames -> frames.limit(RECOVERY_WALK_FRAMES).anyMatch(f -> isRecoveryCopyFrame(f.getClassName(), f.getMethodName())));
-    }
-
-    /**
-     * Frame predicate, extracted so it is unit-testable without a real recovery on the stack.
-     *
-     * <p>Matches the ENCLOSING class name with {@code startsWith}, because the copy's open happens inside an
-     * anonymous subclass ({@code SegmentFileTransferHandler$1}) whose synthetic name is not part of any
-     * upstream contract, while the outer class and the method name are the stable parts.
-     */
-    static boolean isRecoveryCopyFrame(String className, String methodName) {
-        return className != null && className.startsWith(RECOVERY_COPY_CLASS) && RECOVERY_COPY_METHOD.equals(methodName);
     }
 
     /**

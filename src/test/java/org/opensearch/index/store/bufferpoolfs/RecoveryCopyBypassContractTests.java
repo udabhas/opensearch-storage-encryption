@@ -12,36 +12,33 @@ import org.apache.lucene.store.NoLockFactory;
 import org.apache.lucene.store.ReadOnceHint;
 import org.opensearch.index.store.CaffeineThreadLeakFilter;
 import org.opensearch.index.store.CryptoTestDirectoryFactory;
-import org.opensearch.indices.replication.SegmentFileTransferHandlerCallerDouble;
 import org.opensearch.test.OpenSearchTestCase;
 
 import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
 
 /**
  * Guards the peer-recovery-copy bypass in {@link BufferPoolDirectory#enableSkipBufferpool(String, IOContext)}
- * and, more importantly, the two <b>upstream contracts</b> it depends on.
+ * and, more importantly, the <b>upstream contract</b> it now rests on entirely.
  *
  * <h2>Why contract tests and not just behaviour tests</h2>
- * The bypass fires when a hint set by OpenSearch core meets a caller identified by name. Both are things this
- * plugin does not own:
+ * The bypass fires on a single signal this plugin does not own: the {@link DataAccessHint#SEQUENTIAL} hint that
+ * OpenSearch core attaches at {@code SegmentFileTransferHandler.onNewResource}. Keying on the hint alone is only
+ * sound because of an assumption about everything <em>else</em> that could carry it:
  *
  * <ul>
- * <li><b>Core contract:</b> the copy's {@code openInput} carries {@link DataAccessHint#SEQUENTIAL}
- *     (set at {@code SegmentFileTransferHandler.onNewResource}). If a version bump drops that hint, or moves it
- *     onto some other flow, the bypass either stops working or starts working somewhere it should not.</li>
- * <li><b>Lucene contract:</b> a SEQUENTIAL-hinted context must stay distinguishable from
- *     {@link IOContext#READONCE}. The routing in {@code openInput} sends READONCE to the NIO path <em>before</em>
- *     the bypass decision is reached, so if the two ever became reference-equal — or if READONCE stopped
- *     carrying {@code ReadOnceHint} — the copy would silently leave the buffer-pool implementation entirely,
- *     which is the opposite of the intent (keep the DirectIO block path, skip only the caching).</li>
+ * <li><b>Core contract:</b> the copy's {@code openInput} carries SEQUENTIAL. If a version bump drops the hint,
+ *     the bypass silently stops applying (fails open — a lost optimisation, not a correctness change).</li>
+ * <li><b>Lucene contract, load-bearing:</b> {@link IOContext#READONCE} <em>also</em> contains SEQUENTIAL (plus
+ *     {@link ReadOnceHint}). It is only harmless because {@code openInput} routes READONCE to the NIO path
+ *     <em>before</em> the bypass decision is reached. Two ways that can break: READONCE stops being
+ *     reference-identical at the routing check, or Lucene starts passing SEQUENTIAL at some other
+ *     {@code openInput} that does reach this method. Either would silently retune the cache for a flow that
+ *     wants it.</li>
  * </ul>
  *
- * A behaviour test alone would pass while the mechanism quietly stopped applying. These assert the
- * assumptions, so a breaking upstream change fails a test here instead of turning into an unexplained
- * cache-hit-rate change in production.
- *
- * <p>The detection <em>fails open</em> by design: no hint, or an unrecognised caller, means the copy stays
- * pooled. Every negative case below therefore asserts a lost optimisation, never a correctness change.
+ * The stack-walk that used to also require the caller was removed to avoid coupling the plugin to a core class
+ * and method name. These tests are what replaces it: they pin the assumption that makes the hint sufficient, so
+ * a breaking upstream change fails here instead of becoming an unexplained latency change in production.
  */
 @ThreadLeakFilters(filters = CaffeineThreadLeakFilter.class)
 public class RecoveryCopyBypassContractTests extends OpenSearchTestCase {
@@ -94,77 +91,73 @@ public class RecoveryCopyBypassContractTests extends OpenSearchTestCase {
     }
 
     /**
-     * Documents why the predicate reads hints by type rather than comparing against {@code IOContext.READONCE}:
-     * READONCE <em>also</em> contains SEQUENTIAL, so a reference check would answer a different question.
+     * The assumption the whole design now rests on. READONCE contains SEQUENTIAL, so keying on SEQUENTIAL alone
+     * is safe ONLY because READONCE is diverted earlier in {@code openInput} by an identity check. If this ever
+     * fails, that identity check is no longer reachable and READONCE opens would start taking the bypass.
      */
-    public void testReadOnceAlsoCarriesSequentialWhichIsWhyWeMatchByType() {
-        assertTrue(IOContext.READONCE.hints().contains(DataAccessHint.SEQUENTIAL));
+    public void testReadOnceCarriesSequentialAndIsIdentityComparable() {
+        assertTrue("READONCE carries SEQUENTIAL - this is why the hint alone is not self-evidently sufficient",
+            IOContext.READONCE.hints().contains(DataAccessHint.SEQUENTIAL));
         assertTrue(IOContext.READONCE.hints().contains(ReadOnceHint.INSTANCE));
-    }
-
-    // ---- caller detection ----
-
-    /** The frame matcher must tolerate the anonymous-subclass suffix the real copy runs inside. */
-    public void testFrameMatcherAcceptsAnonymousSubclassOfTheCopy() {
-        assertTrue(
-            BufferPoolDirectory.isRecoveryCopyFrame("org.opensearch.indices.replication.SegmentFileTransferHandler$1", "onNewResource")
-        );
-        assertTrue(
-            BufferPoolDirectory.isRecoveryCopyFrame("org.opensearch.indices.replication.SegmentFileTransferHandler", "onNewResource")
+        assertSame(
+            "READONCE must be a stable singleton: openInput diverts it by reference equality before the bypass decision",
+            IOContext.READONCE,
+            IOContext.READONCE
         );
     }
-
-    /** ...and must not fire for a different method on the same class, a different class, or nulls. */
-    public void testFrameMatcherRejectsEverythingElse() {
-        assertFalse(
-            "another method on the copy class is not the per-file open",
-            BufferPoolDirectory.isRecoveryCopyFrame("org.opensearch.indices.replication.SegmentFileTransferHandler$1", "nextChunkRequest")
-        );
-        assertFalse(
-            "a same-named method elsewhere must not match",
-            BufferPoolDirectory.isRecoveryCopyFrame("org.opensearch.index.engine.SomethingElse", "onNewResource")
-        );
-        assertFalse(BufferPoolDirectory.isRecoveryCopyFrame(null, "onNewResource"));
-    }
-
-    // ---- end-to-end predicate behaviour ----
 
     /**
-     * The whole point of requiring the caller as well as the hint: a hinted open from anywhere else keeps its
-     * cache. Without this, any future flow that upstream tags SEQUENTIAL would silently lose caching.
+     * MERGE must remain distinguishable by its Context enum rather than by hints, because {@code openInput}
+     * diverts it to the NIO path before the bypass decision too.
      */
-    public void testHintAloneDoesNotBypass() {
-        assertFalse(
-            "SEQUENTIAL states an access pattern, not absence of reuse - the hint alone must not bypass",
+    public void testMergeContextIsDistinguishableWithoutHints() {
+        assertSame(IOContext.Context.DEFAULT, SEQUENTIAL_CONTEXT.context());
+        assertNotSame(IOContext.Context.MERGE, SEQUENTIAL_CONTEXT.context());
+    }
+
+    // ---- predicate behaviour ----
+
+    /**
+     * The behaviour change from removing the stack walk: the hint alone is now sufficient. Previously this
+     * returned false unless {@code SegmentFileTransferHandler.onNewResource} was on the stack.
+     */
+    public void testSequentialHintAloneBypasses() {
+        assertTrue(
+            "the SEQUENTIAL hint is now the sole signal for the recovery-copy bypass",
             directory.enableSkipBufferpool("_0.cfs", SEQUENTIAL_CONTEXT)
         );
     }
 
-    /** A copy-shaped caller without the hint also keeps its cache — both signals are required. */
-    public void testRecoveryCallerWithoutHintDoesNotBypass() throws Exception {
-        assertFalse(
-            SegmentFileTransferHandlerCallerDouble.onNewResource(() -> directory.enableSkipBufferpool("_0.cfs", IOContext.DEFAULT))
-        );
+    /** No hint means no bypass, regardless of who is calling. */
+    public void testNoHintDoesNotBypass() {
+        assertFalse(directory.enableSkipBufferpool("_0.cfs", IOContext.DEFAULT));
     }
 
-    /** Both signals present: the copy bypasses. Exercises the real StackWalker, not a stand-in for it. */
-    public void testHintPlusRecoveryCallerBypasses() throws Exception {
-        assertTrue(
-            "hint + recovery caller is the case the bypass exists for",
-            SegmentFileTransferHandlerCallerDouble.onNewResource(() -> directory.enableSkipBufferpool("_0.cfs", SEQUENTIAL_CONTEXT))
-        );
+    /** A null context must not be treated as hinted. */
+    public void testNullContextDoesNotBypass() {
+        assertFalse(directory.enableSkipBufferpool("_0.cfs", null));
     }
 
-    /** The flag is the kill switch and the A/B lever; off must mean off even when both signals are present. */
-    public void testFlagOffDisablesTheBypassEntirely() throws Exception {
+    /** A RANDOM-hinted open is the opposite case and must keep its cache. */
+    public void testRandomHintDoesNotBypass() {
+        assertFalse(directory.enableSkipBufferpool("_0.cfs", IOContext.DEFAULT.withHints(DataAccessHint.RANDOM)));
+    }
+
+    /** The flag is the kill switch and the A/B lever; off must mean off even with the hint present. */
+    public void testFlagOffDisablesTheBypassEntirely() {
         StaticConfigs.setRecoveryCopyBypassEnabled(false);
-        assertFalse(
-            SegmentFileTransferHandlerCallerDouble.onNewResource(() -> directory.enableSkipBufferpool("_0.cfs", SEQUENTIAL_CONTEXT))
-        );
+        assertFalse(directory.enableSkipBufferpool("_0.cfs", SEQUENTIAL_CONTEXT));
     }
 
     /** An ordinary search-shaped open is untouched by any of this. */
     public void testPlainDefaultOpenStillPooled() {
         assertFalse(directory.enableSkipBufferpool("_0.cfs", IOContext.DEFAULT));
+    }
+
+    /** The decision must not depend on the file name, only on the context. */
+    public void testDecisionIsIndependentOfFileName() {
+        assertTrue(directory.enableSkipBufferpool("_0.tim", SEQUENTIAL_CONTEXT));
+        assertTrue(directory.enableSkipBufferpool("_99.doc", SEQUENTIAL_CONTEXT));
+        assertFalse(directory.enableSkipBufferpool("_0.tim", IOContext.DEFAULT));
     }
 }
