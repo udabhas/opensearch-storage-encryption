@@ -96,8 +96,10 @@ public class RecoveryCopyBypassContractTests extends OpenSearchTestCase {
      * fails, that identity check is no longer reachable and READONCE opens would start taking the bypass.
      */
     public void testReadOnceCarriesSequentialAndIsIdentityComparable() {
-        assertTrue("READONCE carries SEQUENTIAL - this is why the hint alone is not self-evidently sufficient",
-            IOContext.READONCE.hints().contains(DataAccessHint.SEQUENTIAL));
+        assertTrue(
+            "READONCE carries SEQUENTIAL - this is why the hint alone is not self-evidently sufficient",
+            IOContext.READONCE.hints().contains(DataAccessHint.SEQUENTIAL)
+        );
         assertTrue(IOContext.READONCE.hints().contains(ReadOnceHint.INSTANCE));
         assertSame(
             "READONCE must be a stable singleton: openInput diverts it by reference equality before the bypass decision",
